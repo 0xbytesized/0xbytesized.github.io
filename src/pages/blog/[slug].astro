@@ -6,16 +6,17 @@ export async function getStaticPaths() {
   const posts = await getCollection('blog');
   return posts.map((post) => ({
     params: { slug: post.id },
-    props: post,
+    props: { post, slug: post.id },
   }));
 }
 
-type Props = CollectionEntry<'blog'>;
+type Props = { post: CollectionEntry<'blog'>; slug: string };
 
-const post = Astro.props;
+const { post, slug } = Astro.props;
 const { Content } = await render(post);
+const ogImage = `/og/${slug}.png`;
 ---
 
-<BlogPost title={post.data.title} date={post.data.date} tags={post.data.tags} excerpt={post.data.excerpt}>
+<BlogPost title={post.data.title} date={post.data.date.toISOString()} tags={post.data.tags} excerpt={post.data.excerpt} slug={slug} ogImage={ogImage}>
   <Content />
 </BlogPost>

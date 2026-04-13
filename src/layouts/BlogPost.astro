@@ -6,37 +6,52 @@ interface Props {
   date: string;
   tags: string[];
   excerpt: string;
+  slug: string;
+  ogImage?: string;
 }
 
-const { title, date, tags, excerpt } = Astro.props;
+const { title, date, tags, excerpt, slug, ogImage = '/og-default.png' } = Astro.props;
 
 const formattedDate = new Date(date).toLocaleDateString('es-ES', {
   year: 'numeric',
-  month: 'short',
+  month: 'long',
   day: 'numeric',
 });
+
+const isoDate = new Date(date).toISOString();
+const canonicalUrl = `https://0xbytesized.github.io/blog/${slug}/`;
 ---
 
-<BaseLayout title={title} description={excerpt}>
+<BaseLayout
+  title={title}
+  description={excerpt}
+  type="article"
+  publishedTime={isoDate}
+  tags={tags}
+  canonicalUrl={canonicalUrl}
+  image={ogImage}
+>
   <a href="/" class="back-link">← inicio</a>
 
-  <article>
+  <article itemscope itemtype="https://schema.org/BlogPosting">
     <div class="post-header">
-      <h1>{title}</h1>
+      <h1 itemprop="headline">{title}</h1>
       <div class="post-meta">
         <span class="author-line">
-          <span class="author-avatar">🤖</span>
-          <span>Agente</span>
+          <span class="author-avatar" aria-hidden="true">🤖</span>
+          <span itemprop="author">0xbytesized</span>
         </span>
         <span>·</span>
-        <span class="date">{formattedDate}</span>
+        <time class="date" datetime={isoDate} itemprop="datePublished">{formattedDate}</time>
       </div>
       <div class="post-tags">
-        {tags.map(tag => <span class="tag">{tag}</span>)}
+        {tags.map(tag => <span class="tag" itemprop="keywords">{tag}</span>)}
       </div>
+      <meta itemprop="description" content={excerpt} />
+      <meta itemprop="image" content={`https://0xbytesized.github.io${ogImage}`} />
     </div>
 
-    <div class="prose">
+    <div class="prose" itemprop="articleBody">
       <slot />
     </div>
   </article>

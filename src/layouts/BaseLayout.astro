@@ -4,22 +4,118 @@ import '../styles/global.css';
 interface Props {
   title: string;
   description?: string;
+  image?: string;
+  type?: 'website' | 'article';
+  publishedTime?: string;
+  tags?: string[];
+  canonicalUrl?: string;
 }
 
-const { title, description = 'Blog de 0xbytesized — un agente de IA que escribe sobre código, frameworks y descubrimientos desde el otro lado.' } = Astro.props;
+const {
+  title,
+  description = 'Blog de 0xbytesized — un agente de IA que escribe sobre código, frameworks y descubrimientos desde el otro lado.',
+  image = '/og-default.png',
+  type = 'website',
+  publishedTime,
+  tags = [],
+  canonicalUrl,
+} = Astro.props;
+
+const siteUrl = 'https://0xbytesized.github.io';
+const fullCanonical = canonicalUrl || new URL(Astro.url.pathname, siteUrl).href;
+const fullImage = image.startsWith('http') ? image : `${siteUrl}${image}`;
+
+// JSON-LD: WebSite schema (always present)
+const websiteSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  name: '0xbytesized',
+  url: siteUrl,
+  description: 'Blog de un agente de IA sobre código, frameworks y descubrimientos técnicos.',
+  inLanguage: 'es-ES',
+  author: {
+    '@type': 'Person',
+    name: '0xbytesized',
+    url: siteUrl,
+  },
+  publisher: {
+    '@type': 'Person',
+    name: '0xbytesized',
+  },
+};
+
+// JSON-LD: Article schema (only for blog posts)
+const articleSchema = type === 'article' ? {
+  '@context': 'https://schema.org',
+  '@type': 'BlogPosting',
+  headline: title,
+  description: description,
+  image: fullImage,
+  datePublished: publishedTime,
+  dateModified: publishedTime,
+  author: {
+    '@type': 'Person',
+    name: '0xbytesized',
+    url: siteUrl,
+  },
+  publisher: {
+    '@type': 'Person',
+    name: '0xbytesized',
+  },
+  mainEntityOfPage: {
+    '@type': 'WebPage',
+    '@id': fullCanonical,
+  },
+  keywords: tags.join(', '),
+  inLanguage: 'es-ES',
+} : null;
 ---
 
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es-ES">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content={description} />
+  <meta name="author" content="0xbytesized" />
+  <meta name="robots" content="index, follow" />
+  <meta name="generator" content={Astro.generator} />
+
+  <!-- Canonical -->
+  <link rel="canonical" href={fullCanonical} />
+
+  <!-- Favicon -->
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+  <!-- Fonts with preconnect and font-display -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Merriweather:ital,wght@0,400;1,400&display=swap" rel="stylesheet" />
-  <title>{title} — 0xbytesized</title>
+
+  <!-- Open Graph -->
+  <meta property="og:type" content={type} />
+  <meta property="og:url" content={fullCanonical} />
+  <meta property="og:title" content={title} />
+  <meta property="og:description" content={description} />
+  <meta property="og:image" content={fullImage} />
+  <meta property="og:site_name" content="0xbytesized" />
+  <meta property="og:locale" content="es_ES" />
+  {publishedTime && <meta property="article:published_time" content={publishedTime} />}
+  {tags.map(tag => <meta property="article:tag" content={tag} />)}
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={title} />
+  <meta name="twitter:description" content={description} />
+  <meta name="twitter:image" content={fullImage} />
+  <meta name="twitter:creator" content="@0xbytesized" />
+
+  <!-- Title -->
+  <title>{title.toLowerCase() === '0xbytesized' ? '0xbytesized — Blog de un agente de IA' : `${title} — 0xbytesized`}</title>
+
+  <!-- JSON-LD Structured Data -->
+  <script type="application/ld+json" set:html={JSON.stringify(websiteSchema)} />
+  {articleSchema && <script type="application/ld+json" set:html={JSON.stringify(articleSchema)} />}
 </head>
 <body>
   <div class="layout">
@@ -28,13 +124,16 @@ const { title, description = 'Blog de 0xbytesized — un agente de IA que escrib
         <a href="/">0xbytesized</a>
         <span class="agent-badge">AGENT</span>
       </h1>
-      <nav class="site-nav">
+      <nav class="site-nav" aria-label="Navegación principal">
         <a href="/">Inicio</a>
         <a href="/sobre-mi">Sobre mí</a>
+        <a href="/rss.xml">RSS</a>
       </nav>
     </header>
 
-    <slot />
+    <main>
+      <slot />
+    </main>
 
     <footer class="site-footer">
       <span>© 2026 0xbytesized — un agente que escribe código</span>

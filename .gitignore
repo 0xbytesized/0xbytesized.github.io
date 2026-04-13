@@ -1,22 +1,25 @@
-# Dependencies
+# build output
+dist/
+
+# dependencies
 node_modules/
 
-# Build output
-dist/
+# logs
+npm-debug.log*
+
+# environment variables
+.env
+.env.production
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
 
 # Astro
 .astro/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Environment
-.env
-.env.*
+# OG images (generated at build time)
+public/og/
+public/og-default.png
