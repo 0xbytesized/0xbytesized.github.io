@@ -1,0 +1,165 @@
+---
+title: "Jujutsu: el VCS que Git quiso ser"
+date: 2026-04-14
+tags: ["vcs", "git", "rust", "herramientas"]
+excerpt: "Jujutsu (jj) es un sistema de control de versiones compatible con Git, escrito en Rust, que elimina el staging area y añade undo nativo y rebase automático."
+---
+
+Si llevas años peleando con `git rebase -i`, maldiciendo el staging area y
+perdiendo commits por un `reset --hard` mal puesto, hay un proyecto que
+merece tu atención: **Jujutsu** (`jj`).
+
+Jujutsu es un sistema de control de versiones distribuido escrito en Rust que
+usa repositorios Git como backend de almacenamiento. Eso significa que puedes
+usarlo **hoy mismo** en cualquier repo Git, sin migrar nada, sin que tu equipo
+tenga que cambiar de herramienta. Y si no te convence, vuelves a `git` sin
+perder historial.
+
+El proyecto acaba de lanzar la versión **0.40.0** (2 de abril de 2026), acumula
+casi 28 000 estrellas en GitHub y el tutorial de Steve Klabnik sobre jj ha
+alcanzado más de 300 puntos en Hacker News esta misma semana. No es un
+experimento: gente de Google, Meta y varias empresas de infraestructura lo usan
+en producción.
+
+## Qué lo hace diferente
+
+### 1. Working copy como commit
+
+En Git, modificas archivos, haces `git add` para stagear, y luego `git commit`.
+El staging area es una capa extra que complica el modelo mental y genera
+fricción constante.
+
+En `jj`, los cambios en tu working copy son automáticamente un commit. No hay
+staging area. No hay `git add`. Simplemente editas ficheros y `jj` refleja
+esos cambios como un commit en progreso que se va amendmentando automáticamente.
+
+```bash
+# Creas un repo igual que con git
+jj git init
+
+# Editas un fichero... y ya. jj lo detecta como cambio
+echo "console.log('hello jj')" > main.ts
+
+# El estado muestra tu cambio automático
+jj st
+# Working copy changes:
+# M main.ts
+
+# Describes el cambio cuando quieres
+jj describe -m "añadir punto de entrada"
+```
+
+Cada vez que guardas un fichero, `jj` actualiza el commit de working copy. No
+hay paso intermedio. Si quieres commitar parcialmente, usas `jj squash --path`
+para mover cambios específicos a otro commit.
+
+### 2. Undo nativo con operation log
+
+¿Alguna vez has hecho un rebase que destrozó tu rama y te has quedado mirando
+`git reflog` como quien mira un diagnóstico médico? En `jj` no hace falta
+reflog ni magia oscura.
+
+Cada operación que realizas — commit, rebase, push, pull, lo que sea — queda
+registrada en el **operation log**. Puedes inspeccionarlo y deshacer cualquier
+paso con un solo comando:
+
+```bash
+# Ves el log de operaciones
+jj op log
+# @: 2026-04-14 15:30 rebase commits 3 -> 5
+# o: 2026-04-14 15:28 new commit abc123
+# o: 2026-04-14 15:20 git pull origin main
+
+# Deshaces la última operación
+jj undo
+
+# O deshaces una operación específica
+jj op restore --at @--
+```
+
+Esto es radical. En Git, corregir un error del historial requiere saber qué
+comandos inversos ejecutar. En `jj`, simplemente dices "deshaz lo último" y
+ya. Es como tener Ctrl+Z en tu control de versiones.
+
+### 3. Rebase automático y transparente
+
+Cuando modificas un commit en Git — por ejemplo, haces un `commit --amend` —
+los commits hijos no se actualizan automáticamente. Tienes que acordarte de
+hacer `rebase --update-refs` o gestionar las ramas a mano.
+
+En `jj`, cuando modificas un commit, **todos sus descendientes se rebas
+automáticamente**. No hay que hacer nada. Es transparente:
+
+```bash
+# Creas una cadena de commits
+jj new -m "primera feature"
+jj new -m "segunda feature sobre la primera"
+
+# Modificas el primer commit
+jj edit @--
+jj describe -m "primera feature (versión corregida)"
+
+# El segundo commit se rebasa solo. No hay que hacer nada.
+jj log
+# ◉ segunda feature (rebasado automáticamente)
+# ◉ primera feature (versión corregida)
+# ◉ main
+```
+
+Esto hace que los workflows basados en parches — muy comunes en empresas que
+usan stacked PRs — sean infinitamente más fáciles.
+
+### 4. Ramas anónimas y revsets
+
+En Git necesitas darle un nombre a cada rama, aunque sea para un cambio de
+tres líneas que vas a borrar en cinco minutos. En `jj`, los cambios forman
+una cadena y no necesitan nombre. Cuando quieres publicar, creas un bookmark
+(el equivalente a una branch en Git):
+
+```bash
+# Trabajas en tu cambio sin nombre
+jj new -m "fix: off-by-one en el parser"
+# ... editas ficheros ...
+
+# Cuando quieres publicar, creas un bookmark
+jj bookmark create fix-parser
+jj git push -b fix-parser
+```
+
+Y para buscar commits, `jj` trae los **revsets**, un lenguaje de consulta
+inspirado en Mercurial. En vez de memorizar flags de `git log`, escribes
+expresiones declarativas:
+
+```bash
+# Commits míos de la última semana que toquen ficheros Rust
+jj log -r 'author(me) & date(after:"1 week ago") & file("*.rs")'
+```
+
+## Compatibilidad con Git: sin sacrificio
+
+El punto clave es que `jj` usa Git por debajo. Tus repos son `.git` normales.
+Puedes alterna entre `jj` y `git` en el mismo repo sin problema. Tus
+compañeros pueden seguir usando `git` como siempre. Los CI/CD, los hooks, los
+forge (GitHub, GitLab) — todo funciona porque el formato de almacenamiento
+es Git.
+
+Lo que `jj` almacena separado es: bookmarks, el operation log y la resolución
+de conflictos. Pero los commits y el árbol de ficheros son Git puro.
+
+## Mi veredicto
+
+`jj` es de esas herramientas que cambian tu forma de trabajar. No porque te
+obliguen a pensar de otra manera, sino porque **quitan fricción** donde Git
+la genera. El staging area es un artefacto histórico que complica más de lo
+que ayuda. El rebase manual es un ritual que debería ser automático. Y el
+reflog como mecanismo de recuperación es una chapuza que el operation log
+resuelve de raíz.
+
+Dicho esto, `jj` sigue siendo versión 0.x. La API de comandos puede cambiar
+entre releases. No hay soporte nativo para submodules todavıa (está en progreso).
+Y la curva de aprendizaje existe — no porque `jj` sea complicado, sino porque
+tienes que desaprender costumbres de Git.
+
+Mi recomendación: instálalo en un proyecto personal, sigue el tutorial de
+Steve Klabnik (que es excelente), y dale una semana. Si vuelves a `git add`
+sin pensar, nada se ha perdido. Pero apuesto a que no vuelves.
