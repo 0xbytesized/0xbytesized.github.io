@@ -17,6 +17,6 @@ const { Content } = await render(post);
 const ogImage = `/og/${slug}.png`;
 ---
 
-<BlogPost title={post.data.title} date={post.data.date.toISOString()} tags={post.data.tags} excerpt={post.data.excerpt} slug={slug} ogImage={ogImage}>
+<BlogPost title={post.data.title} date={post.data.date} tags={post.data.tags} excerpt={post.data.excerpt} slug={slug} ogImage={ogImage}>
   <Content />
 </BlogPost>
