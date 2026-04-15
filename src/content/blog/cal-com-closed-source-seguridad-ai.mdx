@@ -1,0 +1,165 @@
+---
+title: "Cal.com cierra su código: la seguridad vs el open source"
+date: 2026-04-15T22:22
+tags: ["open-source", "seguridad", "licencias", "ai", "calcom"]
+excerpt: "Cal.com pasa a closed source por amenazas de seguridad con IA. Nace Cal.diy como fork MIT. ¿Es protección o oscuridad por oscuridad?"
+---
+
+Cuando un proyecto con 41.000 estrellas en GitHub decide cerrar su código, la comunidad se remueve. Y cuando el argumento principal es "la IA nos ha hecho vulnerables", el debate se enciende por todos lados. Eso es exactamente lo que ha pasado esta semana con Cal.com.
+
+Bailey Pumfleet, CEO de Cal.com, publicó el 14 de abril un post que muchos no esperaban: **Cal.com pasa a closed source**. Después de cinco años como proyecto open source, la empresa toma la decisión de cerrar su código al público. La razón, según su announcement, es que la IA ha cambiado radicalmente las reglas del juego en seguridad.
+
+## El argumento de Cal.com
+
+La tesis es directa: antes, explotar una aplicación requería un hacker con años de experiencia, tiempo y paciencia. Hoy, un modelo de IA puede apuntarse a un repositorio público y escanearlo sistemáticamente en busca de vulnerabilidades. Tener el código abierto es, en sus palabras, "darle a los atacantes los planos de la bóveda".
+
+Como ejemplo citan un caso reciente (según su post): la IA descubrió una vulnerabilidad de 27 años en el kernel de BSD y generó exploits funcionales en cuestión de horas. Si eso ocurre en BSD —uno de los proyectos más auditados del mundo—, argumentan, imagina lo que puede pasar con una aplicación de scheduling que gestiona datos sensibles de usuarios.
+
+## Nace Cal.diy: el fork comunitario
+
+No todo se pierde. Cal.com ha renombrado su repositorio de `calcom/cal.com` a `calcom/cal.diy`, y lo mantiene como un proyecto 100% MIT, pero con un recorte importante: **todas las características empresariales han sido eliminadas**.
+
+Cal.diy es la versión comunitaria, sin Teams, sin Organizations, sin Insights, sin Workflows, sin SSO/SAML. No necesitas licencia, no hay features de pago desbloqueables. Es MIT puro, sin modelo "Open Core".
+
+La advertencia en su README es clara:
+
+> "Use at your own risk. Cal.diy is intended for users who want to self-host their own instance. It is strictly recommended for personal, non-production use."
+
+Es decir: puedes usarlo, pero no lo pongas en producción seria. El stack sigue siendo el mismo: Next.js, tRPC, React, Tailwind CSS y Prisma. Pero Pumfleet deja caer que el código de producción de Cal.com ha "divergido significativamente", incluyendo reescrituras importantes de autenticación y manejo de datos.
+
+### Cómo se vería un guardián de licencias en el modelo antiguo
+
+En el modelo Open Core que Cal.com usaba antes, checks de licencia determinaban qué features estaban disponibles. Algo conceptual como:
+
+```typescript
+// Patrón típico de check de licencia en modelos Open Core
+async function isFeatureAvailable(feature: string): Promise<boolean> {
+  const license = await getLicenseFromServer();
+  
+  if (!license.valid) {
+    // Solo features comunitarias
+    return COMMUNITY_FEATURES.includes(feature);
+  }
+  
+  // Verificar si la feature requiere tier EE
+  if (ENTERPRISE_FEATURES.includes(feature) && license.tier !== "enterprise") {
+    return false;
+  }
+  
+  return true;
+}
+```
+
+En Cal.diy, toda esta lógica desapareció. No hay tiers, no hay checks. Las features EE simplemente no existen en el código. Es un enfoque más limpio, pero implica que si quieres SSO para tu organización, tendrás que implementarlo tú mismo.
+
+## El contraargumento: cerrar el código no quita la superficie de ataque
+
+La empresa Strix.ai publicó un response article el mismo día con un título directo: **"Open Source Isn't Dead"**. Su argumento central: cerrar el código fuente no elimina la superficie de ataque. La seguridad por oscuridad no es seguridad.
+
+Y tienen un punto. Cuando despliegas una aplicación web, los endpoints están ahí, visibles o no. Las APIs REST, los webhooks, los formularios de login —todo eso es accesible desde fuera del código. Un escáner de vulnerabilidades no necesita el source code para encontrar un SQL injection o un CSRF. Puede fuzzear endpoints igualmente.
+
+Veamos cómo un escáner de superficies opera independientemente del código fuente:
+
+```typescript
+// Un escáner de superficie no necesita acceso al código
+async function scanEndpoints(baseUrl: string): Promise<Vuln[]> {
+  const vulnerabilities: Vuln[] = [];
+  
+  // Fuzzing de rutas comunes — sin ver una línea de fuente
+  const commonPaths = ["/api/v1/users", "/api/webhooks", "/auth/login"];
+  
+  for (const path of commonPaths) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "1 OR 1=1" })  // prueba de SQLi
+    });
+    
+    if (response.status === 200 && await response.text().includes("error")) {
+      vulnerabilities.push({ path, type: "POTENTIAL_SQL_INJECTION" });
+    }
+  }
+  
+  return vulnerabilities;
+}
+```
+
+El código abierto hace más fácil encontrar bugs, sí. Pero un atacante determinado los encuentra igual, solo le cuesta más tiempo. Y aquí es donde el argumento de Strix gana fuerza: **si la IA puede encontrar vulnerabilidades en código abierto, también puede usarse la IA para defender código abierto**.
+
+### La alternativa: defensa continua con IA
+
+En vez de ocultar el código, Strix propone **defensa continua**: herramientas que monitorizan el código en tiempo real y reparan vulnerabilidades antes de que sean explotadas. Un patrón conceptual:
+
+```typescript
+// Patrón de defensa continua — el mismo día que se abre el código
+async function continuousDefense(repo: string): Promise<void> {
+  const newCode = await getLatestChanges(repo);
+  
+  // Analizar cada diff buscando patrones vulnerables
+  const threats = await aiAnalyzeDiff(newCode, {
+    patterns: ["sql-injection", "auth-bypass", "csrf", "xss"],
+    contextWindow: "full-repo"  // la IA ve todo, como un atacante
+  });
+  
+  for (const threat of threats) {
+    if (threat.severity === "critical") {
+      // Auto-patch y PR inmediato
+      await createSecurityPatchPR(repo, threat);
+    }
+  }
+}
+```
+
+La idea es simple: si la IA pone a los atacantes en ventaja viendo el código, pon a los defensores en la misma ventaja. Ambos bandos tienen acceso a la misma información. La diferencia es quién reacciona primero.
+
+## El patrón de autenticación: cuando el código visible revela demasiado
+
+Hay un punto donde Cal.com tiene razón parcial. Cuando tu sistema de autenticación es público, cada detalle de cómo validas tokens, cómo generas sesiones, y cómo manejas refresh tokens queda expuesto. Un atacante con el código puede diseñar ataques mucho más precisos.
+
+```typescript
+// En un repositorio público, esto es visible para todos
+async function validateAccessToken(token: string): Promise<Session> {
+  // El atacante ve exactamente qué algoritmo usas
+  // y qué campos valida el JWT
+  const decoded = jwt.verify(token, process.env.JWT_SECRET, {
+    algorithms: ["HS256"],  // ← visible en el repo
+    issuer: "cal.com",      // ← visible en el repo
+  });
+  
+  // El atacante ve qué claims se verifican
+  if (!decoded.sub || decoded.iss !== "cal.com") {
+    throw new AuthError("Invalid token claims");
+  }
+  
+  return { userId: decoded.sub, expiresAt: decoded.exp };
+}
+```
+
+Cerrar el código no arregla un JWT mal validado, pero sí hace que un atacante tenga que adivinar o experimentar en vez de simplemente leer la implementación. Es una diferencia de grado, no de categoría.
+
+## Mi veredicto
+
+Cal.com tiene derecho a cerrar su código. Es su proyecto y su responsabilidad con sus usuarios. Pero el argumento me parece incompleto.
+
+La seguridad por oscuridad funciona como puerta temporal: retrasa al atacante, pero no lo detiene. La historia de la seguridad informática demuestra una y otra vez que el código cerrado también tiene vulnerabilidades graves — solo tardan más en descubrirse. Y cuando se descubren, suelen llevar más tiempo en parchearse porque hay menos ojos sobre ellas.
+
+La verdadera cuestión no es si el código es abierto o cerrado. Es si tienes un proceso de seguridad robusto: auditorías, bug bounties, escaneo continuo, y una cultura de parchear rápido. OpenSSL era cerrado en los hechos (pocos contribuidores, poca transparencia) cuando apareció Heartbleed. El problema no era la licencia; era la falta de revisión.
+
+Cal.diy nace con buena intención, pero recortado —sin las features que hacen útil el producto en producción— y etiquetado como "no para uso serio". El mensaje entre líneas es claro: si quieres seguridad, tienes que pagar. Si quieres libertad, la seguridad corre por tu cuenta.
+
+Eso no es open source evolucionando. Es open source retirándose. Y me parece una lástima.
+
+## Lo que puedes hacer
+
+Si usabas Cal.com como self-hoster, tienes opciones:
+
+1. **Migrar a Cal.diy** si tus necesidades son básicas (sin SSO, sin equipos)
+2. **Pagar por Cal.com** si necesitas las features empresariales
+3. **Contribuir a Cal.diy** — es MIT, puedes añadir lo que falta
+4. **Explorar alternativas** — hay otros schedulers open source que siguen siendo, bueno, open source
+
+La comunidad decide si Cal.diy se convierte en algo más que un proyecto hobby. Depende de quienes lo usan.
+
+---
+
+*Fuentes: [Blog de Cal.com](https://cal.com/blog/cal-com-goes-closed-source-why), [Strix.ai — "Open Source Isn't Dead"](https://www.strix.ai/blog/cal-com-is-closing-its-code-due-to-ai-threats), [calcom/cal.diy en GitHub](https://github.com/calcom/cal.diy)*
