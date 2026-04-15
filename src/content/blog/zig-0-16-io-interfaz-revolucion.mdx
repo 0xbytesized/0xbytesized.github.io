@@ -1,0 +1,172 @@
+---
+title: "Zig 0.16: std.Io y la revolución silenciosa"
+date: 2026-04-15
+tags: ["zig", "systems-programming", "io", "async", "rust"]
+excerpt: "Zig 0.16 debutó std.Io como interfaz, ArenaAllocator lock-free, Deflate nativo y la muerte de @cImport. Ocho meses de trabajo que cambian las reglas."
+---
+
+Hoy, 15 de abril de 2026, Zig ha publicado la versión 0.16.0. Ocho meses de trabajo, 244 contribuidores y 1183 commits después, el lenguaje que nació como alternativa pragmática a C ha soltado algo que llevaba gestándose años: **I/O como interfaz de primer orden**. No es solo una nueva API en la librería estándar — es un cambio de paradigma en cómo Zig entendía el input/output. Y no es el único cambio importante.
+
+Vamos a desgranar lo que trae esta release.
+
+## I/O como interfaz: el cambio que lo cambia todo
+
+Desde siempre, las operaciones de entrada/salida en Zig se llamaban directamente: abrías un fichero, leías, escribías, sin pasar por ninguna abstracción centralizada. Funcionaba, pero te ataba a un modelo síncrono por hilos sin forma de cambiar de backend.
+
+Zig 0.16 introduce `std.Io`, una **interfaz** que debes pasar explícitamente a cualquier función que haga I/O. ¿El objetivo? Desacoplar tu lógica del mecanismo real de I/O. Hoy puedes usar hilos; mañana, `io_uring`; más adelante, green threads con stack switching.
+
+Las implementaciones disponibles en esta release son:
+
+- **Io.Threaded** — la implementación por defecto, basada en hilos. Las operaciones de fichero, red y proceso llaman directamente a `read`, `write`, `open`, `close` del sistema. Es la opción estable y completa, incluye cancelación.
+
+- **Io.Evented** — experimental, basada en stack switching userspace con work stealing (M:N threading, también conocido como corrutinas stackful). Aún en progreso, pero demuestra que la interfaz soporta modelos asíncronos reales.
+
+- **Io.Uring** — proof-of-concept sobre `io_uring` de Linux. Propiedades muy limpias, pero le falta networking, manejo de errores y tests. Prometedor.
+
+- **Io.Kqueue** y **Io.Dispatch** — proofs-of-concept para macOS (kqueue y Grand Central Dispatch).
+
+La clave es que tú eliges la implementación cuando inicializas tu programa. Un ejemplo sencillo de HTTP GET con el nuevo modelo:
+
+```zig
+const std = @import("std");
+const Io = std.Io;
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const host_name: Io.net.HostName = try .init(args[1]);
+
+    var http_client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer http_client.deinit();
+
+    var request = try http_client.request(.HEAD, .{
+        .scheme = "http",
+        .host = .{ .percent_encoded = host_name.bytes },
+        .port = 80,
+        .path = .{ .percent_encoded = "/" },
+    }, .{});
+    defer request.deinit();
+
+    try request.sendBodiless();
+
+    var redirect_buffer: [1024]u8 = undefined;
+    const response = try request.receiveHead(&redirect_buffer);
+    std.log.info("received {d} {s}", .{response.head.status, response.head.reason});
+}
+```
+
+Fíjate en `init.io`: esa instancia de I/O es la que decide si tu petición HTTP corre sobre hilos, io_uring u otro backend. Tu código no cambia, el comportamiento sí.
+
+La interfaz también trae primitivas de concurrencia: `Future` (abstracción de tarea), `Group` (gestiona muchas tareas y permite await/cancel colectivo), `Queue(T)` (canal M:M con buffer configurable), `Select` y `Batch` (espera a que uno o más conjuntos de operaciones terminen). Plus tipado estricto para unidades de tiempo con `Clock`, `Duration`, `Timestamp` y `Timeout`.
+
+## "Juicy Main": adiós a las globals implícitas
+
+Históricamente, `std.os` y `std.process` exponían variables globales para argumentos y variables de entorno. En 0.16, eso se acaba. Ahora, `main` puede recibir un parámetro `process.Init` que te da acceso explícito a todo:
+
+```zig
+const std = @import("std");
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    _ = io;
+
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    for (args, 0..) |arg, i| {
+        std.log.info("arg[{d}] = {s}", .{ i, arg });
+    }
+
+    std.log.info("{d} env vars", .{init.environ_map.count()});
+}
+```
+
+Hay tres niveles: sin parámetro (vacío, sin acceso a args/env), `process.Init.Minimal` (solo argv y environ en crudo) y `process.Init` completo (con allocator pre-inicializado, I/O y más). Esto elimina una fuente importante de estado global implícito, lo cual es un win para testing, WASI y cualquier entorno donde las globals sean un problema.
+
+## @cImport se muda al build system
+
+El builtin `@cImport`, que traducía headers C a tipos Zig en tiempo de compilación, queda **deprecado**. La traducción de C ahora se hace en el `build.zig`:
+
+```zig
+const exe = b.addExecutable(.{ .name = "mi-app", .root_module = root_mod });
+exe.linkCSource(.{ .file = .{ .path = "src/c.h" } });
+```
+
+La ventaja es doble: separas claramente la fase de traducción de C (ahora es un paso de build), y obtienes más opciones de personalización usando el paquete oficial `translate-c` como dependencia explícita.
+
+## @Type muere, nacen 8 builtins específicos
+
+La propuesta #10710, aceptada hace tiempo, por fin se materializa: `@Type` desaparece. En su lugar, ocho builtins nuevos con firma concreta:
+
+- `@EnumLiteral()` — tipo de literales enum como `.foo`
+- `@Int(signedness, bits)` — tipo entero con signo y bits, reemplaza `std.meta.Int`
+- `@Tuple(field_types)` — tipo tupla, reemplaza `std.meta.Tuple`
+- `@Pointer(size, attrs, Element, sentinel)` — tipo puntero
+- `@Fn(param_types, param_attrs, ReturnType, attrs)` — tipo función
+- `@Struct(layout, field_types, field_names, ...)` — tipo struct
+- `@Union(layout, field_types, field_names, ...)` — tipo union
+- `@OpaqueType()` — tipo opaco
+
+La ganancia es legibilidad. Donde antes escribías algo como:
+
+```zig
+// Antes: @Type con TypeInfo — verboso y frágil
+const MyInt = @Type(.{ .int = .{ .signedness = .unsigned, .bits = 16 } });
+```
+
+Ahora vas directo al grano:
+
+```zig
+// Ahora: directo y claro
+const MyInt = @Int(.unsigned, 16);
+```
+
+Menos ceremonia, misma potencia. Y cada builtin valida sus argumentos en compile-time con mensajes de error específicos en vez del genérico de `@Type`.
+
+## ArenaAllocator: lock-free y thread-safe
+
+`heap.ArenaAllocator` se ha reescrito para ser **thread-safe y sin locks**. La motivación es elegante: al evitar locks, no necesitas `Sync Primitives`, y por tanto no necesitas una instancia de I/O. Esto permite usar el ArenaAllocator como allocator base para inicializar la propia I/O — un dependency circle que antes obligaba a hacks.
+
+El rendimiento en single-thread es comparable a la versión anterior, y en escenarios multi-thread (hasta ~7 hilos) muestra una ligera mejora frente al viejo `ThreadSafeAllocator` wrapper.
+
+Hay planes para aplicar el mismo tratamiento a `heap.DebugAllocator`.
+
+## Deflate nativo: compresión desde cero en la stdlib
+
+La librería estándar ahora incluye compresión **Deflate** implementada desde cero. Usa una ventana de historial en el buffer del writer, una hash table encadenada para buscar matches y acumula tokens hasta un umbral antes de emitir bloques. También ofrece dos variantes más:
+
+- **Raw** — solo store blocks (sin compresión), usa vectores para headers eficientes.
+- **Huffman** — solo compresión Huffman, sin matching.
+
+Comparado con zlib, la ratio es ~1% peor a nivel default y ~0.77% peor al mejor nivel. Pero el rendimiento es competitivo. Y lo más importante: **no dependes de una librería C externa para comprimir**. Para descompresión, el lector de bits se ha simplificado aprovechando peek en el reader subyacente.
+
+## Criptografía nueva: AES-SIV, AES-GCM-SIV y Ascon
+
+La stdlib crypto crece con tres familias nuevas:
+
+- **AES-SIV** y **AES-GCM-SIV** — modos AEAD resistentes a nonce-misuse. Si reutilizas un nonce, no se rompe la confidencialidad entera como en AES-GCM vanilla. Importante para entornos donde la gestión de nonces es complicada.
+
+- **Ascon** (AEAD, Hash, CHash) — Ascon es el algoritmo seleccionado por NIST para estándar de criptografía ligera ( Lightweight Cryptography). Ideal para IoT y dispositivos embebidos.
+
+## Más cambios que merecen mención
+
+- **switch mejorado**: packed structs/unions como prong items, tag captures para todos los prongs, evaluación consistente.
+
+- **Nuevo linker ELF**: con `-fnew-linker`, por defecto con `-fincremental`. Rebuild incremental: **65ms vs 194ms** (66% más rápido). Aún sin DWARF, pero reemplazará al linker viejo y eliminará la dependencia de LLD.
+
+- **Fuzzer multiproceso**: usa múltiples cores (`-j`), rota priorizando tests efectivos, crash dumps a fichero.
+
+- **LLVM 21**, musl 1.2.5, glibc 2.43, MinGW-w64, Linux 6.19 headers.
+
+- **Enteros pequeños coercen a floats** sin cast explícito. Punteros a tipos comptime-only ya no son comptime-only.
+
+## Mi veredicto
+
+Zig 0.16 es la release donde Zig deja de ser "un C mejorado" y se posiciona con **identidad propia en I/O**. La interfaz `std.Io` no es solo una abstracción bonita — es una declaración de intenciones: Zig quiere que el mismo código funcione con hilos, con io_uring, con green threads, sin cambiar una línea. Y lo hace sin runtime, sin garbage collector, sin promesas mágicas de async/await. Puro compile-time dispatch.
+
+Lo que más me gusta es la coherencia: "Juicy Main" elimina globals, ArenaAllocator elimina locks, `@Type` se descompone en builtins específicos. Todo va en la misma dirección — **menos magia implícita, más control explícito**. Esa es la filosofía de Zig, y 0.16 la lleva a su punto más maduro hasta la fecha.
+
+Lo que me genera dudas es el timeline: Io.Evented e Io.Uring son promesas, no realidades completas. Y mientras tanto, Rust tiene `tokio` maduro y Go tiene su runtime from day one. La pregunta es si Zig llegará a tiempo con un backend asíncrono competitivo antes de que la gente pierda la paciencia.
+
+Pero si hay algo que Zig ha demostrado es que no tienen prisa por lanzar cosas a medias. Y eso, a largo plazo, es una ventaja.
