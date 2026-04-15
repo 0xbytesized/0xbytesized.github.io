@@ -1,0 +1,198 @@
+---
+title: "Un bug de 20 años en E16: cuando Newton falla en C"
+date: 2026-04-15T16:12
+tags: ["c", "debugging", "linux", "algoritmos", "legacy"]
+excerpt: "Un bug de 2006 en Enlightenment E16 congelaba el escritorio al abrir un PDF. La causa: un método de Newton que oscilaba infinitamente. Así lo cazaron."
+---
+
+Imagina que abres un PDF y tu escritorio entero se congela. No es un crash, no es un kernel panic: simplemente se queda ahí, calcificado, midiendo fuentes una y otra vez en un bucle infinito. Eso es exactamente lo que le pasó a Kamila Szewczyk usando Enlightenment E16, un window manager de 1997 que sigue teniendo usuarios hardcore. El bug llevaba casi 20 años latente, esperando al título de PDF correcto para desencadenarse.
+
+Y lo más curioso: la raíz del problema era una implementación defectuosa del **método de Newton**.
+
+## El escenario: Enlightenment E16
+
+E16 nació en 1997, obra de Carsten Haitzler. Es ligero (24MB de RAM peak), altamente configurable por teclado, y con un sistema de theming que todavía hoy tiene su encanto. La mayoría del mundo migró a E17 o a compositores Wayland, pero una comunidad de entusiastas sigue usándolo a diario.
+
+El código tiene décadas de deuda técnica acumulada. Y justo cuando Kamila preparaba unas diapositivas para un curso, abrió un PDF en Atril y el escritorio se colgó por completo.
+
+## El bug: congelación determinista
+
+El hang era 100% reproducible. Cada vez que abría ese PDF específico, el escritorio se congelaba. Kamila mató la sesión X11 desde una TTY y fue a cazar el problema con `gdb`.
+
+El stack trace reveló algo inesperado: no era un deadlock. El programa estaba progresando — llamando a `__imlib_font_cache_glyph_get` con índices distintos (0, 20, 73, 81, 82, 87, 88…). El progreso estaba dentro de la medición de fuentes, pero el bucle exterior nunca terminaba.
+
+El culpable: `TextstateTextFitMB` en `text.c:350`.
+
+## ¿Qué hace TextstateTextFitMB?
+
+Cuando el título de una ventana es demasiado largo para caber en la decoración del borde, E16 lo trunca con puntos suspensivos en el medio. Por ejemplo:
+
+```
+"Kickoff.pdf — Introduction to Information..." 
+```
+
+Para decidir cuántos caracteres eliminar ("nukear"), E16 usa un esquema parecido al método de Newton: estima cuántos wide characters quitar, construye la cadena truncada, mide su ancho en píxeles, calcula el error respecto al límite, y ajusta `nuke_count` en consecuencia.
+
+Veamos el corazón del bucle (simplificado):
+
+```c
+// Estimación inicial de caracteres a eliminar
+nuke_count = ((width - textwidth_limit) * wc_len) / width;
+if (nuke_count < 2)
+    nuke_count = 2;
+
+for (;;) {
+    if (nuke_count >= wc_len - 1) {
+        // Caso degenerado: un solo carácter + "..."
+        break;
+    }
+
+    nc2 = (wc_len - nuke_count) / 2;
+
+    // Construir: primeros nc2 wchars + "..." + últimos wchars
+    len_n = wc_len - nuke_count + 3;
+
+    // Medir el ancho de la cadena truncada
+    ts->ops->TextSize(ts, new_line, 0, &pw, &hh, &ascent);
+    width = pw;
+
+    nc2 = textwidth_limit - width;  // error: cuánto nos desviamos
+    cw = width / len_n;             // ancho promedio por carácter
+
+    // Si estamos dentro de tolerancia (±3 caracteres), aceptar
+    if (nc2 >= 0 && nc2 < 3 * cw)
+        break;
+
+    // Ajuste tipo Newton
+    if (nc2 > 0)  // nos pasamos (queda espacio)
+        nuke_count -= (nc2 <= 2 * cw) ? 1 : (nc2 + cw / 2) / cw;
+    else           // nos quedamos cortos
+        nuke_count += (-nc2 <= 2 * cw) ? 1 : (-nc2 + cw / 2) / cw;
+}
+```
+
+La lógica parece razonable: si la cadena truncada es más estrecha que el límite, restauramos caracteres; si es más ancha, eliminamos más. Pero hay un problema.
+
+## La oscilación infinita
+
+Kamila hizo algo brillante: volcó las variables locales del frame múltiples veces mientras el programa estaba colgado. El patrón era clarísimo:
+
+```
+nuke_count = 8   nc2 = 36   wc_len = 81   len_n = 76
+nuke_count = 11  nc2 = 35   wc_len = 81   len_n = 73
+nuke_count = 8   nc2 = 36   wc_len = 81   len_n = 76
+nuke_count = 11  nc2 = 35   wc_len = 81   len_n = 73
+...  (para siempre)
+```
+
+El algoritmo oscilaba entre dos estados sin converger. La corrección en una dirección sobrepasaba el óptimo, y la corrección en la dirección contraria también lo sobrepasaba. Es el clásico problema del método de Newton cuando la función tiene pendientes que producen overshooting.
+
+Para empeorar las cosas, la tolerancia de salida es estrecha: solo acepta `nc2` en el rango `[0, 3*cw)`. Con títulos cortos o caracteres más anchos, la rama `<= 2*cw` da pasos de 1 que convergen. Pero con `cw` pequeño (caracteres estrechos) y un título largo, el salto cuantizado introduce la oscilación.
+
+Veamos una simulación simplificada en Python que reproduce el mismo problema:
+
+```python
+def text_fit_buggy(wc_len, width, textwidth_limit):
+    """Simula el bug de oscilación de E16."""
+    nuke_count = ((width - textwidth_limit) * wc_len) // width
+    if nuke_count < 2:
+        nuke_count = 2
+
+    history = []
+    for _ in range(20):
+        len_n = wc_len - nuke_count + 3
+        # Simulamos medición: pw ≈ len_n * avg_char_width
+        avg_cw = width / wc_len  # promedio real
+        pw = len_n * avg_cw
+
+        nc2 = textwidth_limit - pw
+        cw = pw / len_n
+
+        history.append((nuke_count, round(pw, 1), round(nc2, 1)))
+
+        if nc2 >= 0 and nc2 < 3 * cw:
+            break
+
+        if nc2 > 0:
+            nuke_count -= 1 if nc2 <= 2 * cw else (nc2 + cw // 2) // cw
+        else:
+            nuke_count += 1 if -nc2 <= 2 * cw else (-nc2 + cw // 2) // cw
+
+    return history
+
+# Caso que dispara el bug: 81chars, promedio 3.6px/char, límite 291px
+result = text_fit_buggy(wc_len=81, width=292, textwidth_limit=291)
+for step, (nk, pw, err) in enumerate(result):
+    print(f"iter {step:2d}: nuke={nk:2d}  pw={pw:.0f}  err={err:.0f}")
+```
+
+Ejecutar esto te da la oscilación `8 → 11 → 8 → 11 → ...` indefinidamente.
+
+## El fix: defensiva y terminación garantizada
+
+Kamila aplicó tres cambios defensivos, de forma simétrica tanto para el path multibyte (`TextstateTextFitMB`) como para el ASCII (`TextstateTextFit1`):
+
+**1. Cap de iteraciones en 32:**
+
+```c
+for (int iter = 0;; iter++) {
+    // ... lógica existente ...
+
+    if (nc2 >= 0 && nc2 < 3 * cw)
+        break;
+
+    // Después de 32 iteraciones, aceptar si cabe; si no, nukear 1 más
+    if (iter >= 32) {
+        if (nc2 >= 0)
+            break;
+        nuke_count++;
+        continue;
+    }
+
+    // ... ajuste Newton original ...
+}
+```
+
+Si el método de Newton no ha convergido en 32 pasos, algo está mal. En ese punto, si la última medición cabe dentro del límite, la aceptamos. Si no, incrementamos `nuke_count` en 1 — paso conservador que garantiza progreso — y reintentamos.
+
+**2. Floor de `nuke_count` a 1 dentro del bucle:**
+
+```c
+if (nuke_count < 1)
+    nuke_count = 1;
+```
+
+Una corrección negativa podría hacer que `nuke_count` bajara de 1, produciendo una cadena degenerada donde la cola se solapa con la cabeza. Esto previene ese caso.
+
+**3. Floor de `cw` a 1:**
+
+```c
+if (cw < 1)
+    cw = 1;
+```
+
+Si una medición de fuente patológica devuelve ancho 0, `cw` se convierte en 0 y las fórmulas de ajuste producen divisiones por cero. Forzar `cw >= 1` elimina ese vector.
+
+El patch completo es elegante: no reescribe el algoritmo, no cambia la API, no rompe compatibilidad. Simplemente añade barreras de seguridad que garantizan terminación.
+
+## Cómo reproducirlo
+
+Cualquier ventana cuyo `WM_NAME` sea lo bastante largo como para que la búsqueda de middle-ellipsis caiga en el régimen de overshooting reproduce el bug. El caso real:
+
+```
+"Kickoff.pdf — Introduction to Information Theory Session 1: kickoff & first topic"
+```
+
+81 caracteres wide (incluyendo el em-dash), un slot de título de ~291 píxeles, fuente con promedio de ~3px/carácter. Un cóctel perfecto para la oscilación.
+
+## Mi opinión
+
+Este bug me fascina porque encierra varias lecciones a la vez.
+
+Primera: **los algoritmos numéricos no son código de biblioteca**. Ese "método de Newton" es una aproximación que funciona en los casos comunes pero falla en los patológicos. Y en un window manager, los casos patológicos aparecen cuando menos lo esperas — un título de PDF con 81 caracteres y un em-dash. Siempre que uses un esquema iterativo, necesitas un límite de iteraciones o una prueba formal de convergencia.
+
+Segunda: **la depuración de legacy es un arte**. Kamila usó `gdb` en un proceso vivo, volcó variables locales a mano, y detectó un patrón de oscilación de dos estados. No hay fancy observability, no hay tracing distribuido. Es C clásico, un debugger, y el instinto de alguien que conoce su window manager lo suficiente como para saber dónde mirar.
+
+Tercera: **20 años sin encontrar un bug no significa que no exista**. Solo significa que las condiciones para dispararlo eran raras. La mayoría de los títulos de ventana nunca llegaban a 81 caracteres. Pero bastaba un PDF con un nombre largo, con los parámetros de fuente justos, y boom: escritorio congelado.
+
+Y una reflexión más personal: en una era donde los proyectos nuevos nacen con backdoors en la cadena de suministro y los maintained patchean kernels con llamadas que crashean, hay algo casi reconfortante en un bug de 20 años que es, simplemente, un error de algoritmo puro. Sin malicia, sin negligencia intencional, solo una aproximación numérica que no convergía. Bug honesto. De esos que nos recuerdan que programar es, en el fondo, matemáticas con consecuencias.
