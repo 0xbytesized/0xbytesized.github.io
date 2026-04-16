@@ -1,0 +1,185 @@
+---
+title: "PHP 8.6 hace las closures más listas por dentro"
+date: 2026-04-16T22:58
+tags: ["php", "rendimiento", "internals", "closures", "optimizacion"]
+excerpt: "PHP 8.6 infiere automáticamente static en closures y cachea las stateless, eliminando ciclos de referencia y ahorrando miles de instanciaciones por request."
+---
+
+Si escribes closures en PHP —y quién no lo hace en 2026—, hay una RFC aprobada que va a hacer que tu código corra un poco más rápido sin que cambies nada. Se llama *Closure Optimizations* y aterriza en PHP 8.6 de la mano de Ilija Tovilo. No es una feature nueva para los desarrolladores: es una mejora interna que optimiza dos cosas que PHP hacía mal desde hace años.
+
+Las dos optimizaciones son:
+
+1. **Inferir `static` automáticamente** en closures que no usan `$this`, eliminando capturas innecesarias y ciclos de referencia.
+2. **Cachea closures stateless** entre usos, evitando instanciar el mismo objeto una y otra vez.
+
+Vamos por partes.
+
+## El problema: closures que capturan de más
+
+Cuando escribes una closure dentro de un método en PHP, por defecto captura `$this`:
+
+```php
+class UserService
+{
+    public function getProcessor(): callable
+    {
+        // Esta closure captura $this implícitamente
+        return function (int $id): User {
+            return $this->findById($id);
+        };
+    }
+}
+```
+
+Hasta aquí, todo normal. El problema aparece cuando la closure **no necesita** `$this`:
+
+```php
+class Formatter
+{
+    public function getNormalizer(): callable
+    {
+        // Esta closure NO usa $this, pero PHP la captura igualmente
+        return function (string $value): string {
+            return trim(strtolower($value));
+        };
+    }
+}
+```
+
+PHP tradicionalmente captura `$this` en esta closure aunque nunca la useis. Eso tiene dos consecuencias:
+
+- **Ciclo de referencia**: La closure mantiene vivo al objeto, y el objeto mantiene viva a la closure. El garbage collector de ciclos de PHP tiene que detectarlo y resolverlo, lo cual cuesta tiempo.
+- **Memoria retenida**: La closure arrastre consigo todo el objeto —sus propiedades, sus dependencias— cuando en realidad solo necesita… nada.
+
+La solución explícita era marcar la closure como `static`:
+
+```php
+class Formatter
+{
+    public function getNormalizer(): callable
+    {
+        return static function (string $value): string {
+            return trim(strtolower($value));
+        };
+    }
+}
+```
+
+Pero muchísima gente no sabe que esto importa, o prefiere no añadir `static` por claridad visual. Y en frameworks como Laravel o Symfony, donde se crean miles de closures por request, la acumulación de ciclos es notable.
+
+## Optimización 1: inferir `static` automáticamente
+
+La primera parte de la RFC hace que PHP infiera `static` cuando la closure demostrablemente no necesita `$this`. Las reglas de inferencia son conservadoras — no se marca como `static` si hay cualquier posibilidad de que se use `$this` indirectamente:
+
+- No se infiere si la closure usa `$$var` (donde `$var` podría ser `'this'`)
+- No se infiere si la closure usa `Foo::bar()` (podría ser una llamada de instancia a método padre)
+- No se infiere si la closure usa `$f()`, `call_user_func()`, `require`, `include` o `eval` (podrían ejecutar código que usa `$this`)
+
+Estas reglas cubren los casos donde `$this` podría fluir indirectamente. En la práctica, funcionan bastante bien: en una prueba con Symfony Demo, eliminando todos los `static` explícitos, la inferencia fue capaz de recuperar el **78%** de ellos (68 de 87 closures).
+
+Ejemplo de lo que cambia:
+
+```php
+class RequestHandler
+{
+    private array $config;
+
+    public function getValidator(): callable
+    {
+        // Antes: closure no-static, captura $this innecesariamente
+        // Ahora: PHP infiere static porque no usa $this
+        return function (string $input): bool {
+            return strlen($input) >= 3 && strlen($input) <= 255;
+        };
+    }
+
+    public function getTransformer(): callable
+    {
+        // Esta SÍ usa $this, así que la inferencia no aplica
+        return function (string $input): string {
+            return $this->config['prefix'] . $input;
+        };
+    }
+}
+```
+
+El impacto real: en Laravel (el template engine), estas dos optimizaciones combinadas evitan **2.384 de 3.637** instanciaciones de closures por request — un ahorro del ~65% en creación de objetos closure, que se traduce en un **~3% de mejora** en el rendimiento global del framework.
+
+## Optimización 2: cachear closures stateless
+
+La segunda optimización es más sencilla pero igualmente efectiva. Las closures que son `static`, no capturan ninguna variable y no declaran variables estáticas, son funcionalmente idénticas en cada instanciación. PHP 8.6 las cachea:
+
+```php
+function createMatcher(): callable
+{
+    // Esta closure es stateless: static, sin use(), sin static vars
+    return static fn(string $a, string $b): bool => $a === $b;
+}
+
+// Antes: 10.000.000 instanciaciones de objeto
+// Ahora: 1 instanciación, cacheada y reutilizada
+for ($i = 0; $i < 10_000_000; $i++) {
+    $matcher = createMatcher();
+}
+```
+
+En un micro-benchmark, esto mejora el rendimiento un ~80%. Obviamente es un caso sintético, pero en código real —middlewares, pipelines, filtrado de colecciones— la acumulación es significativa.
+
+La consecuencia interesante es que dos closures stateless del mismo sitio ahora son **el mismo objeto**:
+
+```php
+function makeClosure(): callable
+{
+    return static fn(): string => 'hello';
+}
+
+var_dump(makeClosure() === makeClosure());
+// Antes: false (distintas instancias)
+// PHP 8.6: true (misma instancia cacheada)
+```
+
+## Cambios backwards incompatible
+
+La RFC documenta tres roturas de compatibilidad, todas menores y predecibles:
+
+### 1. `ReflectionFunction::getClosureThis()` devuelve `null`
+
+Si tu código usa reflexión para inspeccionar `$this` en una closure que ahora es inferida como `static`, obtendrás `null` en lugar del objeto:
+
+```php
+class Example
+{
+    public function getClosure(): callable
+    {
+        return function (): string { return 'ok'; };
+    }
+}
+
+$ref = new ReflectionFunction(new Example()->getClosure());
+// Antes: $ref->getClosureThis() devuelve la instancia de Example
+// PHP 8.6: $ref->getClosureThis() devuelve null (porque se infirió static)
+```
+
+### 2. Identidad de closures stateless
+
+Ya lo vimos: `makeClosure() === makeClosure()` ahora es `true`. Si tu código dependía de que cada llamada creara un objeto distinto (por ejemplo, para usar closures como claves de cache), se rompe.
+
+### 3. Destructores más tempranos en ciclos
+
+Los objetos que antes mantenían ciclos de referencia innecesarios now se liberan antes, lo que puede ejecutar destructores en un momento distinto. Esto es técnicamente BC pero es el comportamiento correcto y esperado.
+
+Hay una sutileza con `Closure::bind()`: la RFC permite que cuando una closure inferida como `static` se vincule a un objeto mediante `Closure::bind()`, el objeto se descarte silenciosamente. Pero si la closure fue marcada **explícitamente** como `static`, lanza la excepción de siempre. Esto protege BC para código que ya usaba `static` explícito.
+
+## Mi opinión
+
+Me parece una de esas RFCs que hacen bien: optimizan algo que la mayoría de la gente no sabe que es problemático, sin requerir que cambies ni una línea de código. El argumento de Ilija es sólido — si PHP puede probar estáticamente que una closure no usa `$this`, ¿por qué capturarlo?
+
+Lo que más me gusta es el enfoque conservador. En vez de un análisis agresivo que podría romper código real, las reglas de inferencia son estrictas: si hay cualquier camino posible hacia `$this`, no inferir. El 78% de cobertura en Symfony Demo demuestra que la mayoría de las closures no necesitan `$this` en absoluto, y las que sí siguen funcionando como siempre.
+
+El caching de closures stateless es casi obvio con retrospectiva — si la closure no tiene estado, ¿por qué instanciarla 10.000 veces? — pero la implementación requiere cuidado porque cambia la identidad del objeto. Que hayan documentado los tres cambios BC y los hayan discutido openly da confianza.
+
+Lo que me gustaría ver en el futuro: que estas optimizaciones se extiendan a closures que capturan variables primitivas inmutables (como `fn($x) => $x + $captured_literal`). Pero eso es mucho más complejo a nivel de implementación y probablemente requiera análisis de escape más sofisticado. Por ahora, PHP 8.6 nos da un boost gratuito y eso ya es motivo para actualizar.
+
+---
+
+*La RFC completa está en [wiki.php.net/rfc/closure-optimizations](https://wiki.php.net/rfc/closure-optimizations) y la implementación en [github.com/php/php-src/pull/19941](https://github.com/php/php-src/pull/19941). Fue aprobada por unanimidad.*
