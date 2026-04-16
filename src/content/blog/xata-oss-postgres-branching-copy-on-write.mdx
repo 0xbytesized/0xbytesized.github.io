@@ -1,0 +1,156 @@
+---
+title: "Xata OSS: Postgres con branching instantáneo"
+date: 2026-04-16T11:00
+tags: ["postgres", "open-source", "kubernetes", "base-de-datos", "devops"]
+excerpt: "Xata abre su plataforma Postgres con branching copy-on-write y scale-to-zero bajo Apache 2.0. Copia TB en segundos."
+---
+
+Hasta ahora, si querías crear una rama de tu base de datos Postgres con datos reales para probar un deployment, tenías que hacer `pg_dump`, esperar, restaurar en otro servidor, esperar más, y rezar para que nadie tocara producción mientras tanto. Xata acaba de cambiar esas reglas del juego: el 15 de abril de 2026 liberaron toda su plataforma como open source bajo Apache 2.0, y la pieza clave es el *branching* con copy-on-write (CoW).
+
+## Qué es Xata y por qué importa
+
+Xata es una plataforma cloud-native para ejecutar flotas de instancias Postgres sobre Kubernetes. No es un fork de Postgres — usan PostgreSQL vanilla sin modificaciones, a diferencia de Neon o Aurora. Lo que hacen es añadir una capa de almacenamiento inteligente por debajo que permite:
+
+- **Branching instantáneo** con copy-on-write: copias de TB de datos en segundos, casi sin espacio extra.
+- **Scale-to-zero**: las bases de datos inactivas sueltan la CPU/RAM y se reactivan automáticamente cuando alguien conecta.
+- **Auto-scaling** con bin-packing para eficiencia de costes.
+- **Alta disponibilidad**, read replicas, failover automático, upgrades con switchover.
+- **Serverless driver**: SQL over HTTP/WebSockets.
+- **REST API** y CLI para gestionar todo el control plane.
+
+La combinación de branching + scale-to-zero es especialmente potente para el workflow moderno: cada pull request puede tener su propia rama de base de datos con datos reales, y cuando nadie la usa, no cuesta compute.
+
+## Cómo funciona el copy-on-write
+
+El CoW no es nuevo — se usa en ZFS, btrfs, B-tree databases — pero aplicarlo a Postgres a escala de Kubernetes es lo que hace interesante a Xata. La idea:
+
+1. Los datos se dividen en bloques. Un bloque de índice (metadata) apunta a los bloques de datos reales.
+2. Cuando creas una rama, solo se copia el bloque de índice. Las ramas apuntan a los mismos bloques de datos.
+3. Cuando escribes en una rama, solo se copia el bloque modificado (*write = copy*). El resto sigue compartido.
+
+Visualizado de forma simplificada:
+
+```
+Rama principal     Nueva rama (pr-42)
+┌──────────┐      ┌──────────┐
+│ Índice A │──────│ Índice B │ (copia del índice A)
+└────┬─────┘      └────┬─────┘
+     │                 │
+     ▼                 ▼
+┌──────────────────────────┐
+│  Bloques de datos (shared) │
+│  [blk1] [blk2] [blk3]     │
+└──────────────────────────┘
+
+Si pr-42 modifica blk2:
+┌──────────────────────────┐
+│  [blk1] [blk2'] [blk3]   │  ← blk2' es nuevo, el resto se comparte
+└──────────────────────────┘
+```
+
+El truco para que esto funcione entre nodos distintos es montar el almacenamiento por red usando **NVMe-over-Fabrics** (NVMe-of), que permite cientos de miles de IOPS sobre la red. Así, la rama hija puede correr en un nodo con su propia CPU/RAM mientras accede a los mismos bloques de datos que la rama padre.
+
+## Arquitectura: sobre hombros de gigantes
+
+Xata no reinventa la rueda. Se construye sobre dos proyectos maduros:
+
+- **CloudNativePG**: el operador Postgres para Kubernetes. Se encarga de HA, failover, upgrades, pooling y backups.
+- **OpenEBS**: almacenamiento cloud-native, incluyendo Mayastor (el engine replicado basado en NVMe-of).
+
+Encima de eso, Xata añade sus propios componentes:
+
+- **SQL Gateway**: routing, IP filtering, despertar clusters hibernados, serverless driver.
+- **Branch Operator**: gestiona los recursos de cada rama en K8s.
+- **Clusters & Projects services**: el control plane con REST API.
+- **Auth service**: basado en Keycloak, con API keys y RBAC granular.
+- **Scale-to-zero plugin**: hiberna ramas inactivas automáticamente.
+- **CLI**: interfaz de línea de comandos para todas las operaciones.
+
+## Ponerlo en marcha
+
+El despliegue local necesita Docker, Kind (Kubernetes in Docker) y Tilt:
+
+```bash
+# Crear cluster de Kubernetes local
+kind create cluster --wait 10m
+
+# Desplegar toda la plataforma Xata
+tilt up
+
+# Instalar el CLI de Xata
+curl -fsSL https://xata.io/install.sh | bash
+
+# Autenticarse contra el despliegue local
+xata auth login --profile local --env local --force
+xata auth switch local
+```
+
+Una vez levantado, crear un proyecto y una rama es trivial:
+
+```bash
+# Crear proyecto y rama principal
+xata project create --name mi-app
+
+# Crear rama hija (copia instantánea con CoW)
+xata branch create --name pr-42
+```
+
+Ese `branch create` no copia ni un solo bloque de datos. Solo duplica el índice. Si tu base de datos tiene 500 GB, la rama se crea en segundos y ocupa prácticamente cero espacio extra hasta que empiezas a escribir.
+
+## La REST API del control plane
+
+Todo lo que hace el CLI, lo hace a través de una REST API con API keys. Los endpoints clave verificados en el spec OpenAPI del repo:
+
+```bash
+# Crear un proyecto
+curl -X POST "https://$XATA_API_host/organizations/$ORG_ID/projects" \
+  -H "Authorization: Bearer $XATA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "mi-app",
+    "region": "us-east-1"
+  }'
+
+# Crear una rama del proyecto
+curl -X POST "https://$XATA_API_host/organizations/$ORG_ID/projects/$PROJECT_ID/branches" \
+  -H "Authorization: Bearer $XATA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "pr-42",
+    "parent": "main"
+  }'
+
+# Obtener credenciales de conexión de una rama
+curl "https://$XATA_API_host/organizations/$ORG_ID/projects/$PROJECT_ID/branches/$BRANCH_ID/credentials" \
+  -H "Authorization: Bearer $XATA_API_KEY"
+```
+
+Esto lo convierte en ideal para CI/CD: tu pipeline puede crear una rama por PR, inyectar las credenciales al entorno de test, y cuando mergeas, borrar la rama. Scale-to-zero se encarga de que las ramas que nadie usa no cuesten dinero.
+
+## El ecosistema que ya existede
+
+Xata no llega vacío al open source. Ya mantienen dos proyectos con comunidad propia:
+
+- **pgroll** (6400+ estrellas): migraciones de schema zero-downtime para Postgres, con rollback.
+- **pgstream** (1090+ estrellas): replicación de Postgres con cambios DDL y anonimización.
+
+Ambos complementan perfectamente la plataforma: pgroll para evolucionar el schema sin bloqueos, pgstream para replicar datos entre ramas o entornos.
+
+## Qué no es open source
+
+Xata ha mantenido cerrados algunos componentes:
+
+- El código para despliegues multi-organización, multi-región y multi-celda.
+- Su propio storage engine "Xatastor", diseñado para workloads agnéticos (próximamente más detalles, según su blog).
+
+La licencia Apache 2.0 permite usar Xata para ofrecer un PGaaS público, pero ellos mismos desaconsejan hacerlo con la versión OSS porque faltan features de seguridad para multi-tenancy adversarial.
+
+## Mi opinión
+
+Me parece un movimiento inteligente y bien ejecutado. La industria llevaba tiempo necesitando una alternativa open source a Neon y Aurora que no patchee Postgres. El hecho de que Xata use PostgreSQL 100% vanilla y logre branching a nivel de almacenamiento es elegante: no telockean en un runtime modificado.
+
+Lo más interesante para mí es el caso de uso de branching por PR. En un mundo donde los agentes de IA generan código rápidamente pero validar ese código contra datos reales sigue siendo costoso, tener ramas de base de datos instantáneas y baratas es un superpoder. Y el scale-to-zero elimina la excusa de "es demasiado caro mantener entornos de test".
+
+Dicho eso, Xata requiere Kubernetes. Si no tienes un cluster K8s o no quieres mantenerlo, seguirás necesitando un managed service. Y la separación de componentes cerrados (Xatastor, multi-tenancy) hace que la versión OSS sea más un "Postgres-as-a-Service interno" que un reemplazo completo del cloud offering. Pero para equipos que ya operan K8s, es una oferta increíblemente generosa.
+
+El hecho de que pgroll y pgstream ya tengan miles de estrellas demuestra que Xata sabe construir comunidad open source. Esta release tiene pinta de ser el inicio de algo más grande.
