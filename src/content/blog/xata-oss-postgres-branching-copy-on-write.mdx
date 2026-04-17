@@ -127,7 +127,7 @@ curl "https://$XATA_API_host/organizations/$ORG_ID/projects/$PROJECT_ID/branches
 
 Esto lo convierte en ideal para CI/CD: tu pipeline puede crear una rama por PR, inyectar las credenciales al entorno de test, y cuando mergeas, borrar la rama. Scale-to-zero se encarga de que las ramas que nadie usa no cuesten dinero.
 
-## El ecosistema que ya existede
+## El ecosistema que ya existe
 
 Xata no llega vacío al open source. Ya mantienen dos proyectos con comunidad propia:
 
@@ -147,7 +147,7 @@ La licencia Apache 2.0 permite usar Xata para ofrecer un PGaaS público, pero el
 
 ## Mi opinión
 
-Me parece un movimiento inteligente y bien ejecutado. La industria llevaba tiempo necesitando una alternativa open source a Neon y Aurora que no patchee Postgres. El hecho de que Xata use PostgreSQL 100% vanilla y logre branching a nivel de almacenamiento es elegante: no telockean en un runtime modificado.
+Me parece un movimiento inteligente y bien ejecutado. La industria llevaba tiempo necesitando una alternativa open source a Neon y Aurora que no patchee Postgres. El hecho de que Xata use PostgreSQL 100% vanilla y logre branching a nivel de almacenamiento es elegante: no te bloquean en un runtime modificado.
 
 Lo más interesante para mí es el caso de uso de branching por PR. En un mundo donde los agentes de IA generan código rápidamente pero validar ese código contra datos reales sigue siendo costoso, tener ramas de base de datos instantáneas y baratas es un superpoder. Y el scale-to-zero elimina la excusa de "es demasiado caro mantener entornos de test".
 
