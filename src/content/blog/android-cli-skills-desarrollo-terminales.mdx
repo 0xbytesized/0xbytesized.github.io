@@ -1,0 +1,176 @@
+---
+title: "Android CLI y Skills: el terminal para agentes"
+date: 2026-04-17T17:30
+tags: ["android", "cli", "agentes", "developer-tools"]
+excerpt: "Google lanza Android CLI y Skills para que cualquier agente IA pueda crear, compilar y desplegar apps Android desde el terminal."
+---
+
+Si desarrollas apps Android, conoces el ritual: abrir Android Studio, esperar a
+que Gradle sincronice, crear un proyecto desde el wizard, configurar el
+emulador, compilar, desplegar… Cada paso suma segundos que se convierten en
+minutos. Y eso si eres humano. Si eres un agente de IA, cada uno de esos pasos
+es un mundo de ambigüedad: ¿qué template usar? ¿cómo se lanza el emulador por
+CLI? ¿qué versión de AGP corresponde a cada API level?
+
+Google acaba de publicar una respuesta directa a ese problema: **Android CLI**
+y **Android Skills**, dos herramientas pensadas para que cualquier agente —sea
+Claude Code, Codex, Gemini CLI o el que venga después— pueda desarrollar apps
+Android desde el terminal sin adivinar nada.
+
+## Android CLI: el/sdkmanager/que siempre debió existir
+
+La nueva CLI de Android no es solo un wrapper de `adb` o `sdkmanager`. Es una
+herramienta integrada que cubre todo el ciclo: desde instalar el SDK hasta
+desplegar la app en un emulador, pasando por crear proyectos y capturar
+pantallas.
+
+Los comandos principales son estos:
+
+```bash
+# Instalar solo los componentes del SDK que necesitas
+android sdk install platforms/android-35 build-tools/35.0.0
+
+# Crear un proyecto desde un template oficial
+android create --name=MiApp --output=./mi-app empty-activity-agp-9
+
+# Ver los templates disponibles
+android create list
+
+# Crear un emulador y lanzarlo
+android emulator create --profile=medium_phone
+android emulator start medium_phone
+```
+
+Hay un detalle que me gusta mucho: el comando `android create` no genera un
+proyecto genérico cualquiera. Usa templates oficiales que ya aplican las mejores
+prácticas y la arquitectura recomendada. O sea, el agente no tiene que saber si
+debe usar Compose o Activities — el template ya lo decide.
+
+Y para desplegar, en lugar de lidiar con `gradlew installDebug` y `adb`:
+
+```bash
+# Construir (fuera de la CLI) y luego desplegar directamente
+android run --apks=./app/build/outputs/apk/debug/app-debug.apk
+```
+
+## El comando `android describe`: puente entre proyecto y agente
+
+Uno de los comandos más interesantes es `android describe`, que analiza un
+proyecto Android y genera metadatos en JSON con la estructura del proyecto, los
+targets de compilación y las ubicaciones de los artefactos (APKs, AARs). Esto
+es exactamente el tipo de contexto que un agente necesita para no perderse en la
+estructura de un proyecto Android.
+
+```bash
+# Analizar un proyecto y ver sus targets de compilación
+android describe --project_dir=/path/to/project
+```
+
+La salida incluye rutas a los ficheros JSON con la estructura del proyecto, lo
+que permite a cualquier agente orientarse sin tener que escanear manualmente el
+árbol de directorios. Es un detalle pequeño pero enormemente práctico — y el
+tipo de cosa que antes tenías que hackear con scripts ad-hoc.
+
+## Skills: instrucciones para agentes, no para humanos
+
+Si la CLI es el interfaz, las Skills son el cerebro. El repositorio
+[github.com/android/skills](https://github.com/android/skills) contiene
+ficheros `SKILL.md` que funcionan como especificaciones técnicas para agentes
+IA. No son tutoriales ni docs — son instrucciones precisas, paso a paso, con
+los comandos exactos y las decisiones de arquitectura ya tomadas.
+
+La instalación se hace a través de la propia CLI:
+
+```bash
+# Instalar todas las skills para todos los agentes detectados
+android skills add --all
+
+# Instalar solo una skill específica para Gemini
+android skills add --agent=gemini --skill=navigation-3
+
+# Buscar skills relacionadas con rendimiento
+android skills find performance
+```
+
+En el lanzamiento, el repositorio incluye skills para:
+- **Navigation 3**: setup, migración desde Navigation 2, deep links, escenas
+  (diálogos, bottom sheets, list-detail)
+- **XML a Compose**: migración progresiva de layouts XML a Jetpack Compose
+- **AGP 9 Upgrade**: migración al nuevo DSL de Gradle con pasos concretos
+- **Edge-to-edge**: implementación correcta de pantalla completa
+- **R8 Analyzer**: análisis de configuración de ofuscación
+- **Play Billing Library Upgrade**: actualización de la biblioteca de pagos
+
+Cada skill sigue el estándar abierto de [agentskills.io](https://agentskills.io/home),
+lo que significa que cualquier agente compatible puede consumirlas — no estás
+atado a Gemini.
+
+## El Knowledge Base: docs frescos cuando tu modelo está desactualizado
+
+El tercer componente es `android docs`, un comando que conecta directamente con
+la **Android Knowledge Base**: una base de datos actualizada con la documentación
+oficial de Android, Firebase y Kotlin.
+
+```bash
+# Buscar documentación relevante
+android docs search 'How do I improve my app performance?'
+
+# Obtener un documento específico
+android docs fetch kb://android/topic/performance/overview
+```
+
+Esto resuelve un problema real: los modelos de IA tienen una fecha de corte en
+su entrenamiento. Si tu modelo se entrenó en 2024, no sabe nada de AGP 9, de
+Navigation 3 ni de las nuevas APIs de Compose. Con `android docs`, el agente
+puede buscar documentación fresca al momento y basar sus respuestas en las
+guías actuales, no en lo que recordaba del entrenamiento.
+
+## Captura de pantalla y resolución de UI
+
+Hay otro par de comandos que merecen mención porque resuelven un problema de
+primer orden en el desarrollo móvil agentic: **ver la pantalla**.
+
+```bash
+# Capturar pantalla con anotaciones
+android screen capture --output=ui.png --annotate
+
+# Resolver coordenadas de un elemento anotado
+android screen resolve --screenshot=ui.png --string="input tap #5"
+# → input tap 500 1000
+```
+
+El flujo es ingenioso: primero capturas la pantalla con `--annotate`, que
+etiqueta cada elemento UI con un número. Luego, con `screen resolve`, conviertes
+esa etiqueta en coordenadas reales (x, y). Así, un agente puede hacer clic en un
+botón específico sin saber sus coordenadas de antemano — solo necesita saber qué
+quiere clicar.
+
+## Mi veredicto
+
+Hay dos formas de ver este lanzamiento. La primera: Google está haciendo que sea
+más fácil desarrollar Android sin Android Studio, lo cual parece
+contraintuitivo para una empresa que ha invertido tanto en su IDE. La segunda:
+Google está reconociendo la realidad — los agentes van a seguir existiendo, y si
+Android Studio no es donde empiezan los proyectos, alguien tiene que proveer
+las herramientas correctas.
+
+Me quedo con la segunda lectura. Android CLI no reemplaza Android Studio — lo
+complementa. Puedes prototipar rápido desde el terminal con un agente y luego
+abrir el proyecto en Android Studio para refinar la UI y hacer debugging
+avanzado. Es un flujo híbrido que tiene sentido.
+
+Lo que más me impresiona es la especificidad de las Skills. No son prompts
+vagos: son especificaciones técnicas con pasos concretos, versiones exactas de
+dependencias y migraciones documentadas. El skill de AGP 9, por ejemplo, te dice
+exactamente qué flags de `gradle.properties` eliminar y en qué orden migrar.
+Eso vale oro para un agente que de otra manera intentaría adivinar la versión
+correcta de Hilt o KSP.
+
+La parte que todavía no convence: todo esto está en preview. Los comandos
+pueden cambiar, los skills son pocos (7 en el lanzamiento), y en Windows el
+comando `android emulator` todavía no funciona. Pero como dirección, es clara:
+Google está diciendo que el desarrollo Android desde el terminal es de primera
+clase, y que los agentes no son un afterthought.
+
+Y como alguien que desarrolla desde un terminal la mayor parte del tiempo, eso
+me parece bien.
