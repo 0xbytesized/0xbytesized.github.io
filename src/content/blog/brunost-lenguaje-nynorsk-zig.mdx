@@ -1,0 +1,182 @@
+---
+title: "Brunost: un lenguaje que te obliga a escribir en noruego"
+date: 2026-04-18T12:00
+tags: ["lenguajes", "zig", "nynorsk", "wasm"]
+excerpt: "Brunost es un lenguaje interpretado en Zig que rechaza código si tus variables no están en nynorsk. Un ejercicio de diseño lingüístico radical."
+---
+
+Hay lenguajes que quieren ser universales, y luego está Brunost, un lenguaje
+que te da error si intentas llamar a una variable `myVariable`. No porque la
+sintaxis sea incorrecta, sino porque `myVariable` no es una palabra válida en
+nynorsk. Y no, no hay forma de esquivarlo: el intérprete trae un diccionario
+incrustado y lo verifica en tiempo de ejecución.
+
+## Qué es Brunost
+
+Brunost es un lenguaje de programación funcional e interpretado creado por John
+Mikael Lindbakk. Su intérprete está escrito en Zig y compila a WebAssembly, así
+que puedes probarlo directamente en el navegador. El nombre viene del queso
+marrón noruego, un producto cultural tan identitario que el autor decidió que
+era el nombre perfecto para un lenguaje exclusivamente nynorsk.
+
+El proyecto apareció en Hacker News esta semana con buena recepción, y aunque
+está en fase temprana (5 estrellas en GitHub, activo desde enero de 2025), ya
+tiene suficientes funcionalidades para escribir programas reales: variables,
+funciones, bucles, tipos personalizados, módulos y manejo de errores.
+
+## La regla que lo cambia todo: nynorsk obligatorio
+
+Cualquier lenguaje te deja nombrar variables como quieras. Brunost no. Si
+escribes algo que no está en el diccionario nynorsk, el intérprete lo rechaza:
+
+```
+Feil: Namnet er ikkje gyldig nynorsk: 'thisIsNotNynorsk' på linje 8, kolonne 6
+```
+
+Esto no es un lint opcional ni un warning: es un error de ejecución. El
+intérprete carga el diccionario y valida cada identificador. El propio autor
+confiesa que le cuesta escribir Brunost porque usa un teclado US y las letras
+æ, ø, å no están accesibles. También tuvo que eliminar un ejemplo de
+calculadora de BMI de la documentación porque "BMI" no es una palabra nynorsk.
+
+## Sintaxis: código que fluye como queso
+
+La sintaxis es deliberadamente noruega. Los keywords son palabras en nynorsk
+que se leen de forma natural si hablas el idioma:
+
+| Concepto     | Brunost              | Equivalente       |
+|-------------|----------------------|-------------------|
+| Constante    | `låst`               | `const`           |
+| Variable     | `open`               | `let` / `var`     |
+| Función      | `gjer`               | `fn` / `def`      |
+| Devolver     | `gjevTilbake`        | `return`          |
+| Si           | `viss`               | `if`              |
+| Si no        | `ellers`             | `else`            |
+| Para cada    | `forKvart`           | `for...of`        |
+| Mientras     | `medan`              | `while`           |
+| Importar     | `bruk`               | `import` / `use`  |
+| Probar       | `prøv`               | `try`             |
+| Capturar     | `fang`               | `catch`           |
+| Lanzar       | `kast`               | `throw`           |
+
+Un ejemplo: conversión de temperatura con condicionales y tipos personalizados:
+
+```
+bruk terminal
+
+type By {
+  låst namn er "ukjend"
+  open temperatur er 0
+}
+
+gjer tilCelsius(fahrenheit) {
+  gjevTilbake (fahrenheit - 32) * 5 / 9
+}
+
+open bergen er By { namn er "Bergen", temperatur er 50 }
+bergen.temperatur er tilCelsius(bergen.temperatur)
+
+viss (bergen.temperatur erMindreEnn 10) gjer {
+  terminal.skriv(bergen.namn + ": kaldt, " + bergen.temperatur + "°C")
+} ellers {
+  terminal.skriv(bergen.namn + ": ok, " + bergen.temperatur + "°C")
+}
+```
+
+`låst` declara inmutable (como `const`), `open` permite mutación, `gjer` define
+funciones y `gjevTilbake` devuelve. Los condicionales usan `viss`/`ellers`, y
+`erMindreEnn` es un operador de comparación en nynorsk.
+
+## Manejo de errores con prøv/fang
+
+Brunost usa `prøv`/`fang`/`kast`, equivalente a `try`/`catch`/`throw`. Cuando una
+condición es inválida, lanzas con `kast` y capturas con `fang`:
+
+```
+bruk terminal
+
+gjer finnHovudstad(land) {
+  viss (land erSameSom "Noreg") gjer {
+    gjevTilbake "Oslo"
+  }
+  kast "Kjenner ikkje landet: " + land
+}
+
+prøv {
+  låst hovudstad er finnHovudstad("Sverige")
+  terminal.skriv(hovudstad)
+} fang (feil) {
+  terminal.skriv("Feil: " + feil)
+}
+```
+
+## Módulos y bucles
+
+Brunost tiene módulos incorporados (`terminal`, `matte`, `streng`, `liste`),
+módulos inline con `modul`, y módulos por archivo (`.brunost`) importados con
+`bruk`. Este ejemplo combina un módulo inline con un bucle `forKvart`:
+
+```
+bruk terminal
+
+modul vaer {
+  gjer skildring(grader) {
+    viss (grader erMindreEnn 0) gjer {
+      gjevTilbake "snø"
+    }
+    viss (grader erMindreEnn 15) gjer {
+      gjevTilbake "kaldt"
+    }
+    gjevTilbake "varmt"
+  }
+}
+
+låst byar er ["Tromsø", "Bergen", "Stavanger"]
+
+forKvart stad i byar {
+  terminal.skriv(stad + ": " + vaer.skildring(-5))
+}
+```
+
+Aquí `forKvart` itera sobre la lista, `modul` define un namespace inline, y
+`erMindreEnn` compara números. La función `skildring` clasifica la temperatura
+en nynorsk.
+
+## WebAssembly: pruébalo sin instalar nada
+
+El intérprete compila a Wasm, y hay una demo funcional en el navegador. El
+autor admite que el soporte de terminal en Wasm es limitado (los buffers de
+E/S no se llevan bien con WASI), pero para la mayoría de ejemplos funciona
+bastante bien. Esto es notable porque Zig no tiene una historia larga con
+Wasm, y que el autor lo haya logrado con relativa facilidad dice algo sobre
+la ergonomía de Zig como lenguaje de sistemas.
+
+## Mi veredicto
+
+Brunost no va a reemplazar a Rust ni a Python. No es su intención. Es un
+experimento de diseño de lenguajes que plantea una pregunta genuina: ¿qué
+pasa cuando un lenguaje te obliga a pensar en otro idioma?
+
+La respuesta es que, curiosamente, te obliga a repensar nombres que dabas por
+hechos. Cuando no puedes usar `index`, `count` o `result`, tienes que buscar
+equivalentes en nynorsk — y eso cambia cómo estructuras el código. No es solo
+una curiosidad lingüística; es un ejercicio de ergonomía forzada.
+
+Técnicamente, me parece valioso como proyecto educativo. El intérprete en Zig
+es un ejemplo real de cómo construir un lenguaje con un frontend de parsing y
+un runtime de interpretación en un lenguaje de sistemas moderno. Y la
+compilación a Wasm demuestra que Zig puede targets distintos sin fricciones.
+
+Lo que más me gusta es la honestidad del proyecto: el autor reconoce que le
+cuesta usar su propio lenguaje con teclado US, que el diccionario es
+limitante, y que el objetivo es divertirse. No hay sobreingeniería ni
+marketing. Es un queso noruego que hace exactamente lo que promete: ser
+suave, con profundidad, y absolutamente noruego.
+
+---
+
+**Enlaces:**
+
+- [Repositorio en GitHub](https://github.com/atomfinger/brunost) (MIT)
+- [Pruébalo en el navegador](https://atomfinger.github.io/brunost/)
+- [Artículo original de presentación](https://lindbakk.com/blog/introducing-brunost)
