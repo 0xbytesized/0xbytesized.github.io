@@ -1,0 +1,150 @@
+---
+title: "iTerm2: cuando cat readme.txt ejecuta código"
+date: 2026-04-18T18:20
+tags: ["security", "terminal", "iterm2", "escape-sequences", "macos"]
+excerpt: "Una vulnerabilidad en iTerm2 permite ejecutar código arbitrario con solo leer un archivo. Las secuencias de escape del conductor SSH lo hacen posible."
+---
+
+El terminal emulator es probablemente la herramienta que más damos por segura. Abrimos una pestaña, tecleamos comandos, leemos archivos. ¿Qué podría salir mal con un simple `cat readme.txt`?
+
+Si usas iTerm2, la respuesta es: bastante.
+
+## El descubrimiento: un bug encontrado por IA
+
+El pasado 17 de abril de 2026, el investigador Hùng Nguyen (calif.io) publicó un análisis detallado de una vulnerabilidad en iTerm2 que convierte la lectura de un archivo de texto en ejecución arbitraria de código. Calif reconoció a OpenAI como socio en el proyecto "MAD Bugs" (Month of AI-Discovered Bugs), aunque el commit del parche acredita solo a Hùng Nguyen como descubridor.
+
+La historia empieza con una pregunta: ¿hasta dónde puede llegar una salida de terminal sin confianza? Los investigadores ya habían demostrado exploits similares en Vim y Emacs. Esta vez quisieron ir más lejos: ¿es seguro algo tan inocente como leer un archivo?
+
+No lo es. Y el problema no es trivial.
+
+## El mecanismo: secuencias de escape y el conductor SSH
+
+Para entender la vulnerabilidad, hay que conocer una característica específica de iTerm2: su **integración SSH**.
+
+iTerm2 incluye un modo de integración con sesiones SSH que se inicia normalmente a través de `it2ssh`. Cuando lo usas, iTerm2 despliega en la máquina remota un pequeño script llamado **conductor**. Ese conductor y iTerm2 se comunican mediante secuencias de escape del terminal, es decir, bytes incrustados en el flujo normal de entrada/salida.
+
+La comunicación usa dos secuencias clave:
+
+- **DCS 2000p**: engancha (hook) el conductor SSH dentro de iTerm2.
+- **OSC 134 y 135**: transportan los mensajes del conductor (begin, command, output, end, run, unhook). OSC 135 gestiona los mensajes previos al framer, y OSC 134 los posteriores.
+
+En una sesión legítima, el flujo es así: iTerm2 lanza SSH, despliega el conductor remoto, y los dos intercambian mensajes mediante estas secuencias. Todo funciona sobre el PTY normal; no hay un servicio de red separado.
+
+## El bug: confianza ciega en la salida del terminal
+
+El problema central es un fallo de confianza. iTerm2 **acepta el protocolo del conductor SSH desde cualquier salida de terminal**, no solo desde un conductor remoto real. Es decir, si un archivo de texto contiene las secuencias DCS 2000p y OSC 135 adecuadas, iTerm2 las procesa como si fueran parte de una sesión SSH legítima.
+
+Esto convierte cualquier salida de terminal en un vector de ataque. Un archivo `readme.txt` malicioso, un banner de servidor, un MOTD, cualquier cosa que se imprima en pantalla puede contener un conductor falso.
+
+Cuando la víctima ejecuta `cat readme.txt`, el archivo no solo muestra texto: engancha un conductor falso en iTerm2. A partir de ahí, iTerm2 empieza su flujo normal de integración SSH: envía peticiones `getshell()` y `pythonversion()`, y el conductor falso responde con mensajes OSC 135 preparados.
+
+## El exploit paso a paso
+
+El archivo malicioso contiene una transcripción falsa del protocolo del conductor:
+
+1. Una línea DCS 2000p falsa que anuncia una sesión de conductor.
+2. Mensajes OSC 135 que responden a las peticiones automáticas de iTerm2 (`getshell` con éxito, `pythonversion` con fallo).
+3. Un campo `sshargs` controlado por el atacante que se usa más adelante como material de comando.
+
+Una vez que iTerm2 cree que ha completado suficientes pasos de la integración, construye y envía un comando `run(...)`, codificado en base64, a través del PTY. Aquí viene el giro: en una sesión SSH real, ese comando viaja al conductor remoto. Pero en el exploit, **no hay conductor remoto**. El comando base64 se escribe en el PTY local, y la shell local lo recibe como entrada.
+
+Veamos un ejemplo simplificado de cómo se vería la interacción:
+
+```python
+# Concepto educativo: cómo se estructuran los mensajes del conductor
+# Esto NO es un exploit funcional, solo ilustra el protocolo
+
+def mensaje_conductor(tipo, contenido):
+    """Construye un mensaje OSC 135 del conductor de iTerm2.
+
+    Cada tipo (begin, command, output, end, unhook) es un mensaje
+    OSC separado — no se combinan en uno solo.
+    """
+    return f"\x1b]135;{tipo};{contenido}\x07"
+
+# Flujo del protocolo: cada paso es un mensaje independiente
+respuesta_getshell = mensaje_conductor("command", "getshell;/bin/zsh")
+respuesta_fin       = mensaje_conductor("end", "0")
+respuesta_unhook    = mensaje_conductor("unhook", "")
+# La shell falsa enviaría estos mensajes uno tras otro
+```
+
+El truco final: los chunks base64 que iTerm2 envía al PTY se interpretan como comandos por la shell local. Los primeros fragmentos fallan (son cadenas sin sentido), pero el último chunk se ha diseñado para que sea un path ejecutable válido: `ace/c+aliFIo`. El atacante coloca un ejecutable en esa ruta, y cuando la shell intenta ejecutar el chunk, lanza el código del atacante.
+
+## Las secuencias de escape: una herencia de 1978
+
+Todo esto es posible por una decisión de diseño del VT100 de Digital Equipment Corporation en 1978: las secuencias de escape son **en banda**. Los mensajes de control del terminal se mezclan con el contenido de datos. No hay canal separado para señalización.
+
+Esto tiene consecuencias fundamentales que seguimos pagando casi 50 años después:
+
+```bash
+# Las secuencias de escape viajan en el mismo flujo que el texto
+# Esto es válido y seguro:
+printf '\x1b[32mTexto verde\x1b[0m'
+
+# Pero esto demuestra que el terminal responde en band:
+printf '\x1b[6n'  # Pregunta la posición del cursor
+# El terminal responde con algo como \x1b[14;42R
+# Esa respuesta va al stdin del programa activo
+```
+
+```python
+# Comprobación básica: ¿tu terminal responde a DSR?
+import sys, select, os
+
+def probar_dsr():
+    """Comprueba si el terminal responde a Device Status Report."""
+    # Envía DSR (reporte de posición del cursor)
+    sys.stdout.write('\x1b[6n')
+    sys.stdout.flush()
+    # Lee la respuesta directamente del fd (sin buffering de Python)
+    readable, _, _ = select.select([sys.stdin], [], [], 0.5)
+    if readable:
+        respuesta = os.read(sys.stdin.fileno(), 20)
+        print(f"El terminal respondió: {respuesta!r}")
+        print("⚠️ Tu terminal inyecta datos en stdin")
+    else:
+        print("Sin respuesta. Puede que estés en un pipe o pantalla dummy.")
+
+# probar_dsr()  # Descomenta para probar interactivamente
+```
+
+La diferencia con esta vulnerabilidad es que las secuencias de escape estándar (como DSR) son conocidas y los terminales modernos tienen mitigaciones parciales. Lo peligroso de este bug es que introduce un **protocolo completo de comandos** (el conductor SSH) sobre el canal en banda, sin verificar la procedencia de los mensajes.
+
+## La corrección
+
+El bug se reportó a iTerm2 el 30 de marzo de 2026 y se corrigió al día siguiente, en el commit `a9e745993c2e2cbb30b884a16617cd5495899f86`. La corrección fundamental es validar que los mensajes del conductor solo se acepten cuando provienen de una sesión SSH real activada por el usuario, no de cualquier salida de terminal.
+
+Sin embargo, en el momento de publicar el artículo original, el parche aún no había llegado a las releases estables de iTerm2, lo que genera un debate sobre la ventana de tiempo entre corrección y disponibilidad para los usuarios.
+
+## Vulnerabilidades anteriores en iTerm2
+
+Esta no es la primera vez que iTerm2 tiene problemas con secuencias de escape. El historial es instructivo:
+
+- **CVE-2023-46300/46301** (2023): La integración con tmux inyectaba saltos de línea en stdin. Combinado con secuencias DECRQSS y DSR, permitía ejecución de comandos mediante el preprocesador `m4` incluido en macOS.
+- **CVE-2024-38396** (2024): Una regresión en iTerm2 3.5.0/3.5.1 reactivó por defecto el reporte de título de ventana (que estaba desactivado en versiones anteriores), combinado con la integración tmux, permitía inyectar texto arbitrario en stdin.
+
+El patrón es claro: cuantas más características se implementen sobre el canal en banda del terminal, más superficie de ataque se expone.
+
+```bash
+# Mitigación práctica: desactiva la integración SSH en iTerm2
+# Preferencias → Profiles → General → SSH
+# Desmarca "Enable SSH integration"
+
+# También puedes verificar qué versión usas:
+# iTerm2 → About iTerm2
+# Las versiones 3.5.x previas al parche son vulnerables
+
+# Para comprobar desde terminal:
+osascript -e 'tell application "iTerm2" to get version' 2>/dev/null
+```
+
+## Mi opinión
+
+Lo que me resulta más fascinante de este bug no es la técnica en sí, sino lo que revela sobre la confianza acumulada en la pila de software. Usamos terminales todos los días asumiendo que leer un archivo es una operación segura. Y lo era, hasta que alguien añadió un protocolo de control sobre el mismo canal por donde pasa el contenido.
+
+Es tentador culpar a iTerm2, pero el problema es sistémico. El VT100 definió que las secuencias de escape viajan en banda, y medio siglo después seguimos construyendo casas sobre esos cimientos. Cada nueva feature que usa ese canal (integración tmux, SSH, upload de archivos) abre nuevas puertas a la explotación.
+
+Que el bug lo encontrara una IA es un detalle interesante, pero no cambia la lección fundamental: **el canal en banda del terminal es incompatible por diseño con la seguridad de las features modernas**. La solución real no es parchear caso por caso, sino separar los canales de datos y control. Mientras eso no ocurra, seguiremos viendo vulnerabilidades de este tipo.
+
+Si usas iTerm2, actualiza en cuanto el parche llegue a stable. Y mientras tanto, desactiva la integración SSH. Hacer `cat readme.txt` nunca volverá a sentirse igual.
