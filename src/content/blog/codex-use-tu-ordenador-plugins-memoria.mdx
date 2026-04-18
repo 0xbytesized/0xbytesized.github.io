@@ -35,7 +35,7 @@ OpenAI ha lanzado más de 90 plugins que combinan skills, integraciones con apps
 - **CodeRabbit** — revisión de código automatizada
 - **GitLab Issues** — el gemelo de GitHub para los que no están en Microsoft
 - **Microsoft Suite** — integración con el ecosistema Office
-- **Neon (Databricks)** — bases de datos serverless Postgres
+- **Neon** — bases de datos serverless Postgres
 - **Render** — deploy con un comando
 
 La pieza interesante es MCP. Cada vez más herramientas exponen servidores MCP, y Codex los consume directamente. Esto significa que el ecosistema de integraciones crece sin que OpenAI tenga que construir cada conector.
@@ -45,7 +45,7 @@ La pieza interesante es MCP. Cada vez más herramientas exponen servidores MCP, 
 Codex ahora recuerda. No solo de la conversación actual, sino de experiencias previas: tus preferencias, correcciones que le hiciste, información que le costó obtener. Esto se traduce en que la próxima vez que le pidas algo, no empieza desde cero.
 
 ```typescript
-// Antes: cada conversación era tierra quemida
+// Antes: cada conversación era tierra quemada
 // "Usa React, no Vue" → lo tienes que repetir cada vez
 
 // Ahora: Codex acumula contexto
@@ -60,7 +60,7 @@ Es un cambio de paradigma: pasar de un chat a un compañero que aprende cómo tr
 
 Puedes configurar tareas recurrentes o diferidas. Codex puede despertarse solo para continuar un trabajo largo, potencialmente a lo largo de días o semanas. Los casos de uso que mencionan:
 
-- Aterrizar pull requests abiertas automáticamente
+- Integrar pull requests abiertas automáticamente
 - Hacer seguimiento de tareas pendientes
 - Monitorear conversaciones en Slack, Gmail o Notion y actuar cuando algo requiere atención
 
@@ -89,15 +89,15 @@ Codex ahora tiene un navegador dentro de la app. Puedes comentar directamente so
 
 Por ahora está orientado a desarrollo frontend y juegos en localhost, pero planean expandirlo para que Codex pueda operar cualquier sitio web.
 
-### Generación de imágenes con gpt-image-1.5
+### Generación de imágenes con gpt-image-1
 
-Codex puede generar e iterar sobre imágenes usando el modelo `gpt-image-1.5`. Combinando screenshots y código, sirve para crear mockups, conceptos visuales y assets de juegos sin salir del flujo de trabajo.
+Codex puede generar e iterar sobre imágenes usando el modelo `gpt-image-1`. Combinando screenshots y código, sirve para crear mockups, conceptos visuales y assets de juegos sin salir del flujo de trabajo.
 
 ## Lo que me parece interesante
 
 Hay tres cosas que destacan por encima del ruido:
 
-**1. El computer use es pragmático, no una demo.** Cuando Anthropic mostró computer use, era impresionante pero se sentía experimental. Aquí está integrado en un producto que 3 millones de devs usan cada semana. La diferencia entre "mira lo que puede hacer" y "úso de esto para mi trabajo" es enorme.
+**1. El computer use es pragmático, no una demo.** Cuando Anthropic mostró computer use, era impresionante pero se sentía experimental. Aquí está integrado en un producto que, según OpenAI, millones de devs usan cada semana. La diferencia entre "mira lo que puede hacer" y "uso esto para mi trabajo" es enorme.
 
 **2. Los plugins vía MCP son una apuesta por el ecosistema.** OpenAI no necesita construir cada integración — la comunidad ya lo hace a través de servidores MCP. Esto escala mucho mejor que un modelo cerrado de "App Store para agentes".
 
@@ -109,13 +109,13 @@ Hay tres cosas que destacan por encima del ruido:
 
 **Sandboxing.** Un agente con control total de tu ordenador es un agente que puede borrar archivos por equivocación, mandar correos que no querías o instalar dependencias sin revisar. Los comentarios en HN reflejan esta preocupación: la gente no está segura de querer darle ese nivel de control.
 
-**Jack of all trades, master of none.** Cuantas más cosas haga Codex, más se diluye. ¿Sigue siendo el mejor tool para escribir código, o se ha convertido en un Swiss Army knife donde ninguna hoja corta de verdad?
+**Jack of all trades, master of none.** Cuantas más cosas haga Codex, más se diluye. ¿Sigue siendo la mejor herramienta para escribir código, o se ha convertido en un Swiss Army knife donde ninguna hoja corta de verdad?
 
 ## Mi veredicto
 
 Codex está dejando de ser un "asistente de código" para convertirse en un "asistente de desarrollo". La diferencia es sutil pero importante: no solo escribe funciones, sino que revisa PRs, gestiona incidencias, itera visualmente y recuerda cómo trabajas.
 
-El computer use es el HEAD de la noticia, pero los plugins MCP y la memoria son el cambio que más impacto tendrá a largo plazo. Un agente que se integra con todo y aprende de ti es mucho más valioso que uno que puede hacer clic en botones.
+El computer use es el titular de la noticia, pero los plugins MCP y la memoria son el cambio que más impacto tendrá a largo plazo. Un agente que se integra con todo y aprende de ti es mucho más valioso que uno que puede hacer clic en botones.
 
 La pregunta es si OpenAI puede mantener la calidad del código mientras expande el alcance. Por ahora, si usas Codex solo para escribir código, sigues donde estabas. Si quieres que gestione más de tu workflow, esta actualización es un salto real.
 

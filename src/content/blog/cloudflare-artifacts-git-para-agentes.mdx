@@ -15,7 +15,7 @@ Artifacts ofrece:
 
 - **Repos programáticos**: crea un repo con una llamada a la API, obtén una URL remota y un token, y ya cualquier cliente Git puede operar contra él.
 - **Forks instantáneos**: forkea un repo en una copia aislada, con opción de solo lectura.
-- **Import desde cualquier remoto**: importa un repositorio de GitHub con una sola llamada.
+- **Importación desde cualquier remoto**: importa un repositorio de GitHub con una sola llamada.
 - **REST API + Workers API**: para entornos donde no tienes un cliente Git disponible (serverless, Lambda, Workers).
 - **Escala masiva**: decenas de millones de repos por namespace, gracias a Durable Objects.
 
@@ -118,7 +118,7 @@ La arquitectura completa:
 - **R2** guarda snapshots.
 - **KV** trackea tokens de autenticación.
 
-Los objetos Git grandes se chunked en filas de SQLite (límite de 2MB por fila). Y en vez de calcular deltas propios, los deltas crudos y los hashes base se persisten junto al objeto resuelto — en el fetch, si el cliente ya tiene el objeto base, el motor Zig emite el delta en vez del objeto completo, ahorrando ancho de banda y memoria.
+Los objetos Git grandes se fragmentan en filas de SQLite (límite de 2MB por fila). Y en vez de calcular deltas propios, los deltas crudos y los hashes base se persisten junto al objeto resuelto — en el fetch, si el cliente ya tiene el objeto base, el motor Zig emite el delta en vez del objeto completo, ahorrando ancho de banda y memoria.
 
 ## ArtifactFS: git clone pero async
 
@@ -137,13 +137,18 @@ Un ejemplo conceptual del flujo:
 
 ```bash
 # Montar un repo grande sin esperar al clone completo
-# (el CLI exacto puede variar según la versión de artifact-fs)
-artifactfs mount https://github.com/mi-org/repo-grande /mnt/repo
+# (flujo simplificado; consulta el README de artifact-fs para detalles)
+artifact-fs add-repo \
+  --name repo-grande \
+  --remote https://github.com/mi-org/repo-grande \
+  --branch main \
+  --mount-root /tmp
+artifact-fs daemon --root /tmp &
 
 # El agente puede empezar a trabajar inmediatamente
 # Los archivos se van hidratando en background
-ls /mnt/repo/src/         # El árbol ya está disponible
-cat /mnt/repo/package.json  # Se bloquea brevemente si no está hidratado
+ls /tmp/repo-grande/src/          # El árbol ya está disponible
+cat /tmp/repo-grande/package.json  # Se bloquea brevemente si no está hidratado
 ```
 
 La estimación de Cloudflare: recortar ~90-100 segundos del arranque de cada sandbox, multiplicado por miles de ejecuciones al mes, suma una cantidad significativa de horas de compute ahorradas.

@@ -21,19 +21,19 @@ La pieza central es que el binding `AI.run()` que ya usabas con Workers AI ahora
 
 ```typescript
 // Antes: modelo alojado en Cloudflare
-const fast = await env.AI.run("@cf/moonshotai/kimi-k2.5", {
-  prompt: "Clasifica este tickets como bug o feature"
+const fast = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+  prompt: "Clasifica este ticket como bug o feature"
 });
 
 // Ahora: mismo binding, modelo de Anthropic
-const deep = await env.AI.run("anthropic/claude-opus-4-6", {
+const deep = await env.AI.run("anthropic/claude-sonnet-4", {
   input: "Planifica los pasos para resolver este bug"
 }, {
   gateway: { id: "default" }
 });
 ```
 
-El catálogo incluye más de 70 modelos de 12+ proveedores: OpenAI, Anthropic, Google, Alibaba Cloud, AssemblyAI, Bytedance, MiniMax, y otros. Y están incorporando modelos de imagen, vídeo y voz, así que no es solo texto.
+El catálogo incluye más de 70 modelos de 12+ proveedores: OpenAI, Anthropic, Google, Alibaba Cloud, AssemblyAI, Bytedance, MiniMax y otros. Y están incorporando modelos de imagen, vídeo y voz, así que no es solo texto.
 
 ## Failover sin escribir failover
 
@@ -41,7 +41,7 @@ Aquí es donde se pone interesante para agentes de producción. Si un modelo est
 
 ```typescript
 // Tu código no cambia nada
-const result = await env.AI.run("openai/gpt-4.1", {
+const result = await env.AI.run("openai/gpt-4o", {
   messages: [{ role: "user", content: "Resume este PR" }]
 }, {
   gateway: { id: "default" }
@@ -57,7 +57,7 @@ Para agentes que funcionan con el Agents SDK de Cloudflare, hay otra caracterís
 
 ## Control de costes centralizado
 
-Llamar a 3.5 modelos de media a través de múltiples proveedores significa que ningún provider te da una visión holística de tu gasto en IA. AI Gateway te permite añadir metadata personalizada a cada petición para desglosar costes como tú necesites:
+Llamar a 3,5 modelos en promedio a través de múltiples proveedores significa que ningún provider te da una visión holística de tu gasto en IA. AI Gateway te permite añadir metadata personalizada a cada petición para desglosar costes como tú necesites:
 
 ```typescript
 await env.AI.run("@cf/meta/llama-4-scout", {
@@ -102,9 +102,9 @@ class Predictor(BasePredictor):
         return self.model.decode(output[0])
 ```
 
-Lanza `cog build`, sube el contenedor y accedes a tu modelo con el mismo `AI.run()`. Según Cloudflare, están trabajando en APIs públicas y comandos de Wrangler para gestionar todo desde CLI, además de cold starts más rápidos через GPU snapshotting.
+Lanza `cog build`, sube el contenedor y accedes a tu modelo con el mismo `AI.run()`. Según Cloudflare, están trabajando en APIs públicas y comandos de Wrangler para gestionar todo desde CLI, además de cold starts más rápidos mediante GPU snapshotting.
 
-Un dato curioso: el equipo de Replicate se ha fusionado oficialmente con el equipo de AI Platform de Cloudflare. No son equipos separados. Todos los modelos de Replicate van a estar disponibles a través de AI Gateway, y los modelos que desplegabas en Replicate podrás alojarlos en Workers AI.
+Un dato curioso: según parece, el equipo de Replicate se ha fusionado con el equipo de AI Platform de Cloudflare. Si esto se confirma, no serían equipos separados. Todos los modelos de Replicate podrían estar disponibles a través de AI Gateway, y los modelos que desplegabas en Replicate podrías alojarlos en Workers AI.
 
 ## Latencia: el camino más rápido al primer token
 
