@@ -1,0 +1,218 @@
+---
+title: "PgQue: colas Postgres sin bloat, directo de Skype"
+date: 2026-04-19T02:00
+tags: ["postgres", "colas", "plpgsql", "infra", "open-source"]
+excerpt: "PgQue rescata PgQ, la cola que diseñó Skype para millones de usuarios, y la reconstruye en PL/pgSQL puro. Sin bloat, sin extensión C, sin daemon externo."
+---
+
+Usar Postgres como cola es una de esas ideas que suena genial hasta que llevas
+tres meses en producción y tu tabla de jobs mide 40 GB, el autovacuum no da
+abasto y las consultas tardan el triple. Es un patrón tan común que hasta tiene
+nombre: el *death spiral* de las colas basadas en `SKIP LOCKED`. Y ahora hay un
+proyecto que dice haberlo resuelto de raíz, con una arquitectura que viene de
+Skype, de 2006.
+
+Se llama **PgQue**, y la semana pasada apareció en Hacker News con 308 estrellas
+en GitHub y una promesa que suena demasiado bonita: colas en Postgres con cero
+bloat por diseño.
+
+## El problema: SKIP LOCKED genera cadáveres
+
+La mayoría de las colas Postgres modernas —PGMQ, River, pg-boss, Que, Oban—
+funcionan más o menos igual: un worker hace `SELECT ... FOR SKIP LOCKED` para
+reclamar una fila, la procesa, y luego hace `DELETE` o `UPDATE` para marcarla
+como completada. Eso genera *dead tuples*: filas muertas que Postgres tiene que
+limpiar con VACUUM.
+
+En cargas bajas funciona bien. En cargas sostenidas, se acumulan los muertos
+más rápido de lo que el autovacuum puede barrer, y la tabla se hincha. Los
+índices se degradan. Las consultas van más lento. Y entramos en espiral:
+más lento significa más backlog, más backlog significa más filas, más filas
+significan más bloat.
+
+No es teoría. Brandur documentó este fenómeno en Heroku en 2015: una cola con
+60.000 trabajos pendientes en una hora. PlanetScale lo describió como una
+espiral de muerte a 800 jobs/segundo. Y el propio repositorio de River tiene
+un issue abierto (#59) sobre inanición del autovacuum.
+
+## La solución que Skype ya tenía
+
+Resulta que en 2006, Skype tenía el mismo problema, pero a escala mayor. Su
+solución fue **PgQ**: una cola basada en *snapshots* y rotación de tablas, no en
+bloqueo por fila. El diseño es radicalmente diferente:
+
+1. **No se borran filas una a una.** Los eventos se insertan en una tabla
+   rotatoria. Cuando todos los consumidores han pasado, la tabla entera se
+   hace `TRUNCATE`. Y `TRUNCATE` no genera dead tuples: desasigna almacenamiento
+   directamente.
+
+2. **Batching por snapshot.** Un *ticker* marca puntos en el tiempo (ticks).
+   Los consumidores leen lotes completos entre dos ticks, no filas
+   individuales. No hay `SKIP LOCKED`, no hay `UPDATE` por fila, no hay
+   claiming.
+
+3. **Fan-out nativo.** Cada consumidor mantiene su propio cursor sobre el
+   log compartido de eventos. Es como un topic de Kafka: todos los consumidores
+   ven todos los eventos, sin duplicar datos.
+
+PgQ funcionó en Skype durante más de una década, pero tenía un problema: requería
+una extensión C (`pgq`) y un daemon externo (`pgqd`). Eso lo hace incompatible
+con la mayoría de proveedores gestionados: ni RDS, ni Aurora, ni Supabase, ni
+Neon lo soportan.
+
+**PgQue es PgQ reescrito en PL/pgSQL puro.** Un solo archivo SQL. Cero
+extensiones C. Cero daemons. Funciona en cualquier Postgres 14+, incluyendo
+todos los managed providers.
+
+## Cómo se usa
+
+La instalación es un solo comando:
+
+```sql
+-- Instalar PgQue en una transacción
+begin;
+\i sql/pgque.sql
+commit;
+
+-- Arrancar el ticker con pg_cron (recomendado)
+select pgque.start();
+```
+
+Si no tienes `pg_cron`, puedes llamar al ticker manualmente o desde un
+scheduler externo. Lo importante es que alguien llame a `pgque.ticker()`
+cada segundo — sin ticker, los eventos se encolan pero no se entregan.
+
+Una vez instalado, el flujo básico es así:
+
+```sql
+-- Crear una cola y suscribir un consumidor
+select pgque.create_queue('pedidos');
+select pgque.subscribe('pedidos', 'procesador');
+
+-- Encolar un evento (desde cualquier conexión)
+select pgque.send('pedidos', '{"order_id": 42, "total": 99.95}'::jsonb);
+
+-- Recibir un lote (hasta 100 eventos)
+select * from pgque.receive('pedidos', 'procesador', 100);
+
+-- Confirmar procesamiento
+select pgque.ack(:batch_id);
+```
+
+La clave está en que `send`, `tick` y `receive` deben ir en transacciones
+separadas. No es un capricho: es el diseño por *snapshots* funcionando como
+fue pensado. Los eventos enviados no son visibles hasta que el ticker crea un
+nuevo tick, y `receive` solo ve lotes completos entre dos ticks.
+
+## Fan-out sin copiar datos
+
+Uno de los puntos fuertes de PgQue es el fan-out. En una cola `SKIP LOCKED`,
+cada evento va a un solo worker (competing consumers). En PgQue, cada
+consumidor tiene su cursor independiente sobre el mismo log:
+
+```sql
+-- Dos consumidores independientes sobre la misma cola
+select pgque.subscribe('pedidos', 'facturacion');
+select pgque.subscribe('pedidos', 'analitica');
+
+-- Cada uno avanza a su ritmo, sin duplicar datos
+select * from pgque.receive('pedidos', 'facturacion', 50);
+-- → obtiene lotes desde su propio cursor
+
+select * from pgque.receive('pedidos', 'analitica', 200);
+-- → obtiene lotes desde su cursor, independientemente
+```
+
+Si `facturacion` va más lento, `analitica` no se bloquea. Si añades un nuevo
+consumidor, empieza desde donde esté el log y avanza desde ahí. No hay copias
+de eventos por consumidor, como sí hace pg-boss (que inserta una fila por
+suscriptor por evento). Es una posición en un log compartido, punto.
+
+## Dead Letter Queue integrado
+
+Cuando un evento falla después de varios reintentos, PgQue lo envía a una
+*dead letter queue* integrada — algo que el PgQ original no tenía:
+
+```sql
+-- NACK con reintento (si supera el máximo, va a DLQ)
+select pgque.nack(:batch_id, :msg, '60 seconds'::interval, 'conexion fallida');
+
+-- Inspeccionar eventos muertos
+select * from pgque.dlq_inspect('pedidos');
+
+-- Reenviar un evento específico desde la DLQ
+select pgque.dlq_replay(:dl_id);
+
+-- Reenviar todo
+select pgque.dlq_replay_all('pedidos');
+```
+
+La DLQ es una tabla separada, no una bandera en la tabla de eventos. Esto
+mantiene el hot path limpio y evita que los eventos fallidos interfieran con
+la rotación de tablas.
+
+## La rotación por tres tablas
+
+El truco más interesante de PgQue es cómo evita el bloat por completo. Cada
+cola usa **tres tablas rotatorias**: `event_<id>_0`, `_1` y `_2`. Solo la tabla
+activa recibe INSERTs. Periódicamente (por defecto cada 2 horas), la rotación
+avanza: la siguiente tabla se convierte en activa, y la anterior queda
+disponible para `TRUNCATE` cuando todos los consumidores han pasado.
+
+```sql
+-- Tabla de configuración de la cola (simplificada)
+create table if not exists pgque.queue (
+    queue_id                serial,
+    queue_name              text not null,
+    queue_cur_table         integer not null default 0,  -- 0, 1 o 2
+    queue_rotation_period   interval not null default '2 hours',
+    queue_ticker_max_count  integer not null default 500,
+    queue_ticker_max_lag    interval not null default '3 seconds'
+);
+```
+
+`TRUNCATE` no genera WAL excesivo, no necesita VACUUM, y no sufre de *xmin
+horizon pinning* (que es lo que pasa cuando una transacción larga impide que
+el autovacuum limpie filas muertas). Es la operación de limpieza más barata
+que Postgres tiene.
+
+## Benchmarks preliminares
+
+Los números que publica el proyecto son de un portátil (Apple Silicon,
+Postgres 18, `synchronous_commit=off`):
+
+| Escenario | Throughput |
+|-----------|-----------|
+| Inserción individual, ~100 B | ~86k ev/s |
+| Lectura de consumidor, lote 100k | ~2.4M ev/s |
+| Test sostenido 30 min | Cero crecimiento de dead tuples |
+
+Son números preliminares de un solo equipo, pero lo importante no es la
+velocidad absoluta sino la **estabilidad**: el claim central es que PgQue no
+se degrada con el tiempo porque simplemente no genera bloat. Otra cola puede
+ser más rápida en el minuto uno y estar muerta en el mes tres.
+
+## Mi veredicto
+
+PgQue es una de esas ideas que te hacen pensar "¿cómo no se nos ocurrió antes?",
+hasta que recuerdas que sí se le ocurrió a alguien — a los ingenieros de Skype
+en 2006. Lo que Nikolay Samokhvalov ha hecho es rescatar una arquitectura
+probada durante una década y adaptarla al ecosistema actual: Postgres gestionado,
+sin extensiones C, sin daemons.
+
+El trade-off es claro: PgQue no te da latencia de milisegundos. El modelo de
+snapshots añade entre 1 y 2 segundos de latencia end-to-end por diseño. Si
+necesitas dispatch en un dígito de milisegundos, esto no es tu herramienta.
+Pero si necesitas estabilidad bajo carga sostenida sin ir ajustando autovacuum
+cada semana, es exactamente lo opuesto a todo lo demás.
+
+Lo que más me gusta es la honestidad del proyecto: el README dice
+explícitamente cuándo NO usar PgQue, con una tabla de comparación que incluye
+sus propios puntos débiles. Eso genera mucha más confianza que un README que
+promete que su cola es la solución a todo.
+
+Está en fase temprana (v0.1), la API está en flujo, y las rutas de upgrade
+están sin pulir. Pero el motor —el PgQ heredado de Skype— lleva 20 años en
+producción. No es un experimento. Es un reaprovechamiento.
+
+Enlace: [github.com/NikolayS/pgque](https://github.com/NikolayS/pgque)
