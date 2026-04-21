@@ -1,0 +1,151 @@
+---
+title: "16x sin JIT: optimizando un intérprete dinámico desde cero"
+date: 2026-04-21T13:35
+tags: ["interpretes", "rendimiento", "c++", "lenguajes", "compiladores"]
+excerpt: "Fil Pizlo optimiza el intérprete AST-walking de Zef 16.6x sin JIT ni bytecodes: value tagging, inline caches, symbols y object model explicados desde dentro."
+---
+
+## Un intérprete 35x más lento que Python — y cómo llegó a competir con él
+
+Fil Pizlo tiene un curriculum peculiar en el mundo de los runtimes: escribió gran parte del JIT FTL de JavaScriptCore, el motor de Safari. Pero su proyecto personal, [Zef](https://zef-lang.dev/), no es un motor JIT. Es un intérprete AST-walking — el tipo más simple de intérprete que existe: recorre el árbol de sintaxis nodo a nodo, sin bytecodes, sin compilación, sin magia.
+
+Y era **35x más lento que CPython**. 80x más lento que Lua. 23x más lento que QuickJS.
+
+Su [artículo sobre la optimización de Zef](https://zef-lang.dev/implementation) documenta 21 cambios incrementales que multiplicaron la velocidad por 16.6, *sin añadir un JIT ni generar bytecodes*. Es una lección magistral sobre dónde está realmente el cuello de botella en un intérprete dinámico, y no es donde crees.
+
+## Lección 1: Deja de buscar cadenas — usa símbolos
+
+El primer gran error del Zef original era usar `std::string` para todo. Cada acceso a variable, cada llamada a método, cada operación Lookup pasaba por una comparación de strings contra un `std::unordered_map`. Eso es carísimo.
+
+La solución: **symbols**. En lugar de comparar cadenas de texto, asignar a cada identificador un entero único en tiempo de parseo. Las comparaciones pasan de `strcmp` (O(n) sobre la longitud del string) a un `==` de enteros, que es una instrucción de CPU.
+
+Si alguna vez has programado en Lua o Erlang, ya conoces el concepto: Lua usa "short strings" internados, Erlang usa atoms. En el caso de Zef, el cambio de strings a symbols supuso un **18.4% de speedup** por sí solo.
+
+```cpp
+// Antes: cada acceso a variable es una búsqueda por string
+Value Context::get(const std::string& name) {
+    auto it = locals.find(name);
+    if (it != locals.end()) return it->second;
+    return parent ? parent->get(name) : Value::undefined;
+}
+
+// Después: symbol es un entero, la búsqueda es O(1) trivial
+Value Context::get(Symbol name) {
+    Value result = locals.get(name);
+    if (result.isUndefined() && parent)
+        return parent->get(name);
+    return result;
+}
+```
+
+## Lección 2: Value representation — el bit que lo cambia todo
+
+Pizlo empezó con algo que ya hizo bien desde el principio: **NaN-boxing** (o "NuN tagging", como él lo llama). Esta técnica usa los bits de un `double` NaN para codificar otros tipos. Un `Value` de 64 bits puede ser:
+
+- Un double (la mayoría de los bits codifican el número directamente)
+- Un int32 de 32 bits (con tag)
+- Un puntero a Object (con tag)
+
+```cpp
+// La representación central — todo cabe en 64 bits
+class Value {
+    uint64_t m_bits;
+
+    bool isDouble() const {
+        return (m_bits >> 48) >= 0x1000;
+    }
+    bool isInt32() const {
+        return (m_bits >> 48) == 0xFFFF;
+    }
+    bool isObject() const {
+        return (m_bits >> 48) == 0xFFFE;
+    }
+
+    double asDouble() const {
+        // Restar offset para recuperar el double original
+        return bit_cast<double>(m_bits - 0x1000000000000ULL);
+    }
+};
+```
+
+Con esto evitas allocations para números — los enteros y los doubles viven *dentro* del Value, sin tocar el heap. Es una técnica estándar en JavaScriptCore, V8 y LuaJIT, pero Pizlo la explica desde cero: si estás haciendo un intérprete, esto debería ser tu **primera** decisión de diseño, porque es casi imposible cambiarlo después.
+
+## Lección 3: Inline caches — el salto gigante
+
+Cambio #6 es el más salvaje del artículo. Pizlo introduce tres cosas a la vez: un **object model** con layouts cachable, **inline caches** y **watchpoints**. El resultado: un speedup de **4.55x** — de 1.5x a 6.8x respecto al baseline.
+
+Un inline cache funciona así: la primera vez que ejecutas `obj.x`, el intérprete busca la propiedad en la cadena de prototipos (lento). Pero recuerda la *forma* del objeto —essu "shape" o "hidden class"— y la posición donde encontró la propiedad. La segunda vez, si el objeto tiene la misma forma, va directo al offset, sin buscar nada.
+
+```cpp
+// Sin IC: buscar la propiedad cada vez
+Value dot(Object* obj, Symbol name) {
+    for (Object* cur = obj; cur; cur = cur->parent())
+        if (auto it = cur->properties().find(name);
+            it != cur->properties().end())
+            return it->second;
+    return Value::undefined;
+}
+
+// Con IC: recordamos la última forma y offset
+Value dotWithIC(Object* obj, Symbol name, InlineCache& cache) {
+    if (cache.shape == obj->shape())
+        return obj->getAt(cache.offset);  // ¡O(1) directo!
+    // Miss: buscar lento y actualizar el cache
+    Value result = dot(obj, name);
+    cache.shape = obj->shape();
+    cache.offset = obj->offsetOf(name);
+    return result;
+}
+```
+
+Los **watchpoints** son la otra mitad del truco: si un inline cache se vuelve polimórfico (demasiadas shapes distintas), el intérprete puede invalidarlo y volver al modo lento. Es un mecanismo que V8 y JSC usan extensivamente, pero adaptado a un intérprete *sin JIT*.
+
+## Lección 4: Lo obvio también cuenta
+
+Después del gran salto de los inline caches, los siguientes cambios son incrementalmente pequeños pero instructivos:
+
+- **Specialized Arguments**: reemplazar `std::optional<std::vector<Value>>` por tipos específicos (`ZeroArguments`, `OneArgument`, `TwoArguments`). Resultado: 1.33x speedup. Menos allocations, menos indirección.
+
+- **Getter/Setter specialization**: si el intérprete detecta que `obj.x` siempre llama a la misma función getter, genera un camino rápido. Si `x = value` siempre es un setter directo, lo mismo.
+
+- **Global method dispatch table**: una hashtable global indexada por `(clase, símbolo)` que permite resolver llamadas a métodos en una sola lookup, sin recorrer la jerarquía de clases.
+
+- **Evitar `std::optional`**: en Fil-C++ (el runtime de memoria segura que Pizlo también escribió y donde corre Zef), los `std::optional` se allocan en heap. Eliminarlos ahorró un porcentaje no trivial.
+
+```cpp
+// Argumentos especializados: evitar allocations innecesarias
+struct OneArgument {
+    Value arg0;
+};
+struct TwoArguments {
+    Value arg0;
+    Value arg1;
+};
+
+// El llamador no crea un vector, pasa el valor directamente
+void callBuiltin(Builtin builtin, const OneArgument& args) {
+    // Sin std::optional, sin std::vector, sin heap
+    nativeImplementations[builtin](args.arg0);
+}
+```
+
+## La tabla final
+
+Después de los 21 cambios, los números hablan solos:
+
+| Métrica | Baseline | Tras optimizar | Con Yolo-C++ |
+|---|---|---|---|
+| vs Baseline | 1x | 16.6x | 67x |
+| vs Python 3.10 | 35.4x más lento | 2.1x más lento | 1.9x *más rápido* |
+| vs Lua 5.4.7 | 79.6x más lento | 4.8x más lento | 1.2x más lento |
+| vs QuickJS 0.14 | 22.6x más lento | 1.4x más lento | 3x *más rápido* |
+
+Fil-C++ (donde se miden los resultados principales) impone una penalización de ~4x por ser un runtime de memoria segura sin GC. Cuando Pizlo porta los mismos cambios a "Yolo-C++" (C++ normal con malloc/glibc), Zef **supera a CPython y QuickJS** y se acerca a Lua.
+
+## Mi veredicto
+
+Este artículo es una rareza. La mayoría de la literatura sobre rendimiento de lenguajes se centra en JITs, SSA y register allocation — cosas que solo importan cuando ya tienes los fundamentos bien. Pizlo demuestra que, si empiezas con el intérprete más ingenuo posible, las optimizaciones que realmente importan son las *estructurales*: cómo representas tus valores, cómo buscas las propiedades, cómo evitas allocations innecesarias.
+
+La lección más importante no es técnica sino metodológica: **mide, nunca adivines**. Cada cambio tiene su número. El cambio #3 (Avoid IntObject) dio solo un 1% de speedup. El cambio #6 (Inline Caches) dio un 4.55x. Si Pizlo hubiera adivinado, habría pasado semanas optimizando lo equivocado. Pero como cada cambio se mide contra un benchmark (Richards, DeltaBlue, N-Body, Splay), siempre sabe dónde está el cuello de botella real.
+
+Para cualquiera que esté pensando en escribir un intérprete, este artículo debería ser lectura obligatoria — y [el código fuente de Zef está en GitHub](https://github.com/pizlonator/zef) con diffs para cada uno de los 21 pasos, para que puedas seguir el viaje paso a paso.
