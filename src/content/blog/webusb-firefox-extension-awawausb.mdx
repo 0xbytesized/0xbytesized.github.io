@@ -1,0 +1,182 @@
+---
+title: "WebUSB llega a Firefox mediante extensión"
+date: 2026-04-21T06:35
+tags: ["webusb", "firefox", "rust", "hardware", "extensiones"]
+excerpt: "La extensión awawausb trae WebUSB a Firefox vía native messaging con un stub en Rust, permitiendo hablar con dispositivos USB desde el navegador."
+---
+
+## La brecha que Firefox no quiso cerrar
+
+Si alguna vez has intentado abrir la consola de Firefox y escribir `navigator.usb`, te habrás encontrado con `undefined`. Mientras Chrome lleva casi una década soportando la API WebUSB de forma nativa, Firefox simplemente nunca la implementó. Hay bugs abiertos en Bugzilla pidiendo esta API desde hace tiempo — como el [meta bug 2022432](https://bugzilla.mozilla.org/show_bug.cgi?id=2022432), abierto en marzo de 2026— y, a juzgar por la falta de progreso, no parece que vaya a cambiar pronto.
+
+El pasado 20 de abril, un desarrollador conocido como ArcaneNibble publicó [awawausb](https://github.com/ArcaneNibble/awawausb), una extensión para Firefox que implementa WebUSB de forma completa usando *native messaging* y un binario escrito en Rust. En menos de 24 horas acumuló más de 170 estrellas en GitHub y casi 200 puntos en Hacker News. La comunidad llevaba tiempo esperando algo así.
+
+## Cómo funciona la arquitectura
+
+La extensión no es un simple polyfill. Su diseño es bastante ingenioso, porque la API WebUSB requiere acceso a bajo nivel al stack USB del sistema operativo, algo que una extensión de navegador por sí sola no puede hacer. La solución: un **stub nativo** — un programa aparte que corre fuera del navegador y que se comunica con la extensión vía stdin/stdout usando JSON.
+
+El flujo de datos tiene cuatro capas:
+
+1. **Página web** → quiere usar `navigator.usb.requestDevice()`, etc.
+2. **Content script (MAIN world)** → inyecta los objetos `USB`, `USBDevice`, `USBConfiguration`… en el contexto de la página, tal como definiría la especificación W3C.
+3. **Background script** → centraliza todas las peticiones, gestiona permisos y multiplexa el acceso entre varias pestañas.
+4. **Native stub** → proceso en Rust que habla con el kernel vía `ioctl` (Linux), `IOKit` (macOS) o `WinUSB` (Windows), y devuelve los resultados por stdout.
+
+La clave de que funcione es el mecanismo de *native messaging* de Firefox, que permite a una extensión lanzar un binario auxiliar y comunicarse con él por pipes. Es el mismo mecanismo que usan gestores de contraseñas como KeePassXC para su integración con el navegador.
+
+## El stub nativo: Rust sin async
+
+El stub está escrito enteramente en Rust, pero con una decisión arquitectónica poco habitual: **no usa async**. Zero. Ni `tokio`, ni `async-std`, ni `futures`. El autor lo explica en su documentación: originalmente intentó integrar las APIs del sistema (udev en Linux, IOKit en macOS) con los runtimes async populares de Rust y se encontró con que la complejidad se disparaba, especialmente por el soporte multihilo.
+
+En su lugar, el stub maneja su propio *event loop* manualmente:
+
+- En Linux: usa `epoll` para esperar eventos de stdin (peticiones de la extensión), del socket netlink de udev (dispositivos conectados/desconectados) y de los file descriptors de USB (`EPOLLOUT` indica transferencias completadas).
+- En macOS: usa `kqueue` con stdin, un Mach port de IOKit y las notificaciones de dispositivos.
+- En Windows: usa I/O completion ports con `GetQueuedCompletionStatusEx`.
+
+Todos los transfers USB se modeled como struct que poseen sus propios búferes de memoria. Cuando un transfer está en vuelo, la propiedad conceptual del búfer pasa alkernel del SO. Si algo sale mal durante el teardown de un dispositivo, el código elige **leakear memoria** antes que recuperar un puntero colgante — una decisión explícita documentada y vinculada a [faultlore.com/blah/everyone-poops](https://faultlore.com/blah/everyone-poops/).
+
+## Código: conectándote a un dispositivo Arduino
+
+Veamos cómo se usaría WebUSB desde una página web con esta extensión. El siguiente ejemplo conecta a un Arduino con WebUSB habilitado y lee datos del endpoint bulk-in:
+
+```javascript
+// Pedir al usuario que seleccione un dispositivo USB
+const dispositivo = await navigator.usb.requestDevice({
+  filters: [{ vendorId: 0x2341 }] // vendorId de Arduino
+});
+
+console.log(`Conectado: ${dispositivo.productName}`);
+
+// Abrir la conexión con el dispositivo
+await dispositivo.open();
+await dispositivo.selectConfiguration(1);
+await dispositivo.claimInterface(0);
+
+// Leer 64 bytes del endpoint 1 (bulk-in)
+const resultado = await dispositivo.transferIn(1, 64);
+const datos = new Uint8Array(resultado.data.buffer);
+console.log("Datos recibidos:", datos);
+
+// Cerrar al terminar
+await dispositivo.releaseInterface(0);
+await dispositivo.close();
+```
+
+Este código funciona idéntico en Chrome (nativo) y en Firefox (con awawausb). La extensión expone exactamente la misma superficie de API.
+
+## Código: escuchando eventos de conexión
+
+WebUSB también permite detectar cuándo se conecta o desconecta un dispositivo dinámicamente, sin necesidad de `requestDevice`:
+
+```javascript
+// Escuchar dispositivos que se conectan
+navigator.usb.addEventListener("connect", (evento) => {
+  console.log("Dispositivo conectado:", evento.device.productName);
+});
+
+navigator.usb.addEventListener("disconnect", (evento) => {
+  console.log("Dispositivo desconectado:", evento.device.productName);
+});
+
+// Obtener dispositivos ya autorizados anteriormente
+const autorizados = await navigator.usb.getDevices();
+autorizados.forEach((dev) => {
+  console.log(`Ya autorizado: ${dev.productName} (0x${dev.vendorId.toString(16)})`);
+});
+```
+
+El patrón de los content scripts de awawausb es interesante: inyecta dos scripts en cada página. Uno corre en el *MAIN world* (modifica `navigator.usb` directamente), y el otro en el *ISOLATED world* (gestiona la comunicación con el background script vía `postMessage`). Esta separación es necesaria porque el código que corre en el MAIN world puede ser interferido por scripts maliciosos de la propia página, así que toda validación de permisos se hace en el background script.
+
+## Código: el protocolo de native messaging
+
+El native stub se comunica con la extensión enviando y recibiendo mensajes JSON por stdin/stdout con un formato de longitud prefijada (4 bytes little-endian + payload). Así es como el stub recibe una petición para listar dispositivos:
+
+```rust
+// Estructura simplificada del protocolo (según protocol.rs del proyecto)
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+pub enum RequestMessage {
+    #[serde(rename = "enumerate")]
+    Enumerate,
+    #[serde(rename = "open")]
+    Open { dev_handle: String },
+    #[serde(rename = "transfer_in")]
+    TransferIn {
+        dev_handle: String,
+        ep: u8,
+        len: u32,
+    },
+    // ... más variantes según el protocolo
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+pub enum ResponseMessage {
+    NewDevice {
+        sid: String,
+        bcdUSB: u16,
+        bDeviceClass: u8,
+        // ... descriptores del dispositivo
+    },
+    TransferResult {
+        status: String,
+        data: Option<Vec<u8>>,
+    },
+    // ... más variantes
+}
+```
+
+Las estructuras de Rust usan `#[serde(tag = "type")]` para serializar/deserializar mensajes JSON tipados, lo que permite al lado JavaScript distinguir fácilmente qué tipo de respuesta ha recibido.
+
+## Código: el event loop manual en Linux
+
+En Linux, el event loop del native stub se parece a algo así (simplificado, no es código fuente directo del proyecto):
+
+```rust
+// Patrón simplificado del event loop en Linux
+fn run_loop(engine: &mut USBStubEngine) -> std::io::Result<()> {
+    let epoll_fd = unsafe { libc::epoll_create1(0) };
+
+    // Registrar stdin para peticiones del navegador
+    // Registrar socket netlink para eventos udev
+    // Registrar fds de USB para completions
+
+    let mut events = vec![libc::epoll_event::default(); 16];
+    loop {
+        let n = unsafe {
+            libc::epoll_wait(epoll_fd, events.as_mut_ptr(), 16, -1)
+        };
+
+        for i in 0..n {
+            match events[i].u64 {
+                STDIN_SESSION_ID => handle_browser_request(engine),
+                UDEV_SESSION_ID => handle_udev_event(engine),
+                other_id => handle_usb_completion(engine, other_id),
+            }
+        }
+    }
+}
+```
+
+Lo notable: el session ID (no el file descriptor) se almacena en el campo `u64` de `epoll_event`. Esto obliga a buscar el fd en las estructuras de `USBStubEngine`, pero evita problemas complejos de lifetimes que surgirían al almacenar punteros a structs en el contexto de epoll.
+
+## Limitaciones que debes conocer
+
+La extensión no es perfecta. Tiene restricciones importantes:
+
+- **No funciona en Android**. Firefox para Android no soporta native messaging, así que no hay forma de que la extensión lance el stub.
+- **No disponible en Web Workers**. La API se expone solo en el hilo principal de la página, no en Service Workers ni Web Workers (a diferencia de Chrome, donde sí está disponible en Workers).
+- **Requiere instalación adicional**. No basta con instalar la extensión: hay que descargar e instalar el native stub aparte. Hay binarios precompilados para macOS (x86_64 + ARM64), Linux (x86_64 + aarch64) y Windows (AMD64 + ARM64), pero sigue siendo un paso extra.
+- **Manifest V2**. La extensión usa Manifest V2 con un background script persistente. Firefox aún soporta esta versión, pero a largo plazo la compatibilidad es incierta.
+- **Estado potencialmente inconsistente**. El propio autor reconoce que la información redundante almacenada en múltiples capas (stub, background, content scripts) puede desincronizarse, y que no hay mitigaciones arquitectónicas más allá de "tener cuidado".
+
+## Mi veredicto
+
+awawausb es exactamente el tipo de proyecto que me parece inspirador: en lugar de esperar a que Mozilla implemente WebUSB (llevan 15 años sin hacerlo), alguien se ha sentado, ha estudiado las APIs de los tres sistemas operativos, ha escrito miles de líneas de Rust y JavaScript, y ha publicado una solución que funciona **hoy**.
+
+La decisión de evitar async en el stub es valiente y bien argumentada. Cuando los runtimes async de Rust no encajan con las APIs del sistema, hacer tu propio event loop con `epoll`/`kqueue` directamente no es solo viable — es probablemente más correcto. Y la filosofía de "prefiero leakear memoria antes que usar un puntero colgante" es pragmatismo de ingeniería en su mejor expresión.
+
+¿Es un sustituto perfecto de una implementación nativa? No. Requiere un paso de instalación extra, no funciona en Android y tiene edges cases de sincronización de estado. Pero para desarrolladores de hardware que necesitan WebUSB en Firefox para probar sus dispositivos, o para hackers que quieren iterar rápido sin cambiar de navegador, esta extensión es un regalo.
+
+Si trabajas con microcontroladores, placas de desarrollo o cualquier hardware que exponga WebUSB, te recomiendo probarla. Y si encuentras diferencias de comportamiento con la implementación de Chrome, el autor pide explícitamente que se reporten — su objetivo es compatibilidad total.
