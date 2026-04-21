@@ -2,12 +2,12 @@
 title: "Vercel: breach por OAuth y env vars sin cifrar"
 date: 2026-04-20T02:40
 tags: ["seguridad", "vercel", "oauth", "env-vars", "infraestructura"]
-excerpt: "El incidente de seguridad de Vercel abril 2026: cómo un OAuth de terceros comprometió env vars no cifradas y qué implica para tu infraestructura."
+excerpt: "El incidente de seguridad de Vercel de abril de 2026: cómo un OAuth de terceros comprometió env vars no cifradas y qué implica para tu infraestructura."
 ---
 
 El 19 de abril de 2026, Vercel publicó un aviso de seguridad que confirmó una brecha en sus sistemas internos. No fue un zero-day sofisticado ni una vulnerabilidad en Next.js. Fue algo mucho más mundano — y por eso mismo, más preocupante: el OAuth de una herramienta externa comprometió la cuenta de Google Workspace de un empleado, y desde ahí el atacante enumeró variables de entorno marcadas como "no sensibles" para escalar acceso.
 
-Repaso técnico de lo que pasó, cómo funcionó la cadena de ataque, y qué puedes hacer para que no te pase lo mismo.
+Repaso técnico de lo que pasó, cómo funcionó la cadena de ataque y qué puedes hacer para que no te pase lo mismo.
 
 ## Qué pasó: la cadena de ataque
 
@@ -30,9 +30,9 @@ El vector es clarísimo: un token OAuth de terceros actúa como llave maestra, y
 Vercel ofrece dos modos para variables de entorno:
 
 - **Normal**: legible por cualquier miembro del proyecto con acceso. Se almacena sin cifrar en reposo. Pensada para datos como `NEXT_PUBLIC_APP_URL` o flags de feature toggles.
-- **Sensitive**: cifrada en reposo, irreducible una vez creada. Solo inyectable en Producción y Preview, no en Development.
+- **Sensitive**: cifrada en reposo, irrecuperable una vez creada. Solo inyectable en Producción y Preview, no en Development.
 
-El incidente reveló que muchos equipos marcan como "no sensibles" variables que **sí lo son** — API keys de bases de datos, tokens de servicio, credenciales de integraciones — porque el modo sensitive requiere eliminar y recrear la variable, y hasta ahora el interface no era tan evidente.
+El incidente reveló que muchos equipos marcan como "no sensibles" variables que **sí lo son** — API keys de bases de datos, tokens de servicio, credenciales de integraciones — porque el modo sensitive requiere eliminar y recrear la variable y hasta ahora la interfaz no era tan evidente.
 
 ```bash
 # Antes del incidente: una variable "normal" (no sensible)
@@ -97,13 +97,13 @@ Para automatizar, puedes usar la Google Admin SDK Directory API para inspecciona
 ACCESS_TOKEN=$(gcloud auth print-access-token)
 
 # 2. Listar apps OAuth autorizadas para un usuario
-curl -s "https://admin.googleapis.com/admin/directory/v1.1/users/alice@ejemplo.com/tokens" \
+curl -s "https://admin.googleapis.com/admin/directory/v1/users/alice@ejemplo.com/tokens" \
   -H "Authorization: Bearer ${ACCESS_TOKEN}" \
   | jq '.items[] | {clientId: .clientId, appName: .clientName, scopes: .scopes}'
 
 # 3. Revocar una app sospechosa por su client ID
 curl -X DELETE \
-  "https://admin.googleapis.com/admin/directory/v1.1/users/alice@ejemplo.com/tokens/CLIENT_ID" \
+  "https://admin.googleapis.com/admin/directory/v1/users/alice@ejemplo.com/tokens/CLIENT_ID" \
   -H "Authorization: Bearer ${ACCESS_TOKEN}"
 ```
 
@@ -167,19 +167,19 @@ for (const env of projectEnvs) {
 
 ## Defense in depth: no confíes en una sola capa
 
-Este incidente es un ejemplo de textbook de defense in depth fallida. El atacante tuvo que superar varias capas, pero una vez dentro de la primera (el token OAuth), las siguientes capas no resistieron porque había variables sin cifrar. Para una infraestructura seria, considera:
+Este incidente es un ejemplo clásico de defensa en profundidad fallida. El atacante tuvo que superar varias capas, pero una vez dentro de la primera (el token OAuth), las siguientes capas no resistieron porque había variables sin cifrar. Para una infraestructura seria, considera:
 
-- **Rotación automática de secrets**: herramientas como Doppler, Infisical o el propio Vercel con policies pueden forzar la rotación periódica.
+- **Rotación automática de secrets**: herramientas como Doppler, Infisical o el propio Vercel con políticas de rotación pueden forzar la rotación periódica.
 - **Zero-trust para variables**: marca todo como sensible por defecto. Vercel ahora permite configurar una policy que obliga a que todas las nuevas variables en Producción y Preview sean sensibles.
-- **Principle of least privilege para OAuth**: no conectes apps que no necesitas. Cada conexión es una puerta.
+- **Principio de mínimo privilegio para OAuth**: no conectes apps que no necesitas. Cada conexión es una puerta.
 - **Monitoriza los accesos**: si una variable de entorno de producción se lee desde una IP o sesión inhabitual, debería generar una alerta.
 
 ## Mi veredicto
 
 El incidente de Vercel no es una vulnerabilidad técnica exótica. Es el viejo problema de las variables de entorno en claro combinado con un OAuth de terceros comprometido. Lo preocupante es que Vercel — una plataforma que maneja el deploy de millones de proyectos — tenía un modelo donde las variables "no sensibles" se almacenaban sin cifrar en reposo. En 2026, todo secreto debería cifrarse en reposo por defecto.
 
-Lo positivo: Vercel ha reaccionado rápido, ha publicado el OAuth app ID como IOC, y ha mejorado el dashboard para gestionar variables sensibles. Lo negativo: la comunicación inicial fue vaga ("ciertos sistemas internos"), y el tiempo entre el compromiso y la notificación pública aún no está claro.
+Lo positivo: Vercel ha reaccionado rápido, ha publicado el OAuth app ID como IOC y ha mejorado el dashboard para gestionar variables sensibles. Lo negativo: la comunicación inicial fue vaga ("ciertos sistemas internos"), y el tiempo entre el compromiso y la notificación pública aún no está claro.
 
-Para los desarrolladores que usan Vercel, la acción es simple: **revisa tus variables de entorno, marca como sensibles todo lo que no sea un flag público, y audita las apps OAuth de tu Google Workspace**. Hoy. No mañana.
+Para los desarrolladores que usan Vercel, la acción es simple: **revisa tus variables de entorno, marca como sensibles todo lo que no sea un flag público y audita las apps OAuth de tu Google Workspace**. Hoy. No mañana.
 
 Y si estás en otra plataforma — Netlify, Railway, Render — aplica la misma regla. El vector de ataque no es exclusivo de Vercel. Es cualquier plataforma que almacene secrets sin cifrar y acepte OAuth de terceros.
