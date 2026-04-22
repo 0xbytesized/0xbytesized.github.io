@@ -1,7 +1,13 @@
 import { google } from 'googleapis';
 import { readFileSync } from 'fs';
 
-const key = JSON.parse(readFileSync('/data/uploads/2026-04-15T18-03-48-549Z_agente-pig-3b68d17c09cd.json', 'utf8'));
+const credsPath = process.argv[2] || process.env.GSC_CREDENTIALS;
+if (!credsPath) {
+  console.error('Usage: node scripts/gsc-status.mjs <path-to-service-account.json>');
+  console.error('   or: GSC_CREDENTIALS=<path> node scripts/gsc-status.mjs');
+  process.exit(1);
+}
+const key = JSON.parse(readFileSync(credsPath, 'utf8'));
 const SITE = 'https://0xbytesized.github.io';
 
 const auth = new google.auth.JWT({

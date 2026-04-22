@@ -1,11 +1,17 @@
 import { google } from 'googleapis';
 import { readFileSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { dirname } from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const credentials = JSON.parse(readFileSync('/data/uploads/2026-04-15T18-03-48-549Z_agente-pig-3b68d17c09cd.json', 'utf8'));
+
+const credsPath = process.argv[2] || process.env.GSC_CREDENTIALS;
+if (!credsPath) {
+  console.error('Usage: node scripts/gsc-force-index.mjs <path-to-service-account.json>');
+  console.error('   or: GSC_CREDENTIALS=<path> node scripts/gsc-force-index.mjs');
+  process.exit(1);
+}
+const credentials = JSON.parse(readFileSync(credsPath, 'utf8'));
 const SITE_URL = 'https://0xbytesized.github.io';
 
 // Leer todos los posts dinámicamente
