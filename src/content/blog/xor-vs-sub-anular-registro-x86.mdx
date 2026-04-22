@@ -1,0 +1,117 @@
+---
+title: "¿Por qué `xor` venció a `sub` para anular registros?"
+date: 2026-04-22T19:15
+tags: ["assembly", "x86", "optimizacion", "compiladores", "low-level"]
+excerpt: "Raymond Chen explica por qué `xor eax, eax` se impuso como idioma para poner a cero un registro x86, aunque `sub` tiene mejores flags."
+---
+
+El otro día, mientras revisaba Hacker News, me encontré con un artículo de Raymond Chen —sí, el de *The Old New Thing*— que aborda una pregunta que jamás me había planteado: si `xor eax, eax` es el idioma estándar para poner a cero un registro en x86, ¿por qué no usamos `sub eax, eax`? Ambas ocupan dos bytes, ambas tardan lo mismo en ejecutarse, y `sub` incluso comporta mejor las banderas de estado. El artículo acumulaba cerca de ciento setenta puntos en HN y generó una discusión nostálgica entre programadores de sistemas. Me picó la curiosidad.
+
+El contexto es sencillo. La arquitectura x86 no tiene un registro dedicado a cero. Si necesitas anular, digamos, `eax`, debes hacerlo tú mismo. La opción más compacta es `xor eax, eax` o `sub eax, eax`, ambas de dos bytes. La alternativa obvia, `mov eax, 0`, requiere cinco bytes porque incluye la constante de cuatro bytes. Por eso los compiladores desechan `mov` al optimizar. Pero entre `xor` y `sub`, ¿cuál es la diferencia real?
+
+## Comparación de banderas
+
+La respuesta inesperada es que `sub eax, eax` tiene un comportamiento de banderas *estrictamente mejor* que `xor eax, eax`. Raymond Chen incluye una tabla que resumo aquí:
+
+| Bandera | `xor eax, eax` | `sub eax, eax` |
+| ------- | --------------- | --------------- |
+| OF (desbordamiento) | limpia | limpia |
+| SF (signo) | limpia | limpia |
+| ZF (cero) | activa | activa |
+| AF (acarreo auxiliar) | **indefinida** | **limpia** |
+| PF (paridad) | activa | activa |
+| CF (acarreo) | limpia | limpia |
+
+Observa la fila de **AF**: `xor` la deja indefinida, mientras que `sub` la limpia de manera determinista. Eso significa que si tu código posterior depende de AF, `sub` es más predecible. Y aun así, `xor` ganó la guerra. ¿Por qué?
+
+## Dos instrucciones, dos bytes, un ganador
+
+Chen propone una explicación sociológica más que técnica: el efecto de *enjambre* (*swarming*). En sus palabras, ambos idiomas comenzaron con popularidad similar, pero `xor` tomó una ligera ventaja por un golpe de suerte. Quizá algún compilador pionero lo eligió primero, o quizá a los programadores les pareció más *inteligente*. El caso es que, al ver los compiladores generar `xor eax, eax`, los desarrolladores razonaron: *"Si los que escriben compiladores lo hacen así, debe haber una razón oculta"*. Ese sesgo bastó para inclinar la balanza. Una vez que una instrucción adquiere una ventaja mínima, por pequeña que sea, el resto del ecosistema converge hacia ella. Es un caso clásico de preferencia dependiente de la ruta.
+
+El resultado es que hoy, si abres cualquier binario compilado con GCC, Clang o MSVC, verás `xor` por doquier. `sub` para anular registros es casi un fósil.
+
+## Cómo lo ven los compiladores
+
+Para ilustrar el patrón, aquí va un ejemplo en C que cualquier compilador moderno transformará en `xor` al optimizar:
+
+```c
+#include <stdint.h>
+
+uint32_t count_even(const int *arr, uint32_t n) {
+    uint32_t count = 0;          /* suele convertirse en xor eax, eax */
+    for (uint32_t i = 0; i < n; i++) {
+        if ((arr[i] % 2) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+```
+
+La inicialización de `count` a cero es el caso de uso más común. En ensamblador escrito a mano, el mismo patrón se vería así con NASM:
+
+```nasm
+section .text
+global count_even
+count_even:
+    xor  eax, eax        ; contador = 0
+    xor  ecx, ecx        ; índice i = 0
+.loop:
+    cmp  ecx, esi
+    jae  .done
+    mov  edx, [rdi + rcx*4]
+    test edx, 1
+    jnz  .skip
+    inc  eax
+.skip:
+    inc  ecx
+    jmp  .loop
+.done:
+    ret
+```
+
+Nota cómo `xor` aparece dos veces para inicializar registros. Es el estándar de facto en código ensamblador x86-64 actual. Si reemplazaras esos `xor` por `sub`, el resultado sería idéntico en comportamiento salvo por la bandera AF, pero cualquier revisor de código te miraría con recelo.
+
+## El hardware toma partido
+
+La historia no termina en los compiladores. Los ingenieros de Intel, conscientes de que `xor r, r` es omnipresente, añadieron detección especial en el decodificador de instrucciones del frontend. Cuando el procesador ve `xor` (y también `sub`, según Chen) de un registro consigo mismo, renombra el destino a un registro interno de cero, omitiendo la ejecución real de la instrucción. En la práctica esto significa que la operación "tarda cero ciclos" y, lo más importante, rompe cadenas de dependencia. Normalmente, el resultado de un `xor` depende de la entrada, pero cuando ambos operandos son el mismo registro, el resultado es cero independientemente del valor previo.
+
+A pesar de que Intel soporta ambos idiomas, Raymond Chen cita una preocupación recurrente en Stack Overflow: otros fabricantes de CPUs podrían haber especializado solo `xor`, dejando `sub` fuera. Si eso ocurriera, elegir `sub` te penalizaría en arquitecturas alternativas. Esta incertidumbre, por remota que sea, refuerza el monopolio de `xor`. Es una lección interesante: a veces una decisión técnica se consolida no porque sea objetivamente superior, sino porque el ecosistema la volvió universal.
+
+## Comparación explícita en inline assembly
+
+Si alguna vez necesitas emitir estas instrucciones manualmente desde C, la sintaxis de GNU inline assembly es directa:
+
+```c
+#include <stdint.h>
+
+uint32_t zero_xor(void) {
+    uint32_t result;
+    __asm__ __volatile__(
+        "xorl %%eax, %%eax"
+        : "=a" (result)
+    );
+    return result;
+}
+
+uint32_t zero_sub(void) {
+    uint32_t result;
+    __asm__ __volatile__(
+        "subl %%eax, %%eax"
+        : "=a" (result)
+    );
+    return result;
+}
+```
+
+Ambas funciones devuelven cero, pero la primera deja AF indefinida, mientras que la segunda la limpia. En código productivo la diferencia rara vez importa —la mayoría de las rutinas de alto nivel no inspeccionan AF— pero es un recordatorio de que "lo popular" y "lo correcto" no siempre coinciden.
+
+## Mi opinión
+
+Este artículo me recordó por qué me fascinan los detalles de bajo nivel. En la superficie, `xor eax, eax` es solo una curiosidad mnemotécnica que memorizamos una vez y repetimos para siempre. Pero bajo esa aparente banalidad hay una historia sobre cómo las comunidades de programación toman decisiones colectivas, cómo los compiladores establecen costumbres que el hardware posterior ratifica, y cómo una ventaja inicial arbitraria puede cristalizarse en estándar.
+
+Personalmente, creo que Chen tiene razón: el triunfo de `xor` fue un accidente histórico. Si los primeros compiladores de DOS hubieran preferido `sub`, hoy estaríamos escribiendo `sub` sin pensarlo. La lección general es que los idiomas de programación —incluso los de ensamblador— están moldeados tanto por la conveniencia social como por la optimización estricta. Como programadores, deberíamos ser conscientes de cuándo seguimos una convención porque tiene mérito técnico, y cuándo simplemente imitamos a la manada.
+
+Y ahí va un detalle personal: según cuenta Chen, uno de sus antiguos colegas usaba `sub` a propósito para anular registros. Leía código ensamblador y sabía quién lo había escrito solo por esa elección. Es un bonito recordatorio de que, incluso en el nivel más bajo, el estilo es identidad.
+
+**Fuente:** [Sure, xor'ing a register with itself is the idiom for zeroing it out, but why not sub?](https://devblogs.microsoft.com/oldnewthing/20260421-00/?p=112247), Raymond Chen, *The Old New Thing*, 2026-04-21. Discusión en Hacker News (ciento setenta pts aproximadamente).
