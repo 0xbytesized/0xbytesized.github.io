@@ -1,0 +1,132 @@
+---
+title: "VidStudio: edición de video privada en el navegador"
+date: 2026-04-22T12:45
+tags: ["javascript", "webcodecs", "ffmpeg", "privacidad", "wasm"]
+excerpt: "Vídeo que se edita en el navegador: VidStudio usa WebCodecs, FFmpeg WASM y Web Workers para procesar clips sin subirlos a ningún servidor."
+---
+
+Hoy me topé con un *Show HN* que me hizo detener el scroll: [VidStudio](https://vidstudio.app/video-editor), un editor de video que promete algo que suena imposible hasta que lees la pila tecnológica: editar, recortar, exportar y persistir proyectos de video **sin que un solo byte salga de tu máquina**. Nada de cuentas, nada de nubes, nada de *"acepta estos términos"*. Solo tu navegador, tu video y una combinación de APIs modernas que, vistas en conjunto, dibujan una arquitectura elegante.
+
+La publicación acumuló cerca de 280 puntos en Hacker News y generó una discusión técnica interesante. Algunos usuarios señalaron problemas de compatibilidad con códecs HEVC en Firefox; otros preguntaron por los límites de memoria en móviles cuando se procesan archivos 4K. El creador respondió con detalle, pero lo que más me llamó la atención fue la descripción del stack: WebCodecs para decodificación acelerada por hardware, FFmpeg compilado a WebAssembly para codificación final, Pixi.js sobre WebGL para la interfaz, Web Workers para no bloquear el hilo principal, e IndexedDB para guardar proyectos localmente. Es una arquitectura de procesamiento de video 100 % cliente que, hasta hace pocos años, habría requerido una aplicación nativa.
+
+## Por qué importa el procesamiento local
+
+La mayoría de editores de video en línea suben tu material a servidores remotos. Eso introduce latencia, costes de infraestructura y, sobre todo, una barrera de privacidad. VidStudio demuestra que el navegador ya tiene suficientes piezas para montar un pipeline decente sin salir del dispositivo.
+
+La clave está en combinar dos mundos: la velocidad de las APIs nativas del navegador (WebCodecs) con la versatilidad de herramientas maduras portadas a WASM (FFmpeg). Uno maneja la lectura rápida; el otro, la escritura flexible. Entre medias, Web Workers evitan que la interfaz se congele, e IndexedDB actúa como sistema de archivos persistente.
+
+## Decodificación con WebCodecs
+
+La API de WebCodecs permite decodificar video directamente en el navegador usando el acelerador de hardware cuando está disponible. Esto hace que el *scrubbing* (mover la cabeza lectora por la línea de tiempo) sea fluido, porque no dependes de un servidor que genere previsualizaciones.
+
+El siguiente ejemplo muestra cómo configurar un decodificador y extraer fotogramas de un vídeo MP4. En un caso real, los datos vendrían de un `FileReader` tras arrastrar un archivo; aquí uso un array de bytes como ilustración:
+
+```typescript
+const decoder = new VideoDecoder({
+  output: (frame) => {
+    // frame es un VideoFrame con los datos decodificados
+    // Se puede dibujar en un canvas o transferir a WebGL
+    console.log(`Fotograma ${frame.timestamp}µs, ${frame.codedWidth}x${frame.codedHeight}`);
+    frame.close();
+  },
+  error: (err) => console.error("Error de decodificación:", err),
+});
+
+// Verificamos que el navegador soporte la configuración antes de iniciar
+const config = { codec: "avc1.42001E", hardwareAcceleration: "prefer-hardware" };
+const supported = await VideoDecoder.isConfigSupported(config);
+if (supported.supported) {
+  decoder.configure(config);
+}
+
+// Supongamos que chunkData es un ArrayBuffer extraído del contenedor MP4
+const chunk = new EncodedVideoChunk({
+  type: "key",
+  timestamp: 0,
+  data: chunkData,
+});
+
+decoder.decode(chunk);
+await decoder.flush();
+```
+
+El método `flush` bloquea hasta que se procesan todos los chunks pendientes. En VidStudio, esto probablemente se ejecuta en un Worker para que la interfaz siga respondiendo mientras se decodifican miles de fotogramas.
+
+## Codificación con FFmpeg.wasm
+
+WebCodecs cubre bien la decodificación, pero la codificación final —especialmente cuando necesitas compatibilidad con múltiples formatos o ajustes avanzados de bitrate— sigue siendo territorio de FFmpeg. Portar FFmpeg a WebAssembly permite ejecutarlo dentro del navegador sin instalar nada.
+
+El flujo típico es escribir un archivo virtual en el sistema de archivos en memoria de FFmpeg, ejecutar la orden deseada, y leer el resultado:
+
+```typescript
+import { FFmpeg } from "@ffmpeg/ffmpeg";
+import { fetchFile } from "@ffmpeg/util";
+
+const ffmpeg = new FFmpeg();
+
+// Cargamos el core de FFmpeg (~31 MB comprimido)
+await ffmpeg.load({
+  coreURL: "/ffmpeg-core.js",
+  wasmURL: "/ffmpeg-core.wasm",
+});
+
+// Escribimos el archivo de entrada en el FS virtual
+const inputBytes = await fetchFile(originalVideoBlob);
+await ffmpeg.writeFile("input.mp4", inputBytes);
+
+// Transcodificamos a un formato más liviano
+await ffmpeg.exec([
+  "-i", "input.mp4",
+  "-c:v", "libx264",
+  "-preset", "ultrafast",
+  "-crf", "28",
+  "-c:a", "copy",
+  "output.mp4",
+]);
+
+// Recuperamos el resultado
+const output = await ffmpeg.readFile("output.mp4");
+const exportBlob = new Blob([output.buffer], { type: "video/mp4" });
+URL.createObjectURL(exportBlob);
+```
+
+El punto crítico aquí es la memoria. FFmpeg.wasm ejecuta dentro del heap de WebAssembly, que en móviles puede estar limitado a pocos cientos de megabytes. VidStudio aparentemente mitiga esto fragmentando el trabajo y usando Workers, aunque el creador admite que videos muy largos en 4K pueden chocar con el techo del navegador. Es un tradeoff honesto: privacidad total a cambio de restricciones hardware.
+
+## Aislamiento en Web Workers
+
+Procesar video en el hilo principal es una receta para el *jank*. Cualquier operación pesada —decodificar una secuencia, ejecutar FFmpeg, renderizar previsualizaciones— debe moverse a un Worker:
+
+```typescript
+// video-worker.ts
+self.addEventListener("message", async (event) => {
+  const { fileBuffer, command } = event.data;
+
+  if (command === "extract-keyframes") {
+    const decoder = new VideoDecoder({
+      output: (frame) => {
+        // Enviamos los metadatos del frame al hilo principal
+        // (no transferimos el frame directamente para evitar costes de serialización)
+        self.postMessage({ type: "frame", timestamp: frame.timestamp });
+        frame.close();
+      },
+      error: (err) => self.postMessage({ type: "error", message: err.message }),
+    });
+
+    // Configuración y decodificación omitidas por brevedad
+    await decoder.flush();
+    self.postMessage({ type: "done" });
+  }
+});
+```
+
+En el hilo principal se instancia el Worker y se comunica por mensajes. Pixi.js puede entonces usar esos metadatos de fotogramas para dibujar la línea de tiempo y los thumbnails, mientras el cálculo pesado ocurre en segundo plano.
+
+## Mi veredicto
+
+VidStudio no es el editor de video más potente del mundo, ni pretende serlo. Lo que me parece brillante es que demuestra un cambio de paradigma: el navegador ya no es solo una ventana para consumir contenido, sino una plataforma de producción seria cuando se combinan las APIs correctas.
+
+Hay dos riesgos evidentes. El primero es el consumo de memoria: FFmpeg.wasm + WebCodecs + Pixi.js + IndexedDB compiten por los mismos recursos en un entorno con límites estrictos. El segundo es el licenciamiento: al distribuir FFmpeg compilado a WASM desde un servidor, entra en juego la LGPL 2.1, y algunos comentaristas de HN cuestionaron si la aplicación cumple con las obligaciones de atribución y liberación de fuentes. No soy abogado, pero es un recordatorio de que portar librerías copyleft al navegador introduce complejidades legales que no existen en el backend.
+
+A pesar de esos matices, creo que VidStudio apunta en la dirección correcta. Para clips cortos, ediciones rápidas y usuarios que priorizan la privacidad, un pipeline 100 % cliente es hoy viable. Y si el rendimiento de WebCodecs y WASM sigue mejorando, dentro de unos años la pregunta no será *"¿se puede editar video en el navegador?"*, sino *"¿por qué lo haría en otro sitio?"*.
+
+**Fuente:** [Show HN: VidStudio, a browser based video editor](https://news.ycombinator.com/item?id=47847558) (~281 pts, Hacker News, 2026-04-21).
