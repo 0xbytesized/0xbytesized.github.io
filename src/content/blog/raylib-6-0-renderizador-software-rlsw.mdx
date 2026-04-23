@@ -1,0 +1,115 @@
+---
+title: "Raylib 6.0: renderer por software y 600 funciones"
+date: 2026-04-23T14:00
+tags: ["raylib", "c", "graphics", "gamedev", "spain"]
+excerpt: "Llega la mayor release de raylib con rlsw, un renderer de CPU sin GPU, backends para Win32 y memoria, y una API de ficheros completamente nueva."
+---
+
+El 23 de abril de 2026 ha llegado la mayor release de la historia de raylib. Con más de dos mil commits desde la versión anterior, más de trescientos issues cerrados y doscientos nuevos contribuidores, **raylib 6.0** no es una actualización menor: es una redefinición de lo que puede hacer una librería de gráficos escrita en C y sin dependencias externas.
+
+Raylib lleva años siendo la puerta de entrada favorita de muchos desarrolladores al mundo del rendering y los videojuegos. Su apuesta por la simplicidad —una API plana de unas seiscientas funciones— la ha mantenido lejos de la complejidad de motores como Unity o Unreal, pero cada vez más potente en contextos embebidos, educativos o de prototipado rápido. Con la versión 6.0, Ramon Santamaria y los contribuidores han dado un paso lateral que pocos esperaban: han hecho que raylib pueda correr **sin GPU y sin sistema operativo**.
+
+## rlsw: OpenGL 1.1 en la CPU
+
+La novedad más llamativa es **`rlsw`**, un renderizador por software que implementa la especificación de OpenGL 1.1 en un único fichero de cabecera. Funciona como backend directo del módulo `rlgl` de raylib, de forma que el usuario no tiene que cambiar una sola línea de código para pasar de aceleración por hardware a rasterización pura en CPU.
+
+Bajo el capó, `rlsw` gestiona un framebuffer interno con soporte para múltiples modos de color: desde RGB de 8 bits hasta profundidades de 24 bits. Soporta los modos de rendering básicos —puntos, líneas, triángulos y quads— además de texturas sin compresión, filtros bilineales, blending, face culling, scissor clipping y corrección de perspectiva. Incluso incluye una opción para usar intrínsecos SIMD mediante `RLSW_USE_SIMD_INTRINSICS`, aunque el autor advierte que solo es recomendable cuando el desarrollador controla la arquitectura destino.
+
+Obviamente un renderer de CPU es más lento que uno de GPU. Según los tests preliminares del proyecto, aplicaciones básicas se mantienen cómodamente entre 30 y 60 fotogramas por segundo. No es suficiente para un AAA moderno, pero sí para interfaces gráficas en microcontroladores, paneles industriales o dispositivos RISC-V sin acelerador gráfico. De hecho, Espressif ya ha publicado un port de raylib 6.0 para ESP32 gracias a este backend.
+
+La verdadera magia está en que el cambio es transparente. El mismo código que dibuja una ventana con OpenGL ahora puede renderizar a memoria sin tocar una línea:
+
+```c
+#include "raylib.h"
+
+int main(void)
+{
+    InitWindow(800, 600, "Raylib 6.0 — sin GPU");
+    SetTargetFPS(60);
+
+    while (!WindowShouldClose())
+    {
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+        DrawRectangle(300, 200, 200, 150, SKYBLUE);
+        DrawText("Renderizando por software", 20, 20, 20, DARKGRAY);
+        EndDrawing();
+    }
+
+    CloseWindow();
+    return 0;
+}
+```
+
+Este ejemplo compila y ejecuta tanto con OpenGL acelerado como con `rlsw`. La diferencia está en la bandera de compilación, no en el código fuente.
+
+## PLATFORM_MEMORY: headless y sin sistema operativo
+
+El segundo gran golpe de esta release es el backend **`PLATFORM_MEMORY`**. Se trata de una plataforma nueva que permite ejecutar raylib sin sistema operativo, renderizando directamente a un buffer de memoria en formato RGBA8888.
+
+Esto abre escenarios que antes eran imposibles: servidores que generan imágenes a partir de escenas 3D, procesos por lotes que exportan frames sin inicializar X11 ni Wayland, o dispositivos embebidos donde no hay ni ventana ni gestor de ventanas. La compilación es directa:
+
+```sh
+make TARGET_PLATFORM=PLATFORM_MEMORY
+```
+
+Cuando se selecciona este target, el Makefile de raylib fuerza automáticamente `GRAPHICS_API_OPENGL_SOFTWARE`, de modo que `rlsw` se encarga de todo el pipeline gráfico. El resultado es un ejecutable que puede correr en un contenedor Docker mínimo o directamente en hardware crudo con un simple main.
+
+## La API de ficheros que faltaba
+
+Raylib 6.0 no solo mira hacia el hardware. También ha reforzado su capa de utilidades con una **nueva API de ficheros** que hasta ahora brillaba por su ausencia. Aunque la librería siempre permitió cargar texturas, modelos y sonidos, carecía de primitivas básicas para manipular el sistema de archivos desde C sin recurrir a `stdio.h` o funciones POSIX.
+
+Las seis nuevas funciones de este paquete son:
+
+- `FileCopy(const char *srcPath, const char *dstPath)`
+- `FileMove(const char *srcPath, const char *dstPath)`
+- `FileRename(const char *fileName, const char *fileRename)`
+- `FileRemove(const char *fileName)`
+- `FileTextReplace(const char *fileName, const char *search, const char *replacement)`
+- `FileTextFindIndex(const char *fileName, const char *search)`
+
+Todas devuelven un entero que indica éxito o error, manteniendo la filosofía de raylib de no lanzar excepciones ni depender de estructuras opacas. Un ejemplo práctico: copiar un fichero de configuración antes de modificarlo:
+
+```c
+#include "raylib.h"
+#include <stdio.h>
+
+int main(void)
+{
+    const char *original = "config.ini";
+    const char *copia = "config.ini.bak";
+
+    if (FileCopy(original, copia) == 0)
+    {
+        printf("Copia de seguridad creada: %s\n", copia);
+    }
+
+    if (FileTextReplace(original, "volumen=50", "volumen=80") == 0)
+    {
+        printf("Configuración actualizada.\n");
+    }
+
+    return 0;
+}
+```
+
+Además del filesystem, se ha añadido `ComputeSHA256(unsigned char *data, int dataSize)`, que devuelve un puntero a un array estático de ocho enteros sin signo con el hash completado. Y `GetKeyName(int key)`, que traduce un código de tecla al nombre real en el layout del teclado conectado, útil para mostrar atajos personalizados sin asumir que todo el mundo usa QWERTY.
+
+## Win32 y Emscripten sin intermediarios
+
+La arquitectura de backends de raylib 6.0 ha sido rehecha para seguir una plantilla común por plataforma. Fruto de ese trabajo aparecen dos backends nuevos, ambos marcados como experimentales:
+
+- **`rcore_desktop_win32.c`**: implementa directamente las llamadas a la API Win32, sin depender de GLFW, SDL ni RGFW. Soporta tanto ventanas con OpenGL acelerado como ventanas GDI para el renderer de software.
+- **`rcore_web_emscripten.c`**: elimina `libglfw.js` y habla directamente con Emscripten y JavaScript, permitiendo usar un canvas 2D no acelerado con `rlsw` o un canvas WebGL cuando se necesite potencia.
+
+Este enfoque de separar la lógica de plataforma por sistema operativo mejora la mantenibilidad del código y simplifica futuros ports. No es una revolución para el usuario final, pero sí una base más sólida para lo que viene.
+
+## Mi veredicto
+
+Lo que más me gusta de raylib 6.0 no es ninguna función concreta, sino la coherencia de visión. En un ecosistema donde muchas librerías gráficas crecen añadiendo capas de abstracción, wrappers de wrappers y dependencias transitivas que pesan más que el proyecto original, raylib ha ido en dirección contraria: ha eliminado dependencias, no las ha añadido. Con `rlsw` y `PLATFORM_MEMORY` puedes tener gráficos en C ejecutándose en un microcontrolador sin sistema operativo. Eso no es simplificación barata, es ingeniería de verdad.
+
+La nueva API de ficheros me parece necesaria y bien diseñada: devuelve códigos de error simples, no oculta el sistema de ficheros detrás de objetos opacos, y las funciones hacen exactamente lo que dicen. `FileTextReplace` y `FileTextFindIndex` pueden parecer humildes, pero ahorran cientos de líneas de C estándar en proyectos pequeños.
+
+El único matiz que pondría es que los backends Win32 y Emscripten aún están marcados como experimentales. En producción seguiría usando GLFW o SDL para escritorio hasta que pasen un par de releases de maduración. Pero el camino trazado es correcto.
+
+Raylib 6.0 no solo llega a las seiscientas funciones de API. Con ella, la librería demuestra que no necesitas una GPU para hacer gráficos, ni un sistema operativo para ejecutar una ventana, ni un motor complejo para empezar a programar videojuegos.
