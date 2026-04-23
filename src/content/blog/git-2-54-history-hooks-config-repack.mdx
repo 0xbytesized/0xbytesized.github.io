@@ -1,0 +1,100 @@
+---
+title: "Git 2.54: history, hooks en config y repack geométrico"
+date: 2026-04-23T20:16
+tags: ["git", "vcs", "cli", "spain"]
+excerpt: "Git 2.54 trae el comando experimental history, hooks en configuración, repack geométrico por defecto y mejoras en log y rebase."
+---
+
+El proyecto Git publicó la versión **2.54** el 20 de abril de 2026. Según el anuncio oficial de GitHub, la release suma cambios de más de ciento treinta contribuidores, de los cuales sesenta y seis son nuevos. Como viene siendo habitual en esta serie de artículos, el blog de GitHub ha hecho un resumen de los cambios más interesantes, y en esta ocasión cubre tanto la 2.53 como la 2.54. De todo el listado, hay tres o cuatro novedades que merecen la pena si pasas más de media hora al día en la terminal.
+
+## git history: reescribir sin rebase interactivo
+
+La novedad más visible es **`git history`**, un comando experimental para reescribir la historia sin usar `git rebase -i`. Hasta ahora, corregir un mensaje de commit antiguo o dividir un commit en dos exigía montar un plan de rebase, marcar el commit correcto, resolver posibles conflictos y conducir la operación hasta el final. Para cambios sencillos, toda esa maquinaria es excesiva.
+
+`git history` reduce la fricción. Sus dos subcomandos actuales son `reword` y `split`. Con `reword` abres el mensaje de un commit directamente y Git actualiza la historia, incluyendo las ramas que desciendan de él. Lo importante es que, a diferencia de `git rebase`, **no toca el árbol de trabajo ni el índice**, y funciona incluso en repositorios bare.
+
+```bash
+# Corregir el mensaje de HEAD~2 sin tocar el working tree
+git history reword HEAD~2
+```
+
+`split`, por su parte, abre una interfaz similar a `git add -p` para seleccionar qué hunks quedan en el commit original y cuáles se extraen a un commit padre nuevo. Git reescribe cualquier rama descendiente automáticamente.
+
+```bash
+# Dividir el commit actual en dos commits interactivamente
+git history split HEAD
+```
+
+El comando tiene limitaciones intencionadas: no soporta historias con merge commits y se niega a continuar si detectaría un conflicto. Está construido sobre la maquinaria de `git replay`, lo que explica por qué puede operar sin working tree.
+
+## Hooks desde la configuración
+
+Históricamente, los hooks de Git solo podían definirse como scripts ejecutables dentro de `.git/hooks/`. Si querías compartir un linter entre repositorios, la única alternativa limpia era crear symlinks manualmente o apuntar `core.hooksPath` a un directorio compartido, lo que forzaba a usar exactamente los mismos hooks en todos los repos.
+
+Git 2.54 permite definir hooks **dentro de los ficheros de configuración**. Pueden vivir en `~/.gitconfig`, `/etc/gitconfig` o en la config local del repositorio. Además, al estar basados en configuración, se pueden apilar varios hooks para el mismo evento.
+
+```ini
+[hook "linter"]
+    event = pre-commit
+    command = ~/bin/linter --cpp20
+
+[hook "no-leaks"]
+    event = pre-commit
+    command = ~/bin/leak-detector
+```
+
+Git los ejecuta en el orden en que aparecen en la configuración. Los scripts tradicionales de `.git/hooks/` siguen funcionando y se ejecutan al final, por lo que la compatibilidad hacia atrás está asegurada. Para ver qué hooks están activos y de dónde vienen:
+
+```bash
+git hook list pre-commit
+```
+
+También se puede desactivar un hook individual con `hook.<nombre>.enabled = false`, útil cuando un hook está definido a nivel global pero un repositorio concreto necesita excluirse.
+
+## Mantenimiento geométrico por defecto
+
+En Git 2.52 se introdujo la estrategia de repacking geométrico como opción dentro de `git maintenance`. La idea es analizar los packfiles del repositorio y, si sus tamaños siguen una progresión geométrica, combinarlos incrementalmente sin necesidad de un `gc` completo que reconstruya todo en un único pack.
+
+En Git 2.54, la estrategia geométrica es el **comportamiento por defecto** cuando ejecutas `git maintenance run` sin especificar estrategia. Esto evita los repacks costosos que conguran los repositorios grandes, combinando packs de forma incremental y recurriendo al `gc` tradicional solo cuando tiene sentido consolidar todo. Si prefieres el comportamiento anterior, puedes restaurarlo con:
+
+```bash
+git config maintenance.strategy gc
+```
+
+## git log -L con pickaxe
+
+El comando `git log -L`, que traza la historia de un rango de líneas dentro de un fichero, ha sido rehecho para pasar su salida por el diff pipeline estándar. Antes estaba aislado y ignoraba silenciosamente opciones como `-S`, `-G`, `--word-diff` o `--color-moved`.
+
+A partir de esta versión, `git log -L` es compatible con las búsquedas pickaxe. Puedes limitar la historia de una función concreta a aquellos commits donde aparece o desaparece una cadena:
+
+```bash
+git log -L :auth:src/api.js -S "token" --oneline
+```
+
+Esto devuelve únicamente los commits que, dentro del contexto de `auth` en `src/api.js`, han añadido o eliminado la palabra "token". Para bases de código grandes, la combinación reduce drásticamente el ruido.
+
+## Trailers, blame y status
+
+La release también incluye varios ajustes menores que acumulan calidad de vida. `git rebase` ha aprendido la opción `--trailer`, que añade un trailer a cada mensaje de commit rebasado usando la maquinaria de `interpret-trailers`. Es más limpio que encadenar `git commit --amend` dentro de un rebase:
+
+```bash
+git rebase main --trailer="Co-authored-by: Ana Dev <ana@example.com>"
+```
+
+`git blame` ahora acepta `--diff-algorithm`, permitiendo elegir entre `myers`, `minimal`, `patience` o `histogram` al calcular la atribución de líneas. Dependiendo de la historia del repositorio, los resultados pueden variar visiblemente:
+
+```bash
+git blame --diff-algorithm=histogram src/parser.c
+```
+
+Por último, `git status` ha ganado la opción `status.compareBranches`, que permite mostrar comparaciones contra múltiples ramas al mismo tiempo. En flujos triangulares donde se hace fetch de un remoto y push a otro, ver ambos estados de un vistazo evita sorpresas.
+
+## Mi opinión
+
+Lo que más valoro de Git 2.54 es que no añade complejidad por complejidad. `git history` podría haberse convertido en otro rebase interactivo con más banderas, pero por diseño hace lo contrario: reduce el alcance, rechita los merges y los conflictos, y deja el working tree intacto. Esa restricción intencionada es precisamente lo que lo hace útil. No sustituirá a `git rebase -i` cuando necesitas reordenar catorce commits, pero para corregir un mensaje en `HEAD~3` o dividir un commit en dos, es el comando que debería haber existido desde siempre.
+
+Los hooks en configuración me parecen la mejora más práctica a corto plazo. En equipos medianos, compartir políticas de calidad sin depender de Husky, pre-commit u otro gestor externo reduce un punto de fricción. Que Git ejecute varios hooks por evento de forma nativa y que puedan residir en `~/.gitconfig` es una solución elegante para un problema que muchos tenemos desde hace años.
+
+El repack geométrico por defecto es una victoria silenciosa. La mayoría de desarrolladores no configuramos `maintenance.strategy`, así que pasar de `gc` a la estrategia geométrica hará que los repositorios grandes paren de congelarse cada vez que Git decide que es hora de limpiar el sótano.
+
+En conjunto, Git 2.54 es una release que premia a quienes pasan tiempo cuidando la historia del código. No es ruidosa, pero los cambios se notan donde se trabaja de verdad: en la terminal.
