@@ -1,0 +1,100 @@
+---
+title: "Spinel: Ruby nativo con compilador AOT de Matz"
+date: "2026-04-24T21:00"
+slug: "spinel-ruby-compilador-aot-matz"
+tags: ["ruby", "compiladores", "performance", "matz", "aot"]
+excerpt: "Matz publica Spinel, un compilador AOT que traduce Ruby a C y genera ejecutables nativos sin dependencias de runtime."
+---
+
+Yukihiro "Matz" Matsumoto, creador de Ruby, acaba de publicar en GitHub un proyecto que hace años parecía imposible: un compilador ahead-of-time para Ruby que traduce código fuente a ejecutables nativos. Se llama **Spinel** y no es un experimento de laboratorio: tiene 74 tests que pasan, 55 benchmarks automatizados y un backend escrito en Ruby que se compila a sí mismo.
+
+## De intérprete a binario
+
+Desde 1995, Ruby ha sido casi sinónimo de intérprete. CRuby recorre el AST, despacha métodos en tiempo de ejecución y delega la mayor parte del trabajo a la máquina virtual. Eso ofrece flexibilidad —metaprogramación, `eval`, `method_missing`— pero también impone un techo de rendimiento difícil de romper.
+
+Spinel cambia el enfoque por completo. Es un compilador AOT que analiza todo el programa, infiere tipos a nivel global y genera código C optimizado. El resultado es un binario independiente que no necesita Ruby instalado, ni gems, ni runtime alguno. Solo `libc` y `libm`.
+
+El flujo es sorprendentemente directo:
+
+```bash
+cat > hola.rb << 'RUBY'
+def fib(n)
+  n < 2 ? n : fib(n - 1) + fib(n - 2)
+end
+
+puts fib(34)
+RUBY
+
+./spinel hola.rb      # genera ./hola
+./hola                # ejecuta en milisegundos, sin intérprete
+```
+
+Según los benchmarks publicados en el repositorio, algunos algoritmos computacionales corren más de **80 veces más rápido** que la implementación de referencia. La media geométrica ronda las **11.6x** de aceleración sobre `miniruby` en cargas intensivas de CPU.
+
+## Infierencia de tipos y generación de C
+
+La parte interesante técnicamente es la inferencia de tipos de todo el programa. Spinel no requiere anotaciones tipo Crystal o TypeScript; en su lugar, rastrea los flujos de datos durante la compilación y deduce si una variable es entero, flotante, cadena o estructura.
+
+Veamos cómo se comporta con un ejemplo sencillo. Imaginemos esta función Ruby que procesa una colección de números:
+
+```ruby
+def suma_cuadrados(lista)
+  total = 0
+  lista.each do |n|
+    total += n * n
+  end
+  total
+end
+
+resultado = suma_cuadrados([1, 2, 3, 4, 5])
+puts resultado
+```
+
+Spinel toma este código, construye el AST usando Prism (el parser oficial de Ruby 3.3+) y luego emite C equivalente. No es C con una VM embebida: es C plano que manipula enteros y arrays directamente. El compilador backend está contenido en un único archivo Ruby de ~21.000 líneas que, curiosamente, también es válido para Spinel.
+
+El runtime se distribuye como una cabecera única (`lib/sp_runtime.h`) que incluye el recolector de basura, implementaciones de arrays, hashes y strings, además de soporte para enteros de precisión arbitraria. Cuando el linker construye el binario final, solo incluye el código que realmente se usa, por lo que el ejecutable no carga una librería compartida masiva.
+
+## Autocompilación y el bootstrap
+
+Uno de los hitos más impresionantes es que Spinel es **self-hosting**. El generador de código (`spinel_codegen.rb`) está escrito en un subconjunto de Ruby que Spinel mismo puede compilar. El proceso de bootstrap funciona así:
+
+1. CRuby ejecuta el parser y el generador de C.
+2. El generador se compila a binario nativo (`bin1`).
+3. `bin1` lee el AST del propio generador y produce `gen2.c`.
+4. `gen2.c` se compila a `bin2`.
+5. `bin2` repite el proceso; si `gen2.c` y `gen3.c` son idénticos, el bucle de bootstrap está cerrado.
+
+```bash
+make        # bootstrap completo: parser + regexp + compilador
+make test   # 74 tests de funcionalidad
+make bench  # 55 benchmarks comparativos
+make bootstrap  # recompila el compilador con sí mismo
+```
+
+Este nivel de autonomía práctica recuerda más a Go, Rust o Zig que a los ecosistemas dinámicos tradicionales. Y el hecho de que Matz sea quien lo escriba añade peso simbólico: el arquitecto original de Ruby está dibujando el camino hacia una contraparte compilada.
+
+## Límites reales
+
+Spinel no es un reemplazo transparente de CRuby. Es un compilador AOT que sacrifica flexibilidad por velocidad y ausencia de runtime. Esto significa que varias características emblemáticas de Ruby simplemente no existen:
+
+- No hay `eval`, `instance_eval` ni `class_eval`.
+- No hay `send`, `method_missing` ni `define_method` dinámico.
+- No hay `Thread` ni `Mutex` (sí `Fiber`, que ofrece concurrencia cooperativa).
+- No hay múltiples encodings: asume UTF-8/ASCII.
+- No se admiten lambdas anidadas complejas con llamadas directas.
+
+Para proyectos web con Rails, esto descalifica a Spinel de momento. Pero para scripts de utilidad, herramientas CLI, procesamiento de datos o microservicios con arquitectura predecible, estas limitaciones pueden ser irrelevantes.
+
+También hay que destacar que Spinel no resuelve `require` en tiempo de ejecución: analiza los archivos al compilar y los integra en el binario de salida mediante `require_relative`. Un programa con dependencias circulares o carga dinámica de librerías externas simplemente no compilará.
+
+## Mi opinión
+
+Hace años que la comunidad Ruby observa con envidia cómo Crystal o GraalVM ofrecían compilación nativa. Spinel responde a esa envidia con una propuesta radicalmente diferente: en lugar de modificar el lenguaje o depender de una JVM masiva, propone un subconjunto compilable de Ruby puro.
+
+Me parece brillante la decisión de usar Prism como parser en lugar de reinventar la rueda. Eso aísla al compilador de los cambios de sintaxis de Ruby y le da estabilidad. También valoro la transparencia de los benchmarks: Matz compara contra `miniruby` (sin gems), no contra una instalación vieja de Ruby 3.2, lo que evita inflar artificialmente los números.
+
+No obstante, sospecho que el verdadero desafío de Spinel no será la generación de C, sino la interoperabilidad con el ecosistema existente. Cuantas más gems requieran metaprogramación o extensiones nativas arbitrarias, más difícil será encajar Spinel en proyectos reales. Si el proyecto evoluciona hacia una estrategia de "código caliente" vs "código frío" —compilando estáticamente lo predecible y dejando una VM para el resto— podría convertirse en algo verdaderamente disruptivo.
+
+## Conclusión
+
+Spinel es una señal clara de que Ruby no quiere quedarse fuera de la conversación sobre rendimiento nativo. No reemplazará CRuby mañana, pero demuestra que un lenguaje dinámico puede, con disciplina arquitectónica, cruzar el abismo hacia binarios autónomos. Y cuando el creador original del lenguaje es quien lidera esa travesía, conviene prestar atención.
