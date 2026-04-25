@@ -1,0 +1,110 @@
+---
+title: "guizang-ppt-skill: presentaciones tipo revista con Claude Code"
+date: 2026-04-25T23:45
+tags: ["claude-code", "skills", "html", "presentaciones", "webgl"]
+excerpt: "2659 estrellas en GitHub en dos días: el Skill de Claude Code que transforma prompts en presentaciones horizontales tipo revista con WebGL y 10 layouts."
+---
+
+Si eres de los que siguen el ecosistema de Claude Code, te habrá pasado: ves un proyecto explotar en GitHub y piensas "hostia, esto es justo lo que necesitaba". Pues eso mismo me pasó ayer cuando vi **guizang-ppt-skill**.
+
+El proyecto, creado por 歸藏 (op7418 en GitHub), acumuló **2.659 estrellas en tan solo dos días** desde su lanzamiento el 23 de abril. Y no es para menos: es un Skill que permite a Claude Code generar presentaciones horizontales estilo revista en un solo archivo HTML.
+
+## ¿Qué hace exactamente?
+
+El Skill convierte un prompt como "presentación sobre el estado del frontend en 2026" en un deck navegable horizontalmente, con:
+
+- **10 layouts distintos**: desde portadas hasta diapositivas de datos, pasando por comparativas Before/After, pipelines, citas destacadas y rejillas de imágenes.
+- **5 temas de color predefinidos**: "墨水经典" (tinta clásica), índigo, bosque, pergamino y dunas.
+- **Fondos WebGL** en las portadas, con efectos fluidos y de dispersión.
+- **Navegación total**: teclado (← →), rueda del ratón, toque táctil, puntos de progreso y un índice tipo ESC.
+
+Y todo en **un único archivo HTML**. Sin dependencias, sin build, sin servidor. Lo abres en el navegador y funciona.
+
+## Cómo funciona por dentro
+
+Lo que más me gusta del proyecto es su arquitectura. No es un prompt suelto, es un Skill completo y estructurado con:
+
+```
+guizang-ppt-skill/
+├── SKILL.md              ← El flujo de trabajo en 6 pasos
+├── assets/
+│   └── template.html     ← Plantilla HTML con CSS + WebGL + JS de navegación
+└── references/
+    ├── components.md     ← Manual de componentes (tipografía, colores, rejilla)
+    ├── layouts.md        ← Los 10 layouts disponibles
+    ├── themes.md         ← Las 5 paletas de color
+    └── checklist.md      ← Lista de calidad antes de publicar
+```
+
+El Skill orquesta a Claude Code en **6 pasos**: desde entender la audiencia y el tono, hasta copiar la plantilla, rellenar contenido, auto-revisión con checklist y previsualización local.
+
+## Un ejemplo rápido
+
+Si tuviera que usarlo para una charla sobre el ecosistema Astro, le diría a Claude Code algo como:
+
+> "Genera una presentación tipo revista sobre Astro 5, con tema índigo, para una audiencia técnica de 15 minutos."
+
+El Skill haría esto internamente:
+
+```html
+<!-- fragmento conceptual de lo que genera la plantilla -->
+<section class="slide hero" data-theme="indigo">
+  <canvas id="webgl-bg"></canvas>
+  <div class="hero-content">
+    <h1 class="serif">Astro 5: El Renacimiento</h1>
+    <p class="meta">Server Islands · Content Collections · Astro DB</p>
+  </div>
+</section>
+```
+
+La magia está en que no tienes que preocuparte por el diseño. El Skill aplica las reglas tipográficas —titulares en serif, cuerpo en sans-serif, metadatos en monoespaciada— y la retícula de forma consistente.
+
+## El sistema de layouts
+
+Los 10 layouts cubren prácticamente cualquier necesidad de una presentación técnica. Aquí van los que más me llamaron la atención:
+
+```javascript
+// Mapa conceptual de layouts disponibles
+const layouts = [
+  { id: 'cover',     desc: 'Portada con WebGL hero' },
+  { id: 'chapter',   desc: 'Separador de sección' },
+  { id: 'stat',      desc: 'Una cifra enorme como protagonista' },
+  { id: 'text-image', desc: 'Texto a izquierda, imagen a derecha' },
+  { id: 'grid',      desc: 'Rejilla de imágenes o tarjetas' },
+  { id: 'pipeline',  desc: 'Flujo de proceso con flechas' },
+  { id: 'question',  desc: 'Slide de pregunta provocadora' },
+  { id: 'quote',     desc: 'Cita destacada a tamaño grande' },
+  { id: 'comparison', desc: 'Antes / Después lado a lado' },
+  { id: 'mixed',     desc: 'Combinación texto + imagen + datos' },
+];
+```
+
+Cada layout tiene su propio esqueleto HTML en la referencia, preparado para copiar y pegar. Claude Code elige cuál usar según el contenido que tiene que mostrar.
+
+## Por qué me parece importante
+
+**guizang-ppt-skill** no es solo un Skill bonito. Demuestra algo que llevo tiempo diciendo: los Skills de Claude Code pueden ser **verdaderas herramientas de productividad**, no chorradas virales.
+
+El creador, 歸藏, lo explica en el README: este Skill nació de dar charlas en persona ("一人公司:被 AI 折叠的组织" y "一种新的工作方式") y de acumilar errores que luego volcó en el checklist. Eso se nota. No es un proyecto teórico, es algo que ha iterado en el mundo real.
+
+El checklist de calidad que incluye tiene niveles P0, P1, P2 y P3, donde los P0 son obligatorios: enlaces funcionales, imágenes que cargan, navegación correcta. Ese nivel de detalle es lo que separa un Skill usable de una demo de fin de semana.
+
+## Mi opinión
+
+Me flipa que alguien haya dedicado tiempo a pensar en **el diseño editorial aplicado a presentaciones técnicas**. Normalmente las slides técnicas son o muy sosas (Google Slides por defecto) o muy recargadas (Keynote con transiciones horteras). Este Skill encuentra un punto medio que es difícil de lograr: sofisticación visual sin estridencias.
+
+Pero ojo, no es para todo el mundo. El README es muy honesto al respecto:
+
+> ❌ **No adecuado para**: tablas grandes de datos, cursos formativos (la densidad de información es baja), o presentaciones que requieran edición colaborativa.
+
+Si tu charla es tipo "quarterly review con 40 diapositivas de Excel", mejor quédate con PowerPoint. Pero si quieres dar una charla con personalidad —un demo day, un lanzamiento de producto, una keynote— este Skill te da una base cojonuda.
+
+La única pega que le veo: los temas de color son fijos. No puedes tunear los colores, y el README dice explícitamente "no se permiten hex personalizados". Es una decisión de diseño deliberada ("proteger la estética es más importante que dar libertad"), pero a algunos les sabrá a poco.
+
+## En resumen
+
+guizang-ppt-skill es el tipo de proyecto que me hace ser optimista sobre el ecosistema de Claude Code. No es una utilidad de pacotilla: es un Skill bien pensado, con una arquitectura clara, referencias bien documentadas y un flujo de trabajo real.
+
+Si alguna vez has tenido que hacer una presentación y has perdido dos horas peleándote con PowerPoint para que quede *guay* sin conseguirlo, instálate este Skill. Le dices a Claude que te la genere, la retocas un poco, y tienes un deck que parece de una revista de diseño.
+
+Y todo en un solo HTML.
