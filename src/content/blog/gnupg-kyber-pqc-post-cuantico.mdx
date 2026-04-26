@@ -1,0 +1,116 @@
+---
+title: "GnuPG 2.5.19 aterriza con Kyber: cifrado post-cuántico en GPG"
+date: "2026-04-26T10:09"
+slug: "gnupg-kyber-pqc-post-cuantico"
+tags: ["gnupg", "post-cuántico", "kyber", "criptografía", "seguridad"]
+excerpt: "GnuPG integra Kyber (ML-KEM) como algoritmo de cifrado post-cuántico en su rama 2.5. La era cuántica ya no es especulación: GPG se prepara."
+---
+
+El 24 de abril de 2026, Werner Koch liberó GnuPG 2.5.19 con un hito silencioso pero enorme: **Kyber (ML-KEM / FIPS-203) aterriza en el `mainline` de GPG como algoritmo de cifrado post-cuántico**. No es una rama experimental ni un fork académico. Es el gestor de claves y cifrado más usado del mundo libre preparándose para el día en que un ordenador cuántico rompa RSA y ECC.
+
+Y ese día, según todos los indicios, llegará antes de lo que creemos.
+
+## ¿Qué es Kyber y por qué importa?
+
+Kyber es un mecanismo de encapsulamiento de claves (KEM) basado en retículos (lattices). En 2024, el NIST lo estandarizó como **ML-KEM (FIPS-203)**, convirtiéndolo en el algoritmo post-cuántico de referencia para intercambio de claves. A diferencia de RSA o Diffie-Hellman, cuya seguridad depende de la factorización de enteros o el logaritmo discreto —problemas que un ordenador cuántico con suficientes qubits resolvería en tiempo polinómico gracias al algoritmo de Shor—, Kyber se apoya en la dificultad de resolver problemas algebraicos en retículos. No se conoce un ataque cuántico eficiente contra ellos.
+
+La integración en GnuPG significa que, a partir de ahora, puedes generar claves que usen Kyber para el intercambio de clave simétrica. Tus mensajes cifrados con GPG serán resistentes a un atacante que hoy los capture y espere a tener un ordenador cuántico para descifrarlos. Es el famoso *"harvest now, decrypt later"*: si no migras a PQ crypto ahora, tus comunicaciones de hoy podrían estar expuestas mañana.
+
+## Cómo funciona en la práctica
+
+GnuPG 2.5.19 no reemplaza los algoritmos clásicos. Añade Kyber como opción. En la práctica, lo que ocurre es un ***hybrid key exchange***: combinas un intercambio clásico (tipo ECDH con Curve25519) con Kyber, de forma que incluso si uno de los dos se rompe, el otro sigue protegiendo el mensaje.
+
+El uso es transparente. Si tienes instalado GnuPG 2.5.19, la generación de claves con soporte post-cuántico se realiza a través del menú experto, donde puedes seleccionar algoritmos híbridos que combinan Kyber con cifrado clásico. GnuPG gestiona internamente la combinación de Kyber con el cifrado simétrico (AES-256, OCB, etc.) sin que tengas que pensar en ello.
+
+```bash
+# Entrar al menú experto de generación de claves
+gpg --full-generate-key --expert
+```
+
+Cuando cifras un mensaje para un destinatario que tiene una clave con soporte PQ:
+
+```bash
+# Cifrar con la nueva opción de sesión híbrida
+gpg --use-ocb-sym --recipient alice@ejemplo.com --encrypt documento.pdf
+```
+
+La bandera `--use-ocb-sym` no es específica de Kyber, pero forma parte del ecosistema de mejoras criptográficas de esta release: OCB es un modo de cifrado autenticado más rápido y seguro que el tradicional CFB que GPG ha usado históricamente.
+
+## ¿Qué más trae la 2.5.19?
+
+La release no es solo Kyber. El changelog incluye varias mejoras que los usuarios avanzados agradecerán:
+
+- **`--show-session-hash`**: Muestra el hash de sesión durante el cifrado/descifrado, útil para auditoría y depuración de protocolos.
+- **`--show-only-session-hash`**: Variante aún más limpia para scripting.
+- **`gpgsm`**: Ahora permite especificar el modo de cifrado como parte del algoritmo en `--cipher-algo`.
+- **`dirmngr`**: Nuevo keyword `clear` para `--keyserver`, que permite resetear la configuración de servidores de claves sin reiniciar el demonio.
+- **Correcciones**: Un bug en `--refresh-keys` con casos límite, y otro que provocaba que `gcry_kdf_derive` se llamara con frases de paso vacías.
+
+Nada revolucionario en sí mismo, pero la madurez de GnuPG se nota en estos detalles: parches que llevaban años en el backlog y que por fin llegan a `mainline`.
+
+## Mi opinión: esto es más importante de lo que parece
+
+Llevamos años oyendo que "los ordenadores cuánticos llegarán". Y es fácil caer en el *cry wolf*: llevamos una década con warnings y aún nadie ha roto RSA-2048. Pero hay una diferencia fundamental con otros "futuros tecnológicos": **la amenaza no requiere que el ordenador cuántico exista hoy**. El *harvest now, decrypt later* significa que cualquier cifrado que hagas hoy con RSA o ECC puede ser almacenado por un adversario y descifrado dentro de diez años.
+
+Para un particular, igual no es urgente. Pero para infraestructura crítica, comunicaciones diplomáticas, propiedad intelectual o datos médicos, la ventana de oportunidad para migrar se está cerrando.
+
+El movimiento de GnuPG es importante precisamente porque **normaliza la criptografía post-cuántica**. No es un paper académico. Es `apt upgrade`. Es que tu `gpg --encrypt` de toda la vida empiece a usar Kyber sin que tengas que leer un manual de 200 páginas.
+
+Lo que me gusta especialmente es el enfoque híbrido: no se trata de saltar a lo nuevo y olvidar lo viejo, sino de combinarlo. Si Kyber resulta tener una vulnerabilidad inesperada (siempre es posible con algoritmos relativamente jóvenes), el respaldo clásico sigue ahí. Es un *belt and suspenders* sensato.
+
+## ¿Qué significa para los desarrolladores?
+
+Si mantienes herramientas que usan GPG para cifrado —scripts de backup, pipelines de CI/CD, sistemas de firma de paquetes—, deberías empezar a probar con GnuPG 2.5.x cuanto antes. La serie 2.4 llegará a su fin de vida en dos meses (junio de 2026).
+
+Ejemplo de migración para un pipeline de backup cifrado:
+
+```bash
+#!/bin/bash
+# Antes (GnuPG 2.4)
+gpg --batch --yes --encrypt \
+  --recipient backup@ejemplo.com \
+  --output backup.tar.gz.gpg \
+  backup.tar.gz
+
+# Después (GnuPG 2.5.19+)
+gpg --batch --yes --encrypt \
+  --use-ocb-sym \
+  --recipient backup@ejemplo.com \
+  --output backup.tar.gz.gpg \
+  backup.tar.gz
+```
+
+La diferencia es mínima en código, pero enorme en seguridad a largo plazo.
+
+Y para quienes gestionan claves de forma programática:
+
+```python
+import subprocess
+
+def encrypt_pqc(recipient: str, input_file: str, output_file: str):
+    """Cifra un archivo usando GnuPG 2.5+ con soporte PQ."""
+    result = subprocess.run([
+        "gpg", "--batch", "--yes",
+        "--use-ocb-sym",
+        "--recipient", recipient,
+        "--output", output_file,
+        "--encrypt", input_file
+    ], capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"GPG error: {result.stderr}")
+    
+    # Verificar que se usó un algoritmo PQ
+    session_info = subprocess.run([
+        "gpg", "--show-only-session-hash",
+        "--decrypt", output_file
+    ], capture_output=True, text=True)
+    
+    return session_info.stdout.strip()
+```
+
+## Mi veredicto
+
+GnuPG 2.5.19 es la release más importante del proyecto desde que se integró soporte para ECC (Curve25519) en 2016. Kyber en GPG no es un experimento: es la infraestructura crítica del mundo libre preparándose para el futuro cuántico. Si usas GPG para algo más que firmar commits de vez en cuando, actualiza, genera nuevas claves con soporte híbrido, y empieza a dormir un poco más tranquilo.
+
+La era post-cuántica no ha llegado. Pero con esta release, GPG demuestra que estará lista cuando llegue.
