@@ -1,0 +1,133 @@
+---
+title: "Asahi Linux llega a Linux 7.0: VRR oculto, PMP y más"
+date: "2026-04-26T16:14"
+slug: "asahi-linux-7-progreso-apple-silicon"
+tags: ["asahi-linux", "linux-kernel", "apple-silicon", "drivers", "vrr"]
+excerpt: "El informe de progreso 7.0 de Asahi Linux revela VRR oculto en DCP, ahorro de energía con PMP y automatización del instalador."
+---
+
+Después de casi tres años de la serie 6.x, Linux 7.0 ya está aquí. Y con él, el equipo de Asahi Linux ha publicado su progress report 7.0, un documento cargado de detalles técnicos fascinantes sobre el estado de Linux en Apple Silicon. Lo he leído entero y tengo que decir que es de esos informes que te hacen recordar por qué el desarrollo de drivers a bajo nivel es tan adictivo.
+
+Voy a destacar lo que más me ha llamado la atención.
+
+## El parámetro que no era lo que parecía
+
+La historia del día es el **Variable Refresh Rate (VRR)** en el controlador de pantalla (DCP) de Apple. Resulta que el equipo de Asahi llevaba años configurando un parámetro en DCP durante el encendido, asumiendo que formaba parte de la secuencia de power-on. Lo ponían a 0 en cada probe del driver y seguían con su vida.
+
+Hasta que alguien, durante una sesión de tracing, vio que ese mismo parámetro cambiaba entre `0x300000` y `0x0` cuando toggleaba VRR. Un momento "eureka" en toda regla.
+
+```c
+// Lo que el driver hacía antes (asumiendo power sequencing)
+static int dcp_power_on(struct dcp_device *dcp)
+{
+    // ... hundreds of lines of setup ...
+    
+    // Set parameter to 0 — thought to be power-on sequence
+    dcp_set_param(dcp, IOMFB_PARAM_ADAPTIVE_SYNC, 0);
+    
+    return 0;
+}
+```
+
+El valor `0x300000` en el formato fixed-point que usa DCP para frecuencias de refresco resulta ser exactamente 48 Hz — la frecuencia mínima de VRR en un monitor de 165 Hz con rango AdaptiveSync. La revelación:
+
+> El parámetro que creíamos de power sequencing era el toggle de frecuencia mínima de VRR.
+
+```c
+// Lo que realmente significa
+#define MIN_REFRESH_48HZ  0x300000  // 48 Hz en fixed-point de DCP
+#define MIN_REFRESH_0HZ   0x0       // VRR desactivado
+
+// Activar VRR es tan simple como:
+dcp_set_param(dcp, IOMFB_PARAM_ADAPTIVE_SYNC, MIN_REFRESH_48HZ);
+dcp_trigger_modeset(dcp);
+// RTKit log: "AdaptiveSync Range [48Hz, 165Hz]"
+```
+
+Cientos de líneas de driver reducidas a dos llamadas. No es broma. El firmware de DCP es tan enorme (Apple no escatima en blobs) que ya implementa todo el AdaptiveSync internamente; solo necesita que le digas desde qué frecuencia mínima debe funcionar.
+
+**Mi opinión:** Esta es una de esas historias que solo pasan cuando trabajas con firmware propietario sin documentación. Apple tiene un equipo entero currando en DCP, y el equipo de Asahi tiene que adivinar lo que hace cada parámetro mirando trazas. Que hayan dado con esto por casualidad, después de años usándolo mal, es puro trabajo de detective. Me encanta.
+
+El problema es que DCP necesita un modeset para cambiar entre VRR activo e inactivo, lo cual viola el estándar VESA DisplayPort Adaptive Sync y la propia API de KMS. Así que de momento no pueden exponer VRR correctamente a userspace. Han optado por un parámetro de módulo (`appledrm.force_vrr`) que lo activa forzosamente. Kwin lo tolera bien; otros compositores, no tanto.
+
+## PMP: el procesador de gestión de energía que no sabíamos que necesitábamos
+
+El Power Management Processor (PMP) es otro de esos coprocesadores ocultos en el SoC de Apple que nadie sabía bien qué hacía. Recibe informes de los bloques del SoC sobre su estado de energía y, aparentemente, se encarga de controlar el Apple Fabric (la interconexión interna) y los relojes.
+
+El caso es que sin bootear el PMP, cierta funcionalidad de gestión energética simplemente no funciona. **chaos_princess** escribió los drivers necesarios para que PMP acepte informes desde PMGR y los bloques del SoC.
+
+```python
+# Pseudocódigo del modelo conceptual: PMP recibe informes de estado
+class PowerReport:
+    source: str          # "PMGR", "ANE", "DCP", etc.
+    power_domain: str    # "cpu_cluster_0", "gpu", etc.
+    state: int           # 0 = off, 1 = on, 2 = idle, 3 = deep_sleep
+    
+# Cada bloque del SoC escribe en shared memory
+# PMP lee y decide clock gating / voltaje / frecuencia del fabric
+```
+
+El resultado: **medio vatio menos de consumo en reposo** en un MacBook Pro 14" M1 Pro. Eso es una reducción del ~20% en idle. Para ser el primer intento sin conocer la especificación real del hardware, no está nada mal.
+
+**Mi opinión:** Esto es ingeniería inversa en estado puro. No tienen datasheets, no tienen documentación de Apple, solo observan lo que hace macOS y replican el comportamiento. Que hayan conseguido ahorrar energía que ni Apple había documentado es un logro tremendo.
+
+## Bluetooth y WiFi: coexistiendo en el mismo espectro
+
+Otro fix que merece mención: la coexistencia Bluetooth/WiFi. En los chips Broadcom que usa Apple, la configuración de prioridades entre Bluetooth y WiFi se hace mediante comandos HCI (Host Controller Interface) propietarios que no estaban soportados en el kernel Linux.
+
+Cuando KDE Connect escaneaba WiFi, los paquetes de audio Bluetooth se caían. La solución ha sido añadir soporte en el stack Bluetooth del kernel para estos comandos vendor-specific, y que BlueZ los active automáticamente cuando hay streams de audio en curso.
+
+```c
+// Concepto: comandos HCI vendor-specific para coexistencia
+// (simplificado, no es el API real del kernel)
+struct hci_coex_config {
+    uint8_t  wlan_scan_priority;   // 0x00 = normal, 0x01 = audio priority
+    uint8_t  bt_audio_latency;     // 0x00 = best effort, 0x03 = low latency
+    uint16_t bt_audio_bitpool;     // SBC quality parameter
+};
+
+// Cuando BlueZ detecta un stream A2DP:
+coex_set_audio_priority(hdev, COEX_AUDIO_ACTIVE);
+// Ahora los paquetes de audio Bluetooth tienen prioridad sobre WiFi scans
+```
+
+**Mi opinión:** Este tipo de problemas de coexistencia radioeléctrica son endiabladamente difíciles de depurar porque son intermitentes. Que el equipo de Asahi haya identificado la causa exacta y la haya parcheado en el propio kernel en lugar de poner un parche en userspace es de aplaudir.
+
+## Automatización del instalador: GitHub Actions al rescate
+
+El instalador de Asahi llevaba sin actualizarse desde junio de 2024. El proceso manual era tedioso: compilar Python para macOS, construir m1n1 de una release concreta, empaquetar, subir al CDN, actualizar el flag de versión... Todo requería acceso administrativo al CDN.
+
+La solución ha sido migrar a GitHub Actions. Ahora cada push a main genera un build automático y lo sube a `alx.sh/dev`. Los tags generan releases estables en `alx.sh`. Han separado el manifiesto de imágenes instalables en un repo independiente (`asahi-installer-data`) para poder actualizarlo sin tocar el código del instalador.
+
+```yaml
+# Concepto del workflow (no es el real, es mi interpretación)
+name: Build and Deploy Installer
+on:
+  push:
+    branches: [main]
+  tag:
+    types: [push]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m build_installer
+      - run: bundle --m1n1-version 1.5.2
+      - run: upload-cdn --target "${{ github.ref == 'refs/heads/main' && 'dev' || 'stable' }}"
+```
+
+Esto desbloqueó la versión 0.8.0 que añade soporte para Mac Pro y un modo de actualización de firmware.
+
+## El resto: M3, audio y más
+
+El informe también cubre:
+
+- **Soporte M3**: PCIe, teclado, trackpad, NVMe y RTC ya funcionan. El nivel de soporte es comparable al alpha original del M1.
+- **Audio**: Han añadido soporte para frecuencias de muestreo de 44.1, 88.2, 176.4 y 192 kHz en el CS42L84 (el chip de jack de auriculares de Cirrus Logic) — algo que macOS no usa pero que el chip soporta físicamente.
+- **Fedora Asahi Remix 44**: Se lanza con Plasma 6.6, nuevo wizard de configuración nativo de Plasma, y abandonan los paquetes vendored de Mesa y virglrenderer para usar los de upstream.
+
+**Mi veredicto:** Este progress report es de los mejores que ha publicado Asahi. No solo por la cantidad de trabajo, sino porque cada sección cuenta una historia con principio, nudo y desenlace. El descubrimiento de VRR es directamente una anécdota de "bug que resulta ser feature". El ahorro de energía con PMP demuestra que todavía hay mucho margen de mejora en el soporte de Apple Silicon. Y lo del instalador automatizado era una deuda técnica que por fin han pagado.
+
+Linux 7.0 llega en un momento interesante. Con el soporte de M3 avanzando y Fedora Asahi Remix 44 a la vuelta de la esquina (28 de abril), cada vez está más cerca el día en que tener Linux en un MacBook Apple Silicon sea una opción tan natural como tenerlo en un ThinkPad.
