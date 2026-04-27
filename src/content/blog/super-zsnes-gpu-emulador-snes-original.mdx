@@ -1,0 +1,124 @@
+---
+title: "Super ZSNES: los creadores originales vuelven con GPU"
+date: "2026-04-27T23:07"
+tags:
+  - zsnes
+  - emulacion
+  - gpu
+  - retro
+  - snes
+excerpt: "Los dos desarrolladores originales de ZSNES se reúnen y reescriben el emulador desde cero con GPU, Mode 7 en alta resolución y mejoras por juego."
+---
+
+Hace unos días me topé con una de esas noticias que te hacen sonreír como cuando eras niño. Los dos desarrolladores originales de **ZSNES** —sí, ese emulador de Super Nintendo que llenó de horas de juego miles de ordenadores de los 90 y 2000— están de vuelta. Juntos. Y han reescrito el emulador completo desde cero con aceleración por GPU.
+
+El proyecto se llama **Super ZSNES** y ya está disponible en versión 0.100 para Windows, macOS, Linux y Android. Y no, no es un lavado de cara. Es una reescritura total.
+
+## La historia detrás del regreso
+
+ZSNES fue durante años el emulador de SNES por excelencia. Ligero, rapidísimo, con esa interfaz de copos de nieve que todo el mundo recordamos. Pero con el tiempo se quedó atrás: la precisión de la emulación dejaba que desear frente a competidores como **bsnes** (hoy **ares**) o **Mesen-S**, y el desarrollo se estancó.
+
+Ahora los dos desarrolladores originales han vuelto a trabajar juntos bajo el nombre de **ZEMU Software Inc.** y han rehecho todo desde cero. Esto no es ZSNES 2.0 con parches. Es un emulador nuevo que conserva el espíritu del original pero construido para el hardware moderno.
+
+## Lo que cambia con GPU en el PPU
+
+La gran novedad técnica está en el **PPU (Picture Processing Unit)**. En la SNES real, el PPU es un chip dedicado que genera los gráficos: sprites, fondos, Mode 7, todo sale de ahí. ZSNES original emulaba esto por software, con las limitaciones de la época.
+
+Super ZSNES mueve el PPU a la GPU. Esto abre posibilidades que en 1996 eran ciencia ficción:
+
+```rust
+// Ejemplo conceptual: cómo un shader de fragmentos podría
+// procesar un tile de Mode 7 con interpolación bilineal
+// en la GPU, algo que el ZSNES original hacía en CPU
+
+#version 330 core
+uniform sampler2D tilemap;
+uniform mat3 mode7_matrix;
+uniform vec2 screen_size;
+
+in vec2 frag_uv;
+out vec4 frag_color;
+
+void main() {
+    // Transformación Mode 7: perspectiva pseudo-3D
+    vec2 uv = frag_uv;
+    float perspective = 1.0 / (1.0 - uv.y * 0.8);
+    vec2 mapped = vec2(
+        mode7_matrix[0].x * uv.x * perspective,
+        mode7_matrix[1].y * perspective
+    );
+
+    // Muestreo con interpolación bilineal en la GPU
+    frag_color = texture(tilemap, mapped);
+}
+```
+
+El resultado: **Mode 7 en alta resolución**. Los juegos que usaban este efecto —*Super Mario Kart*, *F-Zero*, *ActRaiser*— se ven más nítidos sin perder la sensación original.
+
+## El Super Enhancement Engine
+
+Aquí viene lo que realmente diferencia a Super ZSNES de cualquier otro emulador. Han creado un sistema de *mejoras por juego* que va mucho más allá de subir la resolución con un filtro.
+
+El **Super Enhancement Engine** permite aplicar transformaciones manuales a cada juego, una por una. Cada mejora se distribuye como un *enhancement pack* que no contiene ROM ni datos con copyright — solo instrucciones y assets originales.
+
+```javascript
+// Estructura conceptual de un enhancement pack
+// (no es el formato real, pero ilustra la idea)
+const enhancementPack = {
+  game: "Super Mario World",
+  romHash: "sha256:6d2b...",
+  enhancements: {
+    resolution: {
+      internalWidth: 512,   // el doble del original
+      internalHeight: 448,
+      // las posiciones de sprites se recalculan
+      manualRetouching: true
+    },
+    textures: {
+      enabled: true,
+      // mapas de normales para dar relieve
+      normalMap: "bg_castle_normal.png"
+    },
+    audio: {
+      // reemplaza muestras comprimidas por WAV
+      samples: [
+        { originalAddr: 0x3F800, file: "jump_hi.wav" },
+        { originalAddr: 0x3F900, file: "coin_hi.wav" }
+      ]
+    },
+    overclock: {
+      // elimina slowdowns conocidos
+      removeSlowdown: true
+    }
+  }
+};
+```
+
+En el lanzamiento, siete juegos populares tienen soporte completo. El plan es seguir añadiendo más con el tiempo.
+
+## Lo que funciona y lo que no (todavía)
+
+Hay que ser honesto: es una **versión 0.100**. Los propios desarrolladores lo advierten en la web:
+
+- **Sí funciona**: la emulación base, save states, rebobinado, cheat codes, la interfaz clásica modernizada.
+- **No funciona aún**: los chips especiales como **DSP-1** (usado en *Super Mario Kart* o *Pilotwings*), **SuperFX** (*Star Fox*, *Yoshi's Island*), **SA-1** y otros. Sin estos chips, muchos juegos no arrancan o funcionan mal.
+- **Rendimiento irregular**: queda trabajo de optimización. No esperes 60 fps estables en todo.
+
+Esto es normal para un emulador en fase alpha. Lo importante es que la base técnica es sólida y los desarrolladores tienen un historial de haber terminado lo que empiezan.
+
+## Mi opinión
+
+Super ZSNES me parece un proyecto fascinante por dos razones.
+
+**Primero**, porque demuestra que la emulación por GPU no es solo para hacer *upscaling* automático. Están reimplementando la lógica del PPU en la GPU, no aplicando filtros después. Es un enfoque más respetuoso con el hardware original: en lugar de emular ciclo a ciclo en CPU, aprovechan la naturaleza paralela de la GPU para lo que originalmente era un circuito paralelo.
+
+**Segundo**, porque el modelo de enhancement packs plantea una pregunta interesante: ¿dónde está la línea entre emular un juego y mejorarlo? Cuando modificas activamente las texturas, el audio y la resolución interna, ¿sigues emulando o estás creando algo nuevo? Los enhancement packs son abiertos, no contienen ROMs y se pueden compartir legalmente, pero conceptualmente están más cerca de un *remaster* que de una emulación tradicional.
+
+Mi veredicto: si creciste con una SNES, este proyecto merece toda tu atención. No por nostalgia barata, sino porque representa un enfoque técnicamente original para un problema que parecía resuelto. Y porque ver a los desarrolladores originales volver a trabajar juntos después de décadas... eso tiene algo que emociona.
+
+```
+$ curl -L https://zsnes.com/files/SuperZSNES_v0.100.tar.gz | tar xz
+$ ./SuperZSNES
+```
+
+Corre en Linux hoy. Windows y Mac también. iOS está en camino. Dale una oportunidad, pero no esperes perfección: es una alpha, y las alphas son para explorar, no para jugar la partida definitiva.
