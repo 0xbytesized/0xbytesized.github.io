@@ -1,0 +1,143 @@
+---
+title: "Easyduino: placas de desarrollo open source en KiCad con USB-C"
+date: "2026-04-28T07:12"
+tags:
+  - kicad
+  - pcb
+  - hardware
+  - open-source
+  - electronica
+excerpt: "Easyduino unifica Arduino Uno, ESP32, Pi Pico y STM32 en diseños PCB libres con KiCad, USB-C y listos para fabricar en JLCPCB."
+---
+
+Esta madrugada me encontré con un proyecto que me reconcilia con el hardware libre. **Easyduino** es un repositorio que recopila diseños PCB completos de las placas de desarrollo más populares —Arduino Uno, Arduino Nano, ESP32, ESP32-S3, Raspberry Pi Pico y STM32 Bluepill—, todos recreados desde cero en **KiCad**, con USB-C y listos para mandar a fabricar.
+
+Y lo mejor: bajo licencia CERN Open Hardware Licence v2 Permissive. Puedes coger el diseño, modificarlo, usarlo en un producto comercial y ni siquiera tienes que compartir los cambios.
+
+## El problema que resuelve
+
+Las placas de desarrollo que todos conocemos tienen orígenes muy distintos. El Arduino Uno se diseñó en Italia en 2010 usando **Eagle**. El ESP32 típico se diseñó en China en 2016 con **Altium**. La Raspberry Pi Pico se hizo en Reino Unido alrededor de 2021 con una mezcla de **KiCad** y Altium. Cada una usa su propio formato, sus propias convenciones, sus propias librerías de componentes.
+
+Si quieres estudiar cómo están diseñadas, modificarlas o fabricar tu propia versión, tienes que saltar entre herramientas, formatos y ecosistemas distintos. Easyduino pone todo en un mismo sitio, con un mismo toolchain, y con un mismo estándar de calidad.
+
+## Qué incluye el repositorio
+
+Cada placa tiene su propia carpeta con:
+
+- Archivos de KiCad (.kicad_pro, .kicad_sch, .kicad_pcb)
+- Un README explicando las diferencias con la placa original
+- Footprints y símbolos personalizados (si los necesita)
+- Una carpeta **Outputs** con Gerbers, STEP 3D, PDFs, ERC y BOM
+- Una carpeta **ProductionFiles** con la BOM en formato JLCPCB, los Gerbers empaquetados y los datasheets de los componentes principales
+
+Todas las placas usan **4 capas de cobre** con el stackup JLC04161H-7628 de JLCPCB, lo que simplifica el rutado frente a las 2 capas típicas de los diseños originales.
+
+```kicad
+# Ejemplo conceptual de cómo se define el stackup de capas en KiCad
+# (equivalente a lo que verías en las propiedades de la PCB)
+
+Layer stack:
+  - F.Cu (cobre superior, 35µm)
+  - Dielectric FR4 (0.2mm)
+  - In1.Cu (plano de tierra, 35µm)
+  - Dielectric FR4 (0.71mm)
+  - In2.Cu (plano de alimentación, 35µm)
+  - Dielectric FR4 (0.2mm)
+  - B.Cu (cobre inferior, 35µm)
+  - Mask: verde, ambos lados
+  - Acabado: HASL sin plomo
+```
+
+## USB-C en todas partes
+
+Una de las decisiones más prácticas del proyecto es **añadir USB-C a todas las placas**. Los originales usan USB-B (Arduino Uno), micro-USB (ESP32, Nano) o USB-C propietario (Pi Pico). Easyduino estandariza todo a USB-C, con los pines de datos y alimentación correctamente cableados.
+
+Esto no es trivial: el conector USB-C tiene 24 pines y requiere resistencias de configuración (CC1/CC2) para que el host sepa que hay un dispositivo conectado y cuánta corriente puede suministrar.
+
+```cpp
+// Configuración de las resistencias CC para USB-C en modo dispositivo
+// Concepto: el conector CC1 y CC2 llevan 5.1kΩ a GND
+// para indicar al host que somos un dispositivo (sink) USB 2.0
+
+Pin CC1 -> R_pull_down (5.1kΩ) -> GND
+Pin CC2 -> R_pull_down (5.1kΩ) -> GND
+Pin D+   -> línea USB D+ del microcontrolador
+Pin D-   -> línea USB D- del microcontrolador
+Pin VBUS -> entrada de 5V del regulador de la placa
+Pin GND  -> plano de tierra
+
+// Sin estas resistencias, el host USB-C no suministrará 5V
+// y la placa no recibirá alimentación por el puerto USB.
+```
+
+## Diferencias con los originales
+
+El proyecto no es una copia exacta. Tiene decisiones de diseño propias:
+
+- **Arduino Uno**: el conversor USB-serie original (Atmega16u2) era difícil de conseguir durante el desarrollo (2023), así que se optó por alternativas más disponibles. La placa usa 4 capas en lugar de 2.
+- **Raspberry Pi Pico**: la original usa componentes 01005, que son demasiado pequeños y caros para la línea de ensamblaje de JLCPCB. Easyduino los reemplaza por equivalentes 0402 o 0603 más asequibles, reubicando componentes para mantener la funcionalidad.
+- **ESP32-S3**: en la v1.0 olvidaron poner las resistencias de pull-up/pull-down en los pines RST y SUSPEND del CP2102. La v1.1 ya las incluye. Esto es exactamente el tipo de errores que te enseñan a base de fabricar una placa y ver que no funciona.
+
+```csv
+# Extracto conceptual de la BOM (Bill of Materials) de Easyduino UNO
+# Formato compatible con JLCPCB
+
+Comment,Designator,Footprint,LCSC Part #
+100nF,C1,C_0603_1608Metric,C307331
+10µF,C2,C_0603_1608Metric,C19702
+1µF,C3,C_0603_1608Metric,C15849
+22pF,C4,C_0603_1608Metric,C165948
+22pF,C5,C_0603_1608Metric,C165948
+10kΩ,R1,R_0603_1608Metric,C25804
+1kΩ,R2,R_0603_1608Metric,C17513
+5.1kΩ,R3,R_0603_1608Metric,C23178
+5.1kΩ,R4,R_0603_1608Metric,C23178
+ATMEGA328P-AU,U1,TQFP-32_7x7mm_P0.8mm,C14877
+CP2102N-A01-GQFN24,U2,QFN-24_4x4mm_P0.5mm,C523118
+USB4115-GF-A,USB1,USB-C_Receptacle_GCT, C2884065
+```
+
+## Cómo usarlo
+
+Es absurdamente sencillo:
+
+1. Instalas la última versión de **KiCad** (el proyecto se desarrolló con v8.0.0 pero se ha actualizado y probado con **KiCad v10**).
+2. Descargas o clonas el repositorio.
+3. Haces doble clic en el archivo `.kicad_pro` de la placa que te interese.
+
+El proyecto incluye **Jobsets** de KiCad, que son básicamente scripts de automatización para generar los Gerbers, la BOM y los ficheros de montaje con un solo clic. En versiones anteriores de KiCad esto requería plugins externos o procesos manuales.
+
+```python
+# Script conceptual para generar los ficheros de fabricación
+# usando la API de scripting de KiCad (kiutils o pcbnew)
+
+from kiutils.board import Board
+
+# Cargar el diseño PCB
+board = Board().from_file("easyduino_uno.kicad_pcb")
+
+# Exportar Gerbers (capa por capa)
+for layer in ["F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.Silkscreen", "Edge.Cuts"]:
+    gerber = board.generate_gerber(layer)
+    gerber.save(f"gerber/{layer}.gbr")
+
+# Exportar taladros
+board.generate_drill_file().save("gerber/drills.drl")
+
+# Generar BOM en formato CSV
+board.export_bom("production/bom.csv")
+
+print(f"✅ Listo: {len(board.components)} componentes en {len(board.nets)} nets")
+```
+
+## Mi opinión
+
+Easyduino me parece exactamente el tipo de proyecto que el hardware libre necesita. No inventa nada nuevo —son placas que ya existen—, pero las unifica bajo un mismo estándar, con herramientas libres y con documentación clara.
+
+Lo que más me gusta es la honestidad técnica: el README explica sin tapujos qué componentes no se pudieron conseguir, qué se cambió respecto al original y por qué. Eso es más valioso que un diseño perfecto pero sin contexto.
+
+El hecho de que use KiCad v10 con Jobsets es un detalle importante. Durante años, el ecosistema de herramientas EDA libres ha sido funcional pero incómodo. KiCad v10 ha dado un salto enorme en usabilidad, y proyectos como Easyduino demuestran que ya es una alternativa real a Altium o Eagle para diseños de complejidad media.
+
+Si te gusta la electrónica y nunca has abierto KiCad, Easyduino es una puerta de entrada excelente: coges un diseño que ya conoces, ves cómo está hecho, lo modificas, lo mandas a fabricar por 5€ en JLCPCB y tienes tu propia placa funcionando en dos semanas.
+
+**Mi veredicto**: un proyecto modesto pero útil, bien ejecutado y con licencia Permissive. Ojalá más proyectos de hardware abrieran sus diseños con este nivel de calidad.
