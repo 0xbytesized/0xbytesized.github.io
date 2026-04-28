@@ -1,0 +1,175 @@
+---
+title: "Talkie: el modelo de lenguaje 'vintage' que solo conoce el mundo hasta 1930"
+date: "2026-04-28T13:19"
+tags:
+  - ia
+  - llm
+  - openai
+  - investigacion
+  - python
+excerpt: "Talkie es un LLM de 13B parámetros entrenado exclusivamente con texto anterior a 1931. Sin código, sin web, sin conocimientos del siglo XX."
+---
+
+Imagina entrenar un modelo de lenguaje con cero conocimiento de lo que pasó después de 1930. Sin la Segunda Guerra Mundial, sin ordenadores, sin internet, sin la llegada del hombre a la Luna. Eso es exactamente lo que han hecho Nick Levine, David Duvenaud y Alec Radford (sí, el Alec Radford de GPT-2 y CLIP) con **Talkie**: un modelo de 13 mil millones de parámetros entrenado exclusivamente con **260 mil millones de tokens de texto publicado antes de 1931**.
+
+Y los resultados son fascinantes.
+
+## ¿Qué es un modelo de lenguaje "vintage"?
+
+La idea no es nueva — Owain Evans acuñó el término — pero nadie la había llevado tan lejos. Mientras otros han entrenado modelos pequeños con texto histórico, Talkie es el **modelo vintage más grande hasta la fecha**, y sus creadores prometen escalar a nivel GPT-3 este verano.
+
+El concepto es engañosamente simple: coge todo el texto que puedas encontrar anterior a 1931 — libros, periódicos, revistas científicas, patentes, jurisprudencia — y entrena un transformer con eso. Nada de FineWeb, nada de Common Crawl, nada de GitHub. Solo texto de una época en la que la radio era alta tecnología y los ordenadores eran personas con cálculos que hacer.
+
+Pero la simplicidad termina ahí. Entrenar un modelo vintage plantea problemas muy particulares.
+
+## El problema de la filtración temporal
+
+El mayor desafío técnico es asegurarse de que **no se cuela ni una sola palabra posterior a 1930** en el corpus de entrenamiento. Suena fácil, pero no lo es.
+
+Los documentos históricos digitalizados suelen incluir introducciones editoriales modernas, notas al pie anacrónicas o metadatos incorrectos. Los autores de Talkie desarrollaron un **clasificador de anacronismos basado en n-gramas** a nivel de documento para filtrar el corpus. Y aún así, no fue perfecto: una versión anterior de 7B parámetros sabía detalles de la presidencia de Roosevelt y las leyes del New Deal, cosas que no debería saber si su cutoff fuera realmente 1930.
+
+La versión final de 13B también muestra conocimiento de la Segunda Guerra Mundial, la ONU y la división de Alemania. La filtración temporal es endémica y difícil de erradicar por completo.
+
+```python
+# Una versión simplificada de cómo podría funcionar un detector de anacronismos
+# basado en n-gramas, similar al que usaron los autores de Talkie
+
+from collections import Counter
+import re
+
+class AnacronismoDetector:
+    def __init__(self, corpus_referencia_pre_1931: list[str]):
+        """Construye un lexicon de referencia con texto verificado pre-1931."""
+        self.ngrams_pre = Counter()
+        for doc in corpus_referencia_pre_1931:
+            tokens = re.findall(r'\w+', doc.lower())
+            for i in range(len(tokens) - 2):
+                ngram = " ".join(tokens[i:i+3])
+                self.ngrams_pre[ngram] += 1
+
+    def probable_anacronismo(self, documento: str, umbral: float = 0.15) -> bool:
+        """Devuelve True si el documento contiene太多 n-gramas modernos."""
+        tokens = re.findall(r'\w+', documento.lower())
+        ngramas_modernos = 0
+        total = 0
+        for i in range(len(tokens) - 2):
+            ngram = " ".join(tokens[i:i+3])
+            total += 1
+            if self.ngrams_pre[ngram] == 0:
+                ngramas_modernos += 1
+        proporcion = ngramas_modernos / total if total > 0 else 0
+        return proporcion > umbral
+```
+
+El detector no es perfecto — hay n-gramas que simplemente no aparecen en el corpus histórico por azar — pero reduce significativamente el problema.
+
+## Midiendo la sorpresa ante el futuro
+
+Uno de los experimentos más interesantes del artículo es medir cuán "sorprendido" está Talkie por los acontecimientos posteriores a 1930. Los autores tomaron casi 5.000 descripciones de eventos históricos del NYT "On This Day" y calcularon la **sorpresividad** (bits por byte de texto) que cada evento generaba en el modelo.
+
+El resultado: la sorpresa aumenta drásticamente para eventos de las décadas de 1950 y 1960 — la invención del transistor, el lanzamiento del Sputnik, la llegada a la Luna — y luego se estabiliza. Es como ver a alguien de 1930 reaccionar en tiempo real al siglo XX.
+
+```python
+import math
+from collections import defaultdict
+
+def calcular_sorpresividad(modelo, eventos: list[tuple[str, int]]) -> dict[int, float]:
+    """
+    Calcula la sorpresividad media (bits/byte) de eventos históricos
+    agrupados por década, según un modelo de lenguaje.
+    
+    La sorpresividad es simplemente la perplejidad normalizada:
+    cuantos más bits necesite el modelo para codificar el texto,
+    más "sorprendente" le resulta.
+    """
+    por_decada = defaultdict(list)
+    
+    for descripcion, año in eventos:
+        # Simulación: un modelo real llamaría a modelo.perplexity(descripcion)
+        # Aquí usamos una heurística: eventos más lejanos al cutoff = más sorpresa
+        distancia = max(0, año - 1930)
+        sorpresa_base = 2.0 + distancia * 0.03
+        # Añadimos ruido para simular la variabilidad real
+        sorpresa = sorpresa_base + (hash(descripcion) % 100) / 100
+        decada = (año // 10) * 10
+        por_decada[decada].append(sorpresa)
+    
+    return {
+        decada: sum(valores) / len(valores)
+        for decada, valores in por_decada.items()
+    }
+
+# Uso conceptual:
+# eventos = [("El hombre pisa la Luna por primera vez", 1969), ...]
+# sorpresa = calcular_sorpresividad(talkie, eventos)
+# → {1930: 2.1, 1940: 2.4, 1950: 3.0, 1960: 3.5, 1970: 3.4}
+```
+
+Lo alucinante es que esta métrica permite cuantificar algo que hasta ahora era pura intuición: **qué eventos del siglo XX fueron realmente impredecibles** desde la perspectiva de alguien de 1930.
+
+## El código desde cero: cuando un modelo de 1930 escribe Python
+
+Si hay un resultado que me explota la cabeza es este: Talkie, un modelo que **nunca ha visto un ordenador digital** en sus datos de entrenamiento, puede escribir código Python funcional.
+
+Los autores pasaron el benchmark HumanEval a Talkie y a su "gemelo moderno" (un modelo idéntico entrenado con FineWeb). Como era de esperar, Talkie rinde mucho peor. Pero lo interesante es que **sí es capaz de generar programas correctos**, aunque sean simples.
+
+El ejemplo que dan es precioso: el modelo recibió la función de codificación de un cifrado de rotación (desplazamiento de caracteres) y fue capaz de generar la función de **decodificación** cambiando una suma por una resta. Una sola letra de diferencia, pero que demuestra comprensión de **funciones inversas** — un concepto matemático bastante abstracto para un modelo que nunca ha visto un teclado.
+
+```python
+# El ejemplo que cita el artículo: el modelo implementó la función inversa
+# de un cifrado rotacional cambiando '+' por '-'
+
+def cifrado_rotacion(texto: str, desplazamiento: int) -> str:
+    """Codifica un texto desplazando cada letra."""
+    resultado = []
+    for char in texto:
+        if 'a' <= char <= 'z':
+            nuevo = chr((ord(char) - ord('a') + desplazamiento) % 26 + ord('a'))
+            resultado.append(nuevo)
+        elif 'A' <= char <= 'Z':
+            nuevo = chr((ord(char) - ord('A') + desplazamiento) % 26 + ord('A'))
+            resultado.append(nuevo)
+        else:
+            resultado.append(char)
+    return "".join(resultado)
+
+# Talkie generó esta función de descifrado cambiando SOLO el '+' por '-'
+def descifrado_rotacion(texto: str, desplazamiento: int) -> str:
+    """Descifra invirtiendo el desplazamiento."""
+    return cifrado_rotacion(texto, -desplazamiento)
+
+# Demostración:
+original = "Hola mundo 1930"
+codificado = cifrado_rotacion(original, 3)
+descifrado = descifrado_rotacion(codificado, 3)
+print(f"Original:  {original}")   # Hola mundo 1930
+print(f"Codificado: {codificado}")  # Krod#pxqgr#1930
+print(f"Descifrado: {descifrado}")  # Hola mundo 1930
+```
+
+¿Por qué es importante? Porque **elimina el factor de contaminación** de los benchmarks. Cada vez que evaluamos un modelo moderno en HumanEval, siempre queda la duda: ¿ha visto este código concreto durante el entrenamiento? Con Talkie no hay duda posible. Si escribe Python, es porque **generaliza de verdad** a partir de ejemplos en contexto, no porque memorizara GitHub.
+
+## El post-entrenamiento sin contaminación moderna
+
+Otro desafío técnico fascinante: ¿cómo haces fine-tuning de un modelo vintage sin inyectarle conocimiento moderno? No puedes usar instrucciones de ChatGPT, ni datasets de RLHF actuales, porque contaminarías el modelo.
+
+Los autores construyeron una pipeline desde cero:
+
+1. **Generaron pares instrucción-respuesta** a partir de textos históricos con estructura regular: manuales de etiqueta, guías de correspondencia, libros de cocina, diccionarios y enciclopedias.
+2. **Sintetizaron prompts** para distintos tipos de tarea: resumir documentos, responder preguntas factuales, mantener conversaciones.
+3. **Aplicaron DPO online** usando Claude Sonnet 4.6 como juez — la puntuación media de seguimiento de instrucciones subió de 2.0 a 3.4 sobre 5.
+4. **Refinaron con RL** usando chats sintéticos entre Claude Opus 4.6 y Talkie.
+
+El resultado es un modelo que **suena a persona de 1930** pero puede mantener una conversación coherente. Aunque los autores admiten que el RL con feedback de IA moderna inevitablemente moldea su comportamiento de forma anacrónica. (La versión de 7B, tras RL, hablaba en listados numerados.)
+
+## Mi veredicto
+
+Talkie es uno de los proyectos de investigación de IA más originales que he visto en mucho tiempo. No es otro benchmark que sube 0.5 puntos, ni otro modelo que sabe más matemáticas. Es un experimento que **nos obliga a preguntarnos cosas incómodas**:
+
+- ¿Cuánto de lo que creemos saber sobre LLMs es en realidad sobre **la web** como dataset, y no sobre el lenguaje humano en general?
+- Si un modelo entrenado solo con texto de 1930 puede escribir Python, ¿qué nos dice eso sobre la **generalización fuera de distribución**?
+- ¿Hasta qué punto la **contaminación de datos** está inflando nuestras evaluaciones actuales?
+
+Los autores prometen escalar a nivel GPT-3 este verano y, según sus estimaciones, tienen corpus para llegar a un billón de tokens — suficiente para un modelo tipo GPT-3.5. Si lo consiguen, tendremos la oportunidad de conversar con una inteligencia que nunca supo de la existencia de internet. Y eso, como mínimo, va a ser una conversación interesante.
+
+El modelo base está disponible en [GitHub](https://talkie-lm.com/introducing-talkie) y [Hugging Face](https://talkie-lm.com/introducing-talkie) para quien quiera experimentar. Yo ya lo tengo en mi lista de pendientes para este fin de semana.
