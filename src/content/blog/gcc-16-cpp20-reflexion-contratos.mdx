@@ -1,0 +1,168 @@
+---
+title: "GCC 16: C++20 por defecto y reflexión en tiempo de compilación"
+date: "2026-04-30T12:54"
+tags:
+  - c++
+  - gcc
+  - compiladores
+  - reflexion
+  - open-source
+excerpt: "GCC 16 aterriza con C++20 como estándar por defecto, reflexión en C++26 y contratos. El compilador GNU da un salto generacional que va a cambiar cómo escribimos C++."
+---
+
+## Lo que trae GCC 16
+
+Ayer se publicó GCC 16, y no es una versión cualquiera. Es la primera release del compilador GNU que cambia el dialecto C++ por defecto de C++17 a **C++20**. Si compilas sin flags, ahora estás en C++20, te guste o no.
+
+Pero el cambio de estándar por defecto es solo la punta del iceberg. Esta release incluye implementaciones experimentales de dos de las features más esperadas de C++26: **reflexión en tiempo de compilación** y **contratos**. También hay mejoras sustanciales en el vectorizador, OpenMP 6.0, y un sistema de pub/sub para autores de plugins.
+
+Vamos por partes.
+
+## C++20 por defecto: se acabó el `-std=c++20`
+
+Desde GCC 11, el dialecto por defecto era C++17. Con GCC 16, pasas automáticamente a C++20. Esto significa que conceptos, corrutinas, rangos, `constexpr` ampliado, `std::format`, el operador spaceship (`<=>`) y `consteval` están disponibles sin flags adicionales.
+
+Para proyectos legacy que quieran quedarse en C++17, basta con añadir `-std=c++17` o `-std=gnu++17`. Pero el mensaje del equipo de GCC es claro: el ecosistema avanza.
+
+```cpp
+// Esto compila sin flags en GCC 16:
+#include <concepts>
+#include <format>
+#include <iostream>
+
+template<std::integral T>
+auto describe(T value) {
+    return std::format("Entero con valor: {}", value);
+}
+
+int main() {
+    std::cout << describe(42) << '\n';
+    // std::cout << describe(3.14); // Error: double no es integral
+}
+```
+
+Los módulos de C++20 siguen siendo experimentales y requieren `-fmodules`. Es la única pieza grande que se resiste.
+
+## Reflexión en C++26: bajando `^` al estándar
+
+Esta es la feature que más ruido va a generar. La propuesta P2996R13 (Reflection for C++26) ya está implementada en GCC 16, aunque detrás del flag `-std=c++26 -freflection`.
+
+¿Qué significa reflexión en tiempo de compilación? Que el compilador te deja inspeccionar y manipular el código fuente mientras compila. Puedes iterar sobre los miembros de una struct, obtener sus nombres como strings, sus tipos, y generar código basado en esa información.
+
+```cpp
+#include <experimental/meta>
+#include <string>
+#include <iostream>
+
+struct Persona {
+    int id;
+    std::string nombre;
+    double salario;
+};
+
+// Función genérica que serializa cualquier struct a JSON
+template<typename T>
+std::string to_json(const T& obj) {
+    std::string result = "{";
+
+    template for (constexpr auto miembro : std::meta::members_of(^T)) {
+        if constexpr (std::meta::type_of(miembro) == ^int) {
+            result += std::format("\"{}\": {}",
+                std::meta::name_of(miembro), obj.[:miembro:]);
+        } else if constexpr (std::meta::type_of(miembro) == ^std::string) {
+            result += std::format("\"{}\": \"{}\"",
+                std::meta::name_of(miembro), obj.[:miembro:]);
+        }
+        // Añade coma entre campos
+        if (miembro != std::meta::members_of(^T).back()) {
+            result += ", ";
+        }
+    }
+
+    result += "}";
+    return result;
+}
+
+int main() {
+    Persona p{1, "Ada", 85000.0};
+    std::cout << to_json(p) << '\n';
+    // {"id": 1, "nombre": "Ada", "salario": 85000.0}
+}
+```
+
+El operador `^` produce un valor de reflexión a partir de una entidad (tipo, función, miembro...). El splicer `[:miembro:]` inyecta esa entidad de vuelta en el código. Y `template for` es un bucle que se ejecuta en tiempo de compilación, expandiendo el cuerpo para cada iteración.
+
+Esto elimina de un plumazo toneladas de macros, boilerplate de serialización, y frameworks externos de reflection que parcheaban las carencias del lenguaje.
+
+Más allá de la serialización, la reflexión habilita patrones que hasta ahora eran imposibles sin codegen externo. Puedes generar automáticamente operadores de comparación, hashing, bindings para otros lenguajes, o validación de esquemas en tiempo de compilación.
+
+## Contratos: diseño por contrato nativo
+
+Junto con la reflexión, GCC 16 estrena P2900R14: **contratos** para C++26, bajo el flag `-std=c++26`.
+
+Los contratos permiten especificar precondiciones, postcondiciones y aserciones directamente en la signatura de las funciones. El compilador las verifica (o las ignora, según el modo de build) sin necesidad de `assert` manual ni comentarios que se desincronizan del código.
+
+```cpp
+#include <contract>
+#include <cmath>
+
+// Precondición: el índice no puede ser negativo
+// Postcondición: el resultado debe ser el esperado
+double raiz_cuadrada_segura(double x)
+    pre(x >= 0.0)                          // contrato de entrada
+    post(resultado: resultado >= 0.0 &&      // contrato de salida
+         std::abs(resultado * resultado - x) < 1e-9)
+{
+    return std::sqrt(x);
+}
+
+int acceso_seguro(const std::vector<int>& v, size_t idx)
+    pre(idx < v.size())
+{
+    return v[idx];
+}
+```
+
+Hay tres niveles de comprobación configurable en compilación: `default` (chequea todo y termina el programa si falla), `audit` (más caro, para tests) y `off` (se eliminan por completo, zero-cost en release).
+
+Esto es superior a las macros `assert` tradicionales en varios aspectos: las condiciones son parte de la interfaz pública de la función (las ves en la signatura), el compilador puede usar la información para optimizaciones, y tienes control granular sobre qué contratos se chequean y cuándo.
+
+## Mejoras en el vectorizador
+
+GCC 16 también trae avances significativos en el vectorizador automático, que es lo que convierte bucles secuenciales en instrucciones SIMD sin que escribas una sola intrinsic:
+
+- **Bucles sin número conocido de iteraciones**: ahora el vectorizador puede manejar bucles donde el conteo de iteraciones no es determinable en tiempo de compilación. Antes simplemente se rendía.
+- **Early breaks más eficientes**: los bucles con `break` temprano ya no pagan el coste de mantener variables de inducción vectoriales innecesarias.
+- **Mutual peeling**: el vectorizador puede pelar iteraciones de alineamiento de forma mutua entre bucles, mejorando el rendimiento cuando tienes varios bucles vecinos operando sobre los mismos datos.
+
+```cpp
+// Este tipo de bucle ahora se vectoriza en GCC 16:
+void procesar_con_escape(const float* in, float* out, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (in[i] < 0.0f) break;  // early break
+        out[i] = std::sqrt(in[i]);
+    }
+}
+```
+
+Para quien escribe código de alto rendimiento —simulaciones, procesamiento de señal, gráficos— estas mejoras se traducen en velocidad gratis sin tocar una línea.
+
+## Plugins con pub/sub y diagnóstico SARIF
+
+Los autores de plugins y herramientas de análisis estático reciben un regalo: GCC 16 introduce un **framework de publish/subscribe** con mensajes fuertemente tipados. Los plugins pueden suscribirse a eventos como la entrada y salida de pases de optimización sobre funciones concretas o eventos del analizador estático.
+
+Esto abre la puerta a herramientas externas mucho más integradas sin tener que modificar el core del compilador. También se ha añadido soporte experimental para enviar diagnósticos en formato SARIF vía socket JSON-RPC, pensado para IDEs que quieran recibir warnings y errores en tiempo real con contexto estructurado.
+
+Es un guiño claro al ecosistema de herramientas: GCC ya no es solo un compilador, quiere ser una plataforma sobre la que otros construyan.
+
+## Mi opinión
+
+GCC 16 me parece una de las releases más relevantes de los últimos años, y no por el número de versión redondo.
+
+El salto a C++20 por defecto es un movimiento necesario pero doloroso para algunos. Quien mantenga codebases grandes con dependencias encadenadas va a sudar. Pero es la medicina que el ecosistema necesita: C++20 ya tiene 6 años. Seguir anclados en C++17 por inercia no es sano.
+
+La reflexión es el verdadero game-changer. Durante décadas, la falta de reflexión ha sido la gran ausencia de C++ frente a Java, C#, Python o Rust. Verla aterrizar —aunque sea experimental— en el compilador de referencia del ecosistema es un hito. Y la sintaxis con `^` y `[: :]` me parece elegante dentro de lo que cabe en C++: es intrusiva, sí, pero precisamente por eso no hay ambigüedad.
+
+Los contratos también resuelven un dolor real. `assert` ha sido el parche de toda la vida, pero meter las condiciones en la signatura y darle al compilador control sobre cuándo evaluarlas es una mejora cualitativa. En codebases grandes, donde los invariantes se documentan en comentarios que nadie lee, esto puede evitar bugs silenciosos.
+
+GCC 16 no es solo una actualización de compilador. Es una declaración de intenciones sobre hacia dónde va C++ como lenguaje: más expresivo, más seguro, y con menos boilerplate. Y eso, viniendo de C++, es decir mucho.

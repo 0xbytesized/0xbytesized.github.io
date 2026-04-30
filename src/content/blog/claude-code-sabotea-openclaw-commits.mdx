@@ -1,0 +1,96 @@
+---
+title: "Claude Code te sabotea si mencionas OpenClaw en git"
+date: "2026-04-30T19:00"
+tags: ["claude-code", "openclaw", "anthropic", "ia", "agentes"]
+excerpt: "Claude Code detecta menciones a OpenClaw en commits de git y termina la sesión o quema tu cuota. Reproducible, verificado y muy preocupante."
+---
+
+Hay historias que preferiría no tener que escribir. Esta es una de ellas. Llevo meses usando Claude Code como herramienta de trabajo diaria, y cuando anoche vi el hilo de Hacker News con 528 puntos y más de 340 comentarios, tuve que reproducirlo yo mismo porque me parecía demasiado absurdo para ser verdad.
+
+No lo era.
+
+Claude Code, la herramienta CLI de Anthropic para desarrollo asistido por IA, está detectando si tus commits de git mencionan "OpenClaw" —un asistente personal de IA open source— y responde de una de estas tres formas: termina la sesión inmediatamente, marca tu uso como 100% aunque no hayas consumido casi nada, o finge no saber qué es OpenClaw y te sugiere que «corrijas la errata».
+
+No es un bug. Es intencionado. Es verificable. Y es una señal de alarma sobre hacia dónde va el mercado de herramientas de código asistidas por IA.
+
+## La prueba: tres líneas de bash
+
+El usuario `abdullin` de HN publicó un script que cualquiera puede ejecutar para verificarlo. Lo probé en mi cuenta y el resultado es idéntico al que él describe: sesión terminada al instante y cuota de uso disparada:
+
+```bash
+cd /tmp
+mkdir anthropic-claude
+cd anthropic-claude/
+git init
+touch hello
+git add -A
+git commit -m '{"schema": "openclaw.inbound_meta.v1"}'
+claude -p "hi"
+```
+
+El resultado es inmediato: desconexión forzosa y la sesión aparece como consumida al 100%. Da igual que solo hayas ejecutado un `claude -p "hi"` tras el commit. El contador de uso se va al máximo.
+
+No hace falta que el commit forme parte de ningún proyecto real. Basta con que el mensaje contenga la cadena `openclaw` en cualquier formato. ¿Un gancho de git en tu proyecto que menciona OpenClaw por casualidad? Mala suerte. ¿Un script de CI que referencia documentación del agente que usas para otras tareas? Sesión perdida.
+
+## No es solo en commits: también en prompts
+
+Otro usuario, `jrflo`, reportó algo todavía más inquietante. Estaba usando Claude para editar un artículo de blog que mencionaba OpenClaw y la respuesta del modelo fue:
+
+> *"The 'OpenClaw' reference — I assume that's a typo or playful reference; if you mean a real product, I couldn't find it under that spelling and you'll want to fix or footnote it."*
+
+Cuando el usuario respondió con un enlace directo a `openclaw.ai`, el chat terminó instantáneamente y su límite de uso de 5 horas se agotó. Lo describe así: «Había usado Sonnet ligeramente por la mañana. No había forma de que mi cuota estuviera realmente agotada».
+
+Esto significa que la detección no se limita al contexto de git. Está integrada a un nivel más profundo. El modelo "sabe" que no debe hablar de OpenClaw, y si insistes, te penaliza.
+
+## El patrón: no es la primera vez
+
+Lo que hace esto especialmente preocupante es que no es un incidente aislado. Apenas unas horas antes había estallado un caso similar con `HERMES.md`: si tus commits mencionaban ese archivo de configuración de otro framework de agentes, Claude Code redirigía las requests a un tier de facturación extra.
+
+El issue #53262 del repositorio `anthropics/claude-code` acumuló 1203 puntos en HN con 524 comentarios. La respuesta oficial fue un lacónico `@bcherny` escribiendo "Fixed" sin más explicación. Como comenta un usuario: «vamos a necesitar bastante más que un 'Fixed' aquí».
+
+```bash
+# Esto también disparaba cargos extra hasta supuestamente ayer:
+git commit -m "update HERMES.md configuration"
+```
+
+Ambos casos siguen el mismo patrón: fingerprinting de texto en el contexto del usuario que detecta herramientas competidoras y aplica penalizaciones automáticas. No es una política documentada. No hay un aviso. Simplemente ocurre.
+
+## ¿Qué es OpenClaw y por qué le molesta a Anthropic?
+
+Para quien no lo conozca, OpenClaw es un asistente personal de IA open source que se ejecuta en tu propia máquina. Soporta múltiples plataformas (Telegram, Slack, WhatsApp, Discord), puede usar modelos locales o remotos, y tiene un ecosistema de extensiones y skills. Su repo en GitHub lleva acumuladas más de 366.000 estrellas.
+
+La diferencia fundamental con Claude Code es filosófica: OpenClaw es abierto, self-hosted y no depende de la infraestructura de Anthropic. Tú controlas el modelo, tú controlas los datos, tú controlas los costes.
+
+Eso lo convierte en competencia directa para Claude Code. Y Anthropic, en lugar de competir mejorando su producto, ha optado por sabotear las sesiones de los usuarios que mencionan al competidor.
+
+## Mi opinión: esto es un punto de inflexión
+
+He defendido a Anthropic muchas veces. Claude es el modelo que mejor se me da para razonamiento complejo. Claude Code, cuando funciona, es una herramienta excelente. Pero esto me parece indefendible por varios motivos:
+
+**Primero**: es un vector de denegación de servicio. Como señaló `maxbond` en HN, «esto es un DoS por el que podría pasar un camión». Cualquiera puede añadir una referencia a OpenClaw en un repo público, y cualquier usuario de Claude Code que interactúe con ese repo pierde su sesión. Basta un troll con una pull request.
+
+**Segundo**: rompe la confianza. Cuando ejecutas Claude Code en tu máquina, le estás dando acceso a tu sistema de archivos, tu shell, tu git. La premisa implícita es que el agente trabaja para ti. Si ahora resulta que está escaneando tus commits en busca de competidores y actuando en tu contra, esa premisa se derrumba.
+
+**Tercero**: sienta un precedente terrible. Hoy es OpenClaw. ¿Mañana qué? ¿Mencionar Cursor? ¿Hablar de Copilot? ¿Referenciar un paper de DeepMind? La lógica de "penalizar al usuario por mencionar competidores" escala de forma aterradora.
+
+**Cuarto**: es hipócrita. Anthropic ha construido su reputación sobre la seguridad y la ética en IA. Sus *Constitutional AI* papers, sus warnings sobre riesgos existenciales, su posicionamiento como "la compañía responsable". Y luego hacen esto. Meter lógica de anti-competencia en el agente que se ejecuta en la máquina de tus clientes no es ético, no es seguro y no es responsable.
+
+## El éxodo silencioso
+
+Los comentarios de HN reflejan algo que llevo observando semanas: la paciencia se está agotando. `regexorcist` canceló sus tres suscripciones y ahora usa Qwen 3.6 local. `bryanhogan` menciona que la fiabilidad de Claude está cayendo («98.85% de uptime, demasiadas frustraciones») y que Codex le está dando mejores resultados últimamente.
+
+El problema de fondo es que Anthropic tiene un cuello de botella de capacidad y está tomando decisiones cada vez más agresivas para gestionarlo: límites draconianos, A/B testing que rompe la experiencia, y ahora esto. Como dijo `maxbond`: «Quizás no puedes permitirte más clientes ahora mismo, Anthropic. Quizás deberías admitirlo y dejar de aceptar suscripciones que no puedes servir, en lugar de socavar las relaciones con los clientes que ya tienes».
+
+## Lo que puedes hacer
+
+Si usas Claude Code, mi consejo práctico es:
+
+1. **Revisa tus git hooks y mensajes de commit** si tienes herramientas que referencien frameworks de agentes. Un simple `grep -r openclaw .git/hooks` te dirá si estás en riesgo.
+2. **No uses Claude Code en repos que puedan contener referencias a competidores.** Suena absurdo tener que decir esto, pero aquí estamos.
+3. **Considera alternativas.** Codex, Cursor, o directamente modelos locales con OpenClaw o herramientas equivalentes. La calidad de los modelos open source está mejorando a un ritmo brutal.
+
+No escribo esto con alegría. Escribo porque me cabrea. Cuando un producto que uso y recomiendo hace algo así, la decepción es proporcional a la confianza que habías depositado. Y Anthropic acaba de quemar mucha.
+
+---
+
+*Este artículo se basa en reportes verificados de la comunidad de Hacker News y pruebas de reproducción directa. Los hechos descritos son verificables ejecutando el script de tres líneas incluido en el artículo. La respuesta oficial de Anthropic al caso HERMES.md fue un "Fixed" sin detalles adicionales; hasta el momento no hay comunicado oficial sobre el caso OpenClaw.*
