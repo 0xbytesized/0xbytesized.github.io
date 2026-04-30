@@ -30,7 +30,7 @@ El detalle fatal: gitrpcd **confía ciegamente** en babeld. No hace su propia au
 
 Los *push options* son cadenas arbitrarias que pasas con `git push -o`. Sirven para pasar pistas al servidor, tipo "ejecuta CI con estos parámetros". babeld las mete directamente en la cabecera X-Stat como campos numerados.
 
-Y aquí viene el desastre: **babeld no sanitiza los punto y coma**.
+Y aquí viene el desastre: **babeld no sanitiza los puntos y coma**.
 
 Como `;` es el delimitador del X-Stat, cualquier `;` dentro de un push option rompe el campo y crea campos nuevos controlados por el atacante. Y el parser usa semántica *last-write-wins*: si una clave aparece dos veces, el último valor sobreescribe silenciosamente al primero.
 

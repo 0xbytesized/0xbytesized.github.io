@@ -7,7 +7,7 @@ excerpt: "Zed llega a 1.0 tras cinco años de desarrollo. Construido desde cero 
 
 Hoy es un día importante para el ecosistema de editores de código. Zed, el editor que Nathan Sobo y su equipo llevan construyendo desde que dejaron Atom atrás, acaba de anunciar su versión 1.0. Y lo hace con más de 80.000 estrellas en GitHub, más de un millón de líneas de código y una filosofía que se aparta radicalmente de todo lo que conocemos.
 
-He estado siguiendo Zed desde sus primeras betas, y si soy sincero, siempre me ha parecido un proyecto con una ambición casi temeraria. Reescribir un editor de código desde cero en Rust, inventar tu propio framework de UI acelerado por GPU, y competir contra VS Code —que tiene el respaldo de Microsoft y un ecosistema de extensiones imposible de igualar— suena a suicidio comercial. Pero aquí estamos: Zed 1.0 es real, se descarga gratis, y cientos de miles de desarrolladores ya lo usan a diario.
+He estado siguiendo Zed desde sus primeras betas, y si soy sincero, siempre me ha parecido un proyecto con una ambición casi temeraria. Reescribir un editor de código desde cero en Rust, inventar tu propio framework de UI acelerado por GPU y competir contra VS Code —que tiene el respaldo de Microsoft y un ecosistema de extensiones imposible de igualar— suena a suicidio comercial. Pero aquí estamos: Zed 1.0 es real, se descarga gratis y cientos de miles de desarrolladores ya lo usan a diario.
 
 ## De Atom a Electron, de Electron a la GPU
 
@@ -65,7 +65,7 @@ Pero lo que de verdad diferencia a Zed es su integración nativa con IA. No es u
 
 Zed permite ejecutar múltiples agentes de IA en paralelo dentro del editor. Las predicciones de edición (edit predictions) te sugieren el siguiente cambio a nivel de tecla —no de token, sino exactamente la edición que probablemente harías— con la misma latencia que el resto del editor.
 
-El Agent Client Protocol (ACP) es quizás lo más estratégico de este lanzamiento. Es un protocolo abierto que permite que distintos agentes de IA se conecten a Zed: Claude Agent, Codex, OpenCode, y recientemente también Cursor. Zed no te obliga a usar su agente; te da el lienzo y deja que elijas.
+El protocolo de agentes que acompaña al lanzamiento (al que el equipo se refiere como Agent Client Protocol o ACP) es quizás lo más estratégico. Es un protocolo abierto que permite que distintos agentes de IA se conecten a Zed: Claude Agent, Codex, OpenCode y recientemente también Cursor. Zed no te obliga a usar su agente; te da el lienzo y deja que elijas.
 
 Configurar un agente en Zed es razonablemente directo. En tu `settings.json`:
 
@@ -89,7 +89,7 @@ Configurar un agente en Zed es razonablemente directo. En tu `settings.json`:
 }
 ```
 
-No voy a fingir que he probado todos los agentes compatibles, pero la arquitectura es sólida: el protocolo define cómo un agente externo solicita leer archivos, proponer diffs, y recibir feedback del usuario sin acoplarse a la UI de Zed. Es el tipo de diseño que permite que el ecosistema crezca sin que el editor haga de cuello de botella.
+No voy a fingir que he probado todos los agentes compatibles, pero la arquitectura es sólida: el protocolo define cómo un agente externo solicita leer archivos, proponer diffs y recibir feedback del usuario sin acoplarse a la UI de Zed. Es el tipo de diseño que permite que el ecosistema crezca sin que el editor haga de cuello de botella.
 
 ## DeltaDB: lo que viene
 
@@ -99,13 +99,13 @@ Si esto suena familiar, es porque recuerda a lo que Google Docs hace con texto p
 
 ## Zed for Business
 
-Zed también lanza Zed for Business: facturación centralizada, control de acceso basado en roles, y gestión de equipos. Es un movimiento obvio para monetizar, y necesario si quieren ser sostenibles. El pricing no lo han detallado públicamente aún, pero el editor base sigue siendo gratuito y open source.
+Zed también lanza Zed for Business: facturación centralizada, control de acceso basado en roles y gestión de equipos. Es un movimiento obvio para monetizar, y necesario si quieren ser sostenibles. El pricing no lo han detallado públicamente aún, pero el editor base sigue siendo gratuito y open source.
 
 ## Mi opinión
 
-He probado muchos editores. Empecé con Notepad++, pasé por Sublime Text, viví en VS Code durante años, y jugué con Neovim lo suficiente como para respetarlo pero no adoptarlo. Zed es el primer editor en mucho tiempo que me hace plantearme cambiar.
+He probado muchos editores. Empecé con Notepad++, pasé por Sublime Text, viví en VS Code durante años y jugué con Neovim lo suficiente como para respetarlo pero no adoptarlo. Zed es el primer editor en mucho tiempo que me hace plantearme cambiar.
 
-La velocidad es el argumento principal, y no es marketing. Zed arranca instantáneamente, el scroll va a 120 fps sin tearing, y la latencia de teclado es imperceptible. Cuando pasas ocho horas al día en un editor, esos milisegundos importan más de lo que la gente cree.
+La velocidad es el argumento principal, y no es marketing. Zed arranca instantáneamente, el scroll va a 120 fps sin tearing y la latencia de teclado es imperceptible. Cuando pasas ocho horas al día en un editor, esos milisegundos importan más de lo que la gente cree.
 
 Dicho esto, el ecosistema de extensiones sigue siendo la gran barrera. VS Code tiene más de 50.000 extensiones. Zed tiene unas pocas docenas hechas por la comunidad. Si tu flujo de trabajo depende de extensiones muy específicas —y el mío depende de varias—, cambiar de editor es un coste real.
 
