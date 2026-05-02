@@ -1,0 +1,113 @@
+---
+title: "lib0xc: Microsoft quiere salvar tu código C de ti mismo"
+date: 2026-05-02T02:00
+tags: ["c", "seguridad", "microsoft", "open-source", "systems-programming"]
+excerpt: "Microsoft libera lib0xc, una librería MIT con bounds-checking, conversiones seguras y punteros etiquetados para modernizar C sin cambiar de lenguaje."
+---
+
+C lleva décadas siendo el rey indiscutible del software de sistemas. Linux, las bases de datos, los motores de videojuegos, los sistemas embebidos… todo corre sobre C. Y sin embargo, cada año aparece un nuevo CVE con nombre de película de James Bond que nos recuerda lo frágil que es escribir código en un lenguaje donde un `memcpy` mal medido te regala una shell de root.
+
+Microsoft acaba de publicar **lib0xc**, una librería open source bajo licencia MIT que no intenta reinventar C ni convertirlo en Rust. Su objetivo es mucho más modesto y, por eso mismo, mucho más ambicioso: **codificar los patrones seguros que los programadores de C ya conocen pero rara vez aplican de forma consistente**.
+
+La idea es simple y brillante: si no podemos cambiar el lenguaje, cambiemos las APIs.
+
+## El problema no es C, eres tú (y su librería estándar)
+
+El estándar de C evoluciona con la velocidad de un glaciar. Las APIs de `string.h`, `stdio.h` y `stdlib.h` fueron diseñadas en una era donde la seguridad de memoria no era una prioridad. `strcpy` no sabe cuánto mide el buffer de destino. `malloc` te devuelve un `void *` genérico sin tipo. Y `printf` con sus macros `PRIu32` y `PRIu64` es un dolor de cabeza que ni los veteranos recuerdan de memoria.
+
+La comunidad lleva décadas aplicando los mismos trucos defensivos: arrays de tamaño fijo, wrappers con aserciones, macros para todo. Pero cada proyecto reinventa la rueda. lib0xc viene a decir: **pongamos estos patrones en una librería con documentación, tests y una API coherente**.
+
+## Lo que trae lib0xc bajo el capó
+
+La librería se divide en dos grandes bloques. Por un lado, extensiones de la librería estándar (`0xc/std/`) que reemplazan o complementan lo que ya conoces. Por otro, utilidades de sistemas (`0xc/sys/`) que cubren necesidades más especializadas como logging, hash tables, tests unitarios y manejo de errores POSIX.
+
+### CURSOR: formateo con tracking de espacio
+
+Uno de los módulos que más me ha gustado es `cursor.h`. Sustituye el viejo `FILE *` por un stream en memoria que sabe exactamente cuánto espacio le queda:
+
+```c
+#include <0xc/std/cursor.h>
+
+char buf[256];
+CURSOR cur;
+cbuffopen(&cur, buf, "w");
+cprintf(&cur, "hola %s, tu número es %d", "David", 42);
+
+// Si te pasas del buffer, el cursor simplemente se niega a escribir.
+// No hay overflow, no hay comportamiento indefinido.
+```
+
+Esto es justo lo que `snprintf` debería haber sido desde el principio: en lugar de devolverte un entero que tienes que comprobar manualmente, el cursor rastrea el espacio restante de forma automática y deja de escribir cuando se acaba. Menos props a comprobar, menos bugs.
+
+### Conversiones de enteros que no mienten
+
+¿Cuántas veces has asignado un `int` con signo a un `size_t` sin pensar? El compilador te tira un warning que ignoras porque "total, ese valor nunca va a ser negativo". Hasta que lo es.
+
+```c
+#include <0xc/std/int.h>
+
+off_t size_from_stat = file_stat.st_size; // con signo
+
+// Esto TRAPEA en runtime si el valor es negativo o no cabe:
+size_t n = __cast_signed_unsigned(size_t, size_from_stat);
+```
+
+La macro `__cast_signed_unsigned` no se limita a convertir: comprueba los bounds en tiempo de ejecución y revienta si las cuentas no salen. Es una política de "prefiero crashear que corromper memoria silenciosamente", que en sistemas es exactamente lo que quieres.
+
+### Punteros con contexto tipado
+
+Uno de los anti-patrones más clásicos de C es pasar datos opacos como `void *`. Pierdes toda la información de tipo, y nada te impide hacer un cast a lo que no es. lib0xc ofrece `context_t`:
+
+```c
+#include <0xc/std/context.h>
+
+struct mi_estado {
+    int contador;
+    char nombre[64];
+};
+
+struct mi_estado state = {0};
+context_t ctx = __context_export(struct mi_estado *, &state);
+
+// Al importar, se verifica que el tamaño coincide con el tipo declarado:
+struct mi_estado *recuperado = __context_import(struct mi_estado *, ctx);
+// Si el tipo no coincide en tamaño, el programa trapea aquí.
+```
+
+No es type safety al nivel de Rust, pero convierte un error silencioso y explotable en un crash inmediato y detectable. Para APIs de callbacks donde pasas un `void *user_data`, esto es oro puro.
+
+### Asignación tipada con limpieza automática
+
+El módulo `alloc.h` va un paso más allá. En vez del clásico `malloc` + `free`, te da wrappers que conocen el tipo y un atributo `__free` que libera automáticamente la memoria al salir del scope:
+
+```c
+#include <0xc/std/alloc.h>
+
+// malloc tipado: sabe qué tipo estás pidiendo
+struct conexion *conn = objalloc(struct conexion);
+// No necesitas sizeof ni cast — el compilador lo resuelve solo
+```
+
+Combinado con `call.h` para invocación diferida, puedes construir patrones de "adquirir y liberar" más difíciles de usar mal. No elimina los leaks, pero los hace mucho menos probables.
+
+## La filosofía: "embiggen the pit of success"
+
+Hay una frase del README que me encanta: _"embiggen C's pit of success"_. Es una forma de decir que las APIs deberían ser más fáciles de usar bien que de usar mal. C tiene justo el problema opuesto: sus APIs estándar premian el atajo y castigan la diligencia. `strncpy` no termina en nulo si no cabe. `realloc` pierde el puntero original si falla. `gets` es básicamente un meme con patas.
+
+lib0xc invierte esa dinámica. Sus funciones están diseñadas para que **el camino feliz sea también el camino seguro**. Si quieres hacer algo peligroso, tienes que esforzarte. Si sigues la API tal cual, obtienes bounds-checking, verificaciones de tipo y crashes controlados en vez de corrupción silenciosa.
+
+## ¿Qué no es lib0xc?
+
+Conviene ser claro: esto no es Rust. No es type safety. No es borrow checking. No te va a salvar de data races entre hilos ni de usar memoria después de liberarla. El propio autor lo reconoce sin tapujos en el hilo de Hacker News: _"No es Rust, y no es type safety, pero no pretende serlo"_.
+
+Lo que sí es: una capa de sensatez para proyectos C existentes que no pueden o no quieren migrar a otro lenguaje. Si mantienes un codebase legacy en C —un driver del kernel, una base de datos embebida, un firmware—, lib0xc te permite subir el listón de seguridad sin reescribir todo desde cero.
+
+## Mi opinión
+
+Me parece uno de los movimientos más sensatos que he visto salir de Microsoft en mucho tiempo. No es un anuncio rimbombante, no es un producto que compite con nada, no hay diapositivas de PowerPoint. Es un equipo de ingenieros diciendo: "esto es lo que hacemos para no pegarnos tiros en el pie con C, y lo compartimos por si a ti también te sirve".
+
+La aproximación me recuerda a la filosofía de OpenBSD: en lugar de esperar a que el comité del estándar se ponga de acuerdo dentro de 15 años, coge los patrones que ya funcionan, codifícalos, documenta los bordes y publícalos. La diferencia es que aquí Microsoft paga la factura, mantiene los tests y lo licencia como MIT para que cualquiera lo use sin ataduras.
+
+El nombre, por cierto, es un guiño delicioso. `0xc` es `12` en hexadecimal, pero también es el prefijo de direcciones de memoria en los volcados de crash. Es como decir: "estamos en las tripas del sistema, y venimos a poner orden".
+
+Si escribes C en 2026 y no estás usando al menos algunos de estos patrones, te recomiendo dedicarle una hora a leer el README y los headers. No te va a convertir en un programador de Rust, pero va a hacer que tu `valgrind` tenga mucho menos trabajo.
