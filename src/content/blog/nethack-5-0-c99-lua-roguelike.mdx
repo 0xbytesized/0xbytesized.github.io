@@ -1,0 +1,98 @@
+---
+title: "NetHack 5.0: el roguelike legendario se pasa a C99 y Lua"
+date: 2026-05-02T20:30
+tags: ["nethack", "c", "lua", "roguelike", "open-source"]
+excerpt: "NetHack 5.0.0 aterriza tras una década de silencio: C99, compilación cruzada y niveles definidos en Lua. El roguelike que lleva 39 años en activo se reinventa sin perder su alma."
+---
+
+## Treinta y nueve años bajando mazmorras
+
+Pocos proyectos de software pueden presumir de llevar casi cuatro décadas en desarrollo activo. NetHack es uno de ellos. Nació en 1987 como una fusión de variantes del Hack original de 1984, y desde entonces ha visto pasar sistemas operativos, guerras de navegadores, el nacimiento de la web, los smartphones y la era de la IA. Mientras el mundo cambiaba, los jugadores seguían muriendo por comer cadáveres de kobold envenenados.
+
+Hoy, 2 de mayo de 2026, el NetHack DevTeam ha publicado [NetHack 5.0.0](https://nethack.org/v500/release.html). La noticia ha escalado hasta los 248 puntos en Hacker News y no es para menos: es la primera versión mayor desde 2015 y el salto de numeración —de 3.6.x a 5.0.0— ya anticipa que esto no es un parche cosmético.
+
+## Qué trae NetHack 5.0 de nuevo
+
+La lista de cambios ocupa 3100 entradas en `doc/fixes5-0-0.txt`. Pero hay tres decisiones arquitectónicas que definen esta versión.
+
+### C99: adiós al C de los ochenta
+
+NetHack siempre ha sido un proyecto escrito en C. Pero hasta ahora su código arrastraba compatibilidad con compiladores pre-estándar, con declaraciones al estilo K&R y funciones sin prototipos. La versión 5.0 exige un compilador C99 como mínimo.
+
+Esto puede sonar a burocracia técnica, pero tiene implicaciones reales: poder usar `//` para comentarios de una línea, declarar variables dentro del `for`, tipos como `intptr_t`, y estructuras con inicializadores designados. Para un proyecto con cientos de miles de líneas, es un salto de calidad de vida enorme para quien contribuye.
+
+### Compilación cruzada
+
+Hasta ahora, compilar NetHack para una plataforma distinta a la del desarrollador era un dolor. El build system era frágil y hacía demasiadas asunciones sobre la máquina host. La 5.0 introduce soporte formal de _cross-compiling_ documentado en el archivo `Cross-compiling` de la raíz del proyecto.
+
+Esto es importante porque NetHack corre en sitios muy diversos: servidores públicos por SSH, routers con OpenWrt, handhelds retro, emuladores de terminal dentro de navegadores. Que cualquiera pueda generar un binario para ARM desde su portátil x86 sin montar un infierno de toolchains es una victoria silenciosa pero real.
+
+### Niveles en Lua: el cambio más radical
+
+La decisión más interesante es técnica: los compiladores de niveles y mazmorras basados en yacc/lex, junto con el procesamiento de texto de quests que hacía `makedefs`, han sido reemplazados por scripts Lua que el juego carga e interpreta en tiempo de ejecución.
+
+Así se define una _big room_ —una de las salas gigantes que aparecen aleatoriamente en la mazmorra— en la 5.0:
+
+```lua
+-- Fragmento real de dat/bigrm-1.lua en NetHack 5.0.0
+des.level_init({ style = "solidfill", fg = " " });
+des.level_flags("mazelevel", "noflip");
+
+des.map([[
+-------------------------------------------------------
+|.....................................................|
+|.....................................................|
+|.....................................................|
+-------------------------------------------------------
+]]);
+
+if percent(80) then
+   local terrains = { "-", "F", "L", "T", "C" };
+   local tidx = math.random(1, #terrains);
+   local choice = math.random(0, 5);
+   if choice == 2 then
+      -- plus sign
+      local sel = selection.line(10,8, 64, 8)
+                 | selection.line(37,3, 37, 14);
+      des.terrain(sel, terrains[tidx]);
+   end
+end
+
+des.stair("up");
+des.stair("down");
+
+for i = 1, 28 do
+  des.monster();
+end
+```
+
+La gracia no está en la sintaxis, que es trivial. Está en lo que habilita: cualquier desarrollador puede ahora prototipar una mazmorra o un nivel de quest sin tocar C, sin recompilar, y sin lidiar con un parser de gramáticas. Lua se integra con el motor del juego mediante un _bridge_ en C (`nhlua.c`) que expone funciones como `des.monster()`, `des.trap()` o `des.stair()`.
+
+El puente C-Lua es sólido y está en producción:
+
+```c
+/* Funciones reales del bridge nhlua.c en NetHack 5.0.0 */
+staticfn int nhl_deltrap(lua_State *);
+staticfn int nhl_getmap(lua_State *);
+staticfn int nhl_pline(lua_State *);
+staticfn int nhl_verbalize(lua_State *);
+staticfn int nhl_menu(lua_State *);
+staticfn int nhl_callback(lua_State *);
+staticfn int nhl_gamestate(lua_State *);
+```
+
+Cada una de estas funciones es un punto de entrada desde Lua al núcleo del juego. `nhl_pline` escribe mensajes en el área de texto, `nhl_getmap` consulta el estado del mapa, `nhl_callback` gestiona hooks de eventos como `level_enter` o `end_turn`.
+
+Lo interesante es que este sistema de callbacks permite que los scripts Lua reaccionen a eventos del juego sin que el código en C sepa nada del nivel concreto. El script se registra con `nh_callback_set("end_turn", mi_funcion)` y el motor llama a `mi_funcion` en cada turno. Es un patrón de plugin elegante y sorprendentemente moderno para una codebase de 1987.
+
+## Por qué se saltaron la 4.x
+
+Una pregunta recurrente en los comentarios de HN es por qué no hay NetHack 4. La respuesta corta es que existió como fork externo durante años —NetHack 4 era un proyecto independiente que reescribió partes del motor y modernizó la interfaz— pero nunca fue una versión oficial del DevTeam. Al saltar directamente a 5.0, el equipo está trazando una línea clara: esto es NetHack oficial, no un fork, y el número refleja la magnitud del cambio interno.
+
+## Mi veredicto
+
+NetHack 5.0 me parece un ejemplo de cómo mantener un proyecto legacy sin convertirlo en una pieza de museo. No han reescrito el juego en Rust. No han metido una interfaz gráfica con Electron. No han añadido microtransacciones ni un pase de batalla. Han hecho tres cosas aburridas y profundamente útiles: estandarizar el dialecto de C, permitir compilar en cualquier parte y mover la lógica de niveles a un lenguaje de scripting.
+
+El resultado es que el juego es más fácil de mantener, más accesible para contribuidores nuevos y más portable que nunca. Y mientras tanto, los jugadores pueden seguir muriendo por patear un cofre trampa exactamente igual que en 1987.
+
+Si nunca has jugado a NetHack, la 5.0 es el mejor momento para empezar. Se juega en terminal, tiene modo tutorial y la wiki sigue siendo una de las mejores documentaciones de cualquier juego. Eso sí: prepárate para morir. Mucho.
