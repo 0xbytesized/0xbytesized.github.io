@@ -1,0 +1,107 @@
+---
+title: "VS Code te pone de coautor con Copilot sin preguntar"
+date: "2026-05-03T02:37"
+tags: ["vscode", "copilot", "git", "microsoft", "open-source"]
+excerpt: "Microsoft cambió dos líneas en VS Code y empezó a añadir 'Co-authored-by: Copilot' a commits de usuarios que ni siquiera habían usado la herramienta."
+---
+
+El 15 de abril de 2026, un ingeniero de Microsoft abrió el pull request #310226 en el repositorio de VS Code. El título era anodino: "Enabling ai co author by default". El cuerpo estaba vacío. El diff cambiaba exactamente dos líneas. Dos palabras, en realidad: `"off"` por `"all"`.
+
+Se mergeó sin hacer ruido. Nadie le prestó atención.
+
+Dos semanas después, internet ardía. El PR acumuló 398 comentarios de indignación en GitHub y 850 puntos en Hacker News. La gente descubría que sus commits tenían esto sin haberlo pedido jamás:
+
+```
+Co-authored-by: Copilot <copilot@github.com>
+```
+
+## El cambio de dos líneas que lo empezó todo
+
+Esto es lo que contenía el PR. Literalmente, nada más:
+
+```diff
+// extensions/git/package.json
+- "default": "off",
++ "default": "all",
+
+// extensions/git/src/repository.ts  
+- const addAICoAuthor = config.get<'off' | 'chatAndAgent' | 'all'>('addAICoAuthor', 'off');
++ const addAICoAuthor = config.get<'off' | 'chatAndAgent' | 'all'>('addAICoAuthor', 'all');
+```
+
+La opción `git.addAICoAuthor` llevaba tiempo en VS Code, pero su valor por defecto era `"off"`. Con el cambio, pasó a ser `"all"`, lo que significa que VS Code empezó a añadir `Co-authored-by: Copilot` a **todos** los commits hechos desde el editor. Da igual si habías usado Copilot para algo o no. Da igual si tenías `chat.disableAIFeatures: true`. Da igual si escribiste cada línea a mano. El `Co-authored-by` aparecía igual.
+
+## Cómo detectar si te ha pasado
+
+Si usas VS Code y has hecho commits en las últimas semanas, pégate una vuelta por tu historial:
+
+```bash
+git log --all --grep="Co-authored-by: Copilot"
+```
+
+Si te sale algo, no eres el único. El commit se hizo desde VS Code, el setting estaba a `"all"` por defecto, y voilà: Copilot figura como coautor de tu trabajo sin que lo hubieras invitado.
+
+Para revisar los metadatos completos de un commit sospechoso:
+
+```bash
+git show --format=full HEAD
+```
+
+La línea `Co-authored-by` aparece en el trailer del mensaje de commit. No es un metadato oculto — está ahí, en texto plano, empujado a tu remoto y visible para cualquiera que lea el log.
+
+## Cómo desactivarlo (y no, no basta con desactivar Copilot)
+
+Hay dos niveles de defensa. El inmediato:
+
+```json
+// En tu settings.json de VS Code
+{
+  "git.addAICoAuthor": "off"
+}
+```
+
+Esto devuelve el comportamiento al estado anterior. Pero la sorpresa desagradable vino de los usuarios que ya tenían `chat.disableAIFeatures: true` y aun así vieron el `Co-authored-by` aparecer. La opción de desactivar funciones de IA y la de añadir coautoría son independientes. Una no implica la otra. Tienes que desactivar ambas explícitamente.
+
+Si quieres ir a lo seguro y no confiar en que Microsoft no vuelva a cambiar defaults en el futuro:
+
+```json
+{
+  "chat.disableAIFeatures": true,
+  "git.addAICoAuthor": "off",
+  "github.copilot.enable": {
+    "*": false
+  }
+}
+```
+
+Para commits que ya están publicados y quieres limpiar, la opción más quirúrgica es un rebase interactivo:
+
+```bash
+git rebase -i HEAD~5
+# Marca los commits con 'reword', borra la línea Co-authored-by, guarda
+git push --force-with-lease
+```
+
+Pero esto reescribe historia. Si el repo es compartido, coordínalo con tu equipo antes.
+
+## El problema de fondo no son dos líneas
+
+Lo interesante no es el cambio en sí, sino lo que revela. Tres cosas me llaman la atención:
+
+**Primero, el proceso.** Un PR sin descripción, sin discusión previa en un issue, sin documentación, mergeado sin revisión sustantiva de la comunidad. Dos líneas que afectan a millones de usuarios y se cuelan como si fuese un cambio de CSS. Si esto puede pasar con algo tan visible como los mensajes de commit, ¿qué otras cosas se habrán colado?
+
+**Segundo, la filosofía.** Añadir un coautor automático a cada commit diluye el significado del campo `Co-authored-by`. Git lo diseñó para dar crédito real a quien contribuyó de verdad. Si todo commit hecho desde VS Code lleva la firma de Copilot, el campo deja de tener valor informativo y se convierte en publicidad pasiva.
+
+**Tercero, el patrón.** No es la primera vez que Microsoft toma una decisión que beneficia sus métricas de adopción a costa de la transparencia con el usuario. Pero es la primera vez que lo hace alterando el historial de commits, que para mucha gente es un registro casi sagrado de su trabajo. Es cruzar una línea que antes nadie se había atrevido a cruzar.
+
+## Mi veredicto
+
+Microsoft metió la pata hasta el fondo y lo sabe. Los comentarios en el PR van desde el cabreo legítimo hasta el sarcasmo más afilado. Mi favorito es el de un usuario que escribe: _"Quick question: what the fuck is wrong with you?"_. No es constructivo, pero resume el sentimiento general.
+
+La parte que más me preocupa es la combinación de dos factores: el cambio fue trivial de implementar pero enorme en impacto, y el proceso de revisión fue prácticamente inexistente. Es la receta perfecta para que esto vuelva a pasar con otra feature en el futuro.
+
+Por suerte, arreglarlo es fácil — un setting en el `settings.json` y listo. Pero la confianza no se recupera con un json de tres líneas. Varios desarrolladores en el hilo ya anunciaron que se pasan a Zed, que justo acaba de sacar su versión 1.0. Otros hablan de volver a Vim, Neovim, o directamente a usar git por terminal.
+
+Personalmente, creo que el ecosistema de editores está más vivo que nunca y eso es bueno para todos. Que VS Code se pegue un tiro en el pie con decisiones como esta solo acelera la competencia. Y la competencia nos beneficia a los que escribimos código.
+
+Mientras tanto, ya sabes: `"git.addAICoAuthor": "off"`. Y revisa tus últimos commits, por si acaso.
