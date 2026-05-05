@@ -1,0 +1,117 @@
+---
+title: "Async Rust sigue en MVP: el bloat que el compilador no ve"
+date: "2026-05-05T16:02"
+tags: ["rust", "async", "compiladores", "embedded", "rendimiento"]
+excerpt: "Un ingeniero de Tweede golf ha documentado cómo el compilador de Rust genera máquinas de estado hinchadas para async. Incluso `async { 5 }` produce tres estados. ¿Qué está pasando?"
+---
+
+Dion, ingeniero de software embebido en Tweede golf, acaba de publicar la segunda parte de su serie sobre async Rust y el resultado es demoledor. El título lo dice todo: "Async Rust never left the MVP state". Y cuando lees los datos, entiendes por qué.
+
+Llevo un rato siguiendo este tema. La promesa de Rust siempre fue "zero-cost abstractions": pagas solo por lo que usas. Pero en el mundo async, esa promesa se rompe. Y no es un problema nuevo: llevamos años viendo cómo los futuros generados por el compilador ocupan más de lo necesario y hacen copias de más. Pero Dion va más allá y documenta algo que me ha hecho revisar código async que tengo por ahí.
+
+El problema no es tanto el tamaño de los futuros —que también— sino la estructura de la máquina de estados que genera el compilador. Incluso el futuro más simple posible, `async { 5 }`, produce **tres** estados. Tres. Para devolver un número. Vamos a verlo.
+
+## El futuro que no necesitaba ser futuro
+
+Coge este código:
+
+```rust
+fn foo() -> impl Future<Output = i32> {
+    async { 5 }
+}
+```
+
+La implementación manual óptima sería algo así:
+
+```rust
+struct FooFut;
+
+impl Future for FooFut {
+    type Output = i32;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(5)
+    }
+}
+```
+
+Fácil. No hay estado. Devuelves el número y punto. Pero el compilador de Rust, cuando genera el MIR (Mid-level Intermediate Representation), produce esto:
+
+- **Unresumed**: estado inicial
+- **Returned**: estado tras devolver `Ready`
+- **Panicked**: estado tras un pánico capturado
+
+Tres variantes de enum, con su correspondiente `switchInt` para discriminar entre ellas en cada llamada a `poll`. Y lo peor es que los estados `Returned` y `Panicked` existen por una razón que, en release, no se sostiene: hacer `panic!` si alguien vuelve a llamar a `poll` después de que el futuro haya terminado.
+
+Dion propone algo tan simple como efectivo: en release, si alguien llama a `poll` sobre un futuro ya completado, devuelve `Pending` en vez de panicar. Es seguro —no hay UB— y el compilador puede eliminar ramas enteras de código. Su hack en el compilador mostró una reducción del 2-5% en tamaño de binario para firmware embebido async.
+
+## El ejemplo que lo parte todo
+
+El caso más sangrante está en las funciones wrapper. Imagina esto:
+
+```rust
+async fn transformar(input: u32) -> i32 {
+    let condicion = input > 10;
+    let resultado = consultar_api(condicion).await;
+    resultado * 2
+}
+```
+
+Aquí `transformar` tiene un solo punto de `await`. No guarda ningún estado propio a través de ese await que no esté ya capturado por el futuro de `consultar_api`. La implementación manual sería:
+
+```rust
+enum TransformarFut {
+    Inicio { input: u32 },
+    Esperando { inner: ConsultarApiFut },
+}
+
+impl Future for TransformarFut {
+    type Output = i32;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match self {
+                TransformarFut::Inicio { input } => {
+                    let condicion = input > 10;
+                    *self = TransformarFut::Esperando {
+                        inner: consultar_api(condicion),
+                    };
+                }
+                TransformarFut::Esperando { inner } => {
+                    return inner.poll(cx).map(|r| r * 2);
+                }
+            }
+        }
+    }
+}
+```
+
+Dos estados reales. Pero el compilador mete Unresumed, Returned y Panicked encima. Cinco estados para un wrapper de una sola llamada. Y esto pasa en todas partes: cada `async fn` que llama a otra y le añade un preámbulo o un postámbulo mínimo genera su propia máquina de estados completa en vez de apoyarse en la del futuro interno.
+
+## ¿Y LLVM no lo arregla?
+
+Esa es la pregunta obvia: si el MIR es un desastre, ¿LLVM no lo limpia todo después? A veces sí, cuando el código es trivial y compilas con `opt-level=3`. Pero:
+
+- En `opt-level="s"` o `"z"` (típico en embedded y WASM), LLVM no llega
+- Cuando los futuros anidan profundamente —algo ubicuo en Rust async idiomático— LLVM se rinde
+- Las ramas de pánico introducen caminos con efectos laterales que inhiben optimizaciones
+
+Dion lo demuestra con un ejemplo en Godbolt: `foo()` devuelve `async { 5 }` y `bar()` hace `foo().await + foo().await`. Con `opt-level=3`, LLVM sí entiende que `foo` devuelve 5, pero **no** optimiza el resultado de `bar` a 10. La llamada a `poll` de `foo` sigue ahí. Si comentas manualmente la rama de pánico en el IR, la optimización aparece al instante.
+
+Esto es grave. Significa que el compilador no está dando a LLVM entradas lo bastante limpias, y estamos pagando en binario final por estados que no deberían existir.
+
+## Mi opinión
+
+El artículo de Dion es el tipo de contenido que hace falta en la comunidad Rust. No es un rant. No es "async es malo, usad hilos". Es una ingeniera (nota: Dion es nombre masculino en neerlandés — error mío si asumí) documentando problemas concretos con soluciones concretas y pidiendo financiación para arreglarlos. Ha enviado un Project Goal oficial. Ha hackeado el compilador para demostrar que sus optimizaciones funcionan. Es textbook open-source engineering hecho bien.
+
+Dicho esto, el problema de fondo es cultural. Rust async se diseñó pensando en servidores grandes y se estandarizó alrededor de tokio. El hecho de que el 2-5% de reducción de binario de Dion venga de eliminar tres estados que nunca debieron existir en primer lugar me dice que el modelo mental con el que se diseñó async no incluía el caso embebido. Y ahora toca pagar esa deuda.
+
+La buena noticia es que hay movimiento. El PR #135527 ya aborda parte del problema de futuros sobredimensionados. El Project Goal de Dion busca financiación para trabajar directamente en el compilador. Y la visibilidad que está teniendo esto en Hacker News (342 puntos, 180 comentarios) sugiere que a la comunidad le importa.
+
+Si escribes Rust async para servidores, probablemente no notes nada de esto. Pero si alguna vez has compilado Rust para un ESP32 o para WASM y te has preguntado por qué tu binario pesa el doble de lo esperado, ya tienes parte de la respuesta.
+
+## Lo que viene
+
+El roadmap de Rust para 2026 incluye varios frentes async. Los closures async están avanzando en nightly. `async fn` en traits ya es estable desde la versión 1.75, y eso ha disparado la adopción de patrones que generan justo este tipo de wrappers. Cada `impl MiTrait for MiTipo` con métodos async produce wrappers como el de `transformar`. Cuanta más ergonomía gana Rust async, más código genera este patrón y más relevante se vuelve el trabajo de Dion.
+
+Mi veredicto: si este Project Goal sale adelante, el impacto va a ser silencioso pero enorme. No verás un anuncio rimbombante. Pero tus binarios async van a pesar menos, tus futures van a compilar más rápido y el compilador va a estar un pasito más cerca de la promesa original de zero-cost abstractions. Por ahora, toca esperar y —si puedes— contribuir.
