@@ -99,7 +99,7 @@ const server = http.createServer((req, res) => {
   // Las llamadas /v1/messages van al backend activo
   if (path === "/v1/messages") {
     const target = BACKENDS[activeBackend].url;
-    // proxyRequest reenvía headers, body, y streaming SSE al backend
+    // proxyRequest reenvía headers, body y streaming SSE al backend
     // con normalización de usage para evitar crashes del CLI
   }
 });
