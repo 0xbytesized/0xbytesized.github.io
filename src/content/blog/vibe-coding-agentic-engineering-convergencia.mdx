@@ -63,7 +63,7 @@ if __name__ == '__main__':
     app.run(debug=True)
 ```
 
-El usuario prueba `curl localhost:5000/api/products?category=books`, ve que devuelve datos, y se va contento. No sabe que acaba de desplegar una inyección SQL con patas. Esto es vibe coding en estado puro: funciona para el *happy path*, explota en todo lo demás.
+El usuario prueba `curl localhost:5000/api/products?category=books`, ve que devuelve datos y se va contento. No sabe que acaba de desplegar una inyección SQL con patas. Esto es vibe coding en estado puro: funciona para el *happy path*, explota en todo lo demás.
 
 ### Flujo 2: Agentic engineering (supuestamente)
 
@@ -139,7 +139,7 @@ La pregunta incómoda no es "¿deberíamos seguir haciendo code review?". Es "si
 
 Simon tiene razón en estar incómodo. Pero creo que su incomodidad es una señal sana: significa que está prestando atención a un cambio de fase que la mayoría de la industria aún no ha procesado.
 
-No vamos a volver a revisar cada línea de código generada por agentes. Es físicamente imposible. Lo que necesitamos son **contratos de verificación** que operen a un nivel superior: tests generados automáticamente pero validados por humanos, *property-based testing* que cubra invariantes que ni se te ocurrirían, y —esto es clave— métricas de uso real. Como dice Simon: ya no me fío del README ni de los tests. Me fío de que hayas estado usando esa cosa dos semanas sin que te haya explotado en la cara.
+No vamos a volver a revisar cada línea de código generada por agentes. Es físicamente imposible. Lo que necesitamos son **contratos de verificación** que operen a un nivel superior: tests generados automáticamente pero validados por humanos, *property-based testing* que cubra invariantes que ni se te ocurrirían y —esto es clave— métricas de uso real. Como dice Simon: ya no me fío del README ni de los tests. Me fío de que hayas estado usando esa cosa dos semanas sin que te haya explotado en la cara.
 
 Al final, esto no va de agentes vs humanos. Va de diseñar sistemas de confianza que funcionen a la velocidad a la que el código se genera ahora. Y eso es un problema de ingeniería de sistemas, no de ingeniería de software. La ironía es que necesitamos a los mejores ingenieros precisamente para resolver cómo dejar de necesitar revisar cada línea.
 

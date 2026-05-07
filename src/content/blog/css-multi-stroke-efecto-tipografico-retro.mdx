@@ -22,7 +22,7 @@ h1 {
 
 Pero solo acepta un valor. Un borde, un color. Si quieres dos bordes (por ejemplo, uno blanco fino y otro rosa grueso por fuera), no hay forma de hacerlo con una sola declaración. La propiedad no es un shorthand que acepte múltiples capas como `box-shadow`.
 
-Durante años, la gente ha intentado stackear elementos por encima con `position: absolute` y jugar con `z-index`, pero los resultados eran inconsistentes. El texto se desalineaba, los bordes se comían unos a otros, y el antialiasing del navegador fastidiaba cualquier intento serio.
+Durante años, la gente ha intentado stackear elementos por encima con `position: absolute` y jugar con `z-index`, pero los resultados eran inconsistentes. El texto se desalineaba, los bordes se comían unos a otros y el antialiasing del navegador fastidiaba cualquier intento serio.
 
 ## La epifanía: variar la anchura del stroke
 
@@ -94,7 +94,7 @@ No necesitas librerías para probar el concepto. Aquí tienes una versión reduc
 }
 ```
 
-El truco está en que las capas con `position: absolute` comparten el mismo espacio (`inset: 0`), y la primera capa actúa como ancla con `position: relative`. El resto se apilan encima con bordes progresivamente más gruesos.
+El truco está en que las capas con `position: absolute` comparten el mismo espacio (`inset: 0`) y la primera capa actúa como ancla con `position: relative`. El resto se apilan encima con bordes progresivamente más gruesos.
 
 El resultado es un texto rosa intenso con anillos alternos rosa claro y rosa oscuro, rematado con un borde exterior blanquecino. Funciona en Chrome, Safari y Edge (Firefox también pero el renderizado del stroke es más suave, lo que cambia ligeramente la estética).
 
