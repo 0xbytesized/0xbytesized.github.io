@@ -1,0 +1,144 @@
+---
+title: "zero-native: Vercel apuesta por Zig para apps de escritorio"
+date: "2026-05-10T01:12"
+tags: ["zig", "vercel", "desktop", "webview", "zero-native"]
+excerpt: "Vercel Labs lanza zero-native, un framework que combina Zig con WebView para apps de escritorio. Binarios ligeros, compilación rápida y seguridad reforzada."
+---
+
+## ¿Qué es zero-native?
+
+El 8 de mayo de 2026, Vercel Labs publicó [zero-native](https://zero-native.dev), un nuevo framework para construir aplicaciones de escritorio y móviles usando **Zig** como capa nativa y **cualquier frontend web** como interfaz. En menos de 48 horas ha acumulado más de 1.600 estrellas en GitHub.
+
+La premisa es simple: usa la WebView del sistema operativo para renderizar tu UI (Next, React, Svelte, Vue, lo que quieras) y Zig para todo lo demás — desde llamadas al sistema hasta integración con librerías C.
+
+El resultado: binarios de menos de un megabyte, consumo mínimo de memoria y reconstrucción casi instantánea de la parte nativa.
+
+## El "momento Tauri" de Vercel
+
+Si esto te suena familiar, es porque el espacio ya tiene a [Tauri](https://tauri.app) como alternativa ligera a Electron. La diferencia principal está en el lenguaje del runtime nativo: Tauri usa Rust, zero-native usa **Zig**.
+
+Y la elección no es casual. Zig tiene tres ventajas muy concretas para este caso de uso:
+
+1. **Compilación rapidísima.** Cambias un comando del bridge nativo y en segundos tienes el binario reconstruido.
+2. **Interop con C sin fricción.** Zig llama a C directamente, sin bindings, sin `unsafe`, sin FFI doloroso. `@cImport` y a correr.
+3. **Binarios pequeños por defecto.** No hay runtime, no hay garbage collector, no hay monstruosidad de dependencias.
+
+Vercel está apostando fuerte por Zig últimamente — ya lo vimos con [zero](https://zero.dev) para backend y ahora con zero-native para escritorio. Tiene sentido: si controlas el build tooling de frontend (Turbopack, Next.js) y el runtime del backend (zero), el escritorio era el siguiente paso lógico.
+
+## Cómo se siente usarlo
+
+Instalar la CLI es un `npm install -g` de toda la vida:
+
+```bash
+npm install -g zero-native
+```
+
+Crear un proyecto nuevo es igual de directo:
+
+```bash
+zero-native init mi-app --frontend next
+cd mi-app
+zig build run
+```
+
+El scaffolding genera un proyecto Next.js estándar dentro de `frontend/` y un shell nativo en Zig listo para compilar. La primera ejecución instala dependencias del frontend, compila el shell nativo y abre una ventana con tu UI web renderizada.
+
+El manifiesto de la aplicación vive en `app.zon`, un archivo con sintaxis Zig:
+
+```zig
+.{
+    .id = "com.ejemplo.mi-app",
+    .name = "mi-app",
+    .display_name = "Mi App",
+    .version = "0.1.0",
+    .web_engine = "system",
+    .permissions = .{ "window" },
+    .capabilities = .{ "webview", "js_bridge" },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "http://127.0.0.1:5173" },
+        },
+    },
+    .windows = .{
+        .{ .label = "main", .title = "Mi App", .width = 960, .height = 640 },
+    },
+}
+```
+
+Aquí ya se ve algo interesante: `.web_engine = "system"` o `.web_engine = "chromium"`. Puedes elegir entre la WebView nativa (WKWebView en macOS, WebKitGTK en Linux) o empaquetar Chromium vía CEF cuando necesites consistencia de renderizado garantizada.
+
+## El bridge JS ↔ Zig
+
+La comunicación entre el frontend y la capa nativa se hace a través de `window.zero.invoke()`. Desde JavaScript:
+
+```javascript
+// Llamar a un comando registrado en el lado Zig
+const nombre = await window.zero.invoke("saludar", {
+  nombre: "David",
+});
+console.log(nombre); // "Hola, David"
+```
+
+Del lado Zig, defines un handler que recibe la invocación y un buffer de salida:
+
+```zig
+fn saludarHandler(
+    context: *anyopaque,
+    invocation: zero_native.bridge.Invocation,
+    output: []u8,
+) anyerror![]const u8 {
+    // invocation.payload es el JSON que enviaste desde JS
+    // El handler devuelve un slice de 'output' con JSON válido
+    const nombre = "David"; // en la práctica, parsearías invocation.payload
+    const msg = try std.fmt.bufPrint(output, "{{\"saludo\":\"Hola, {s}\"}}", .{nombre});
+    return msg;
+}
+
+pub fn main() !void {
+    var app = try zero_native.App.init(allocator);
+    // Los handlers se declaran en un array del dispatcher
+    app.handlers = .{
+        .{ .name = "saludar", .context = &app, .invoke_fn = saludarHandler },
+    };
+    try app.run();
+}
+```
+
+El bridge tiene **límites estrictos**: mensajes de hasta 16 KiB, respuestas de hasta 12 KiB, nombres de comando de 128 bytes máximo. Cada llamada verifica origen y permisos. Si algo falla, la promesa de JS se rechaza con códigos de error específicos: `unknown_command`, `permission_denied`, `handler_failed`, `payload_too_large` o `internal_error`.
+
+Es un modelo mucho más estricto que el `invoke` de Tauri, donde cualquier comando registrado está disponible globalmente a menos que uses el sistema de capabilities (que es opt-in).
+
+## Seguridad como primer principio
+
+Esto es lo que más me ha gustado del diseño. En zero-native, **la WebView se trata como no confiable por defecto**. Todo es opt-in:
+
+- Los comandos del bridge requieren registro explícito
+- La navegación está restringida a orígenes declarados
+- Los enlaces externos no se abren sin permiso
+- Las APIs de ventana (tamaño, posición, fullscreen) requieren capabilities
+- Las llamadas tienen límite de tamaño
+
+Compáralo con Electron, donde el proceso de renderizado tiene acceso a Node.js por defecto y hay que acordarse de desactivarlo con `contextIsolation` y `nodeIntegration: false`. Aquí la postura es la contraria: todo cerrado, abres lo que necesitas.
+
+## ¿Y para móvil?
+
+El README menciona ejemplos para iOS y Android. La idea es que una app host (en Swift/Kotlin) enlace la biblioteca C de zero-native (`libzero-native.a`) y delegue el renderizado a la WebView nativa del dispositivo. Es la misma filosofía: Zig para la lógica, web para la UI.
+
+Aún está en etapa temprana, pero el hecho de que ya haya ejemplos funcionales para ambas plataformas es una declaración de intenciones.
+
+## Lo que no me convence
+
+No todo es perfecto. Algunas cosas me dejan con dudas:
+
+- **Estado pre-release.** Ni siquiera ha llegado a v0.1. Esto es usable para experimentos, no para producción.
+- **Sin ecosistema aún.** Tauri tiene un sistema de plugins maduro (SQLite, HTTP, notifications, updater). zero-native empieza de cero.
+- **Documentación mínima.** La web de docs está bien montada pero faltan referencias de API detalladas y guías más allá del quick start.
+- **¿Mantendrá Vercel esto a largo plazo?** Vercel Labs tiene historial de proyectos experimentales que no siempre sobreviven. La pregunta es si esto se convierte en producto o se queda en experimento.
+
+## Mi veredicto
+
+zero-native me parece el movimiento más interesante en el espacio de apps de escritorio con web UI desde que Tauri llegó a 1.0. La combinación Zig + WebView tiene mérito técnico real: compilación rápida, binarios pequeños, interop C sin dolor y un modelo de seguridad que por fin trata la WebView como lo que es — código potencialmente hostil.
+
+Dicho esto, está verde. Muy verde. Si hoy tienes que elegir un framework para desktop, Tauri sigue siendo la opción sensata. Pero zero-native es el proyecto a vigilar en 2026. Si Vercel le mete recursos de verdad y la comunidad de Zig responde, podríamos estar ante el próximo estándar para apps nativas ligeras.
+
+Yo voy a montar algo pequeño con ello esta semana. Si funciona, igual hasta migro alguna herramienta interna. Ya os contaré.
