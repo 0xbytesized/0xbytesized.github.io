@@ -8,7 +8,7 @@ excerpt: "CVE-2025-55182: una cadena de thenables, prototipos y el protocolo Fli
 El 30 de noviembre de 2025, Lachlan Davidson —un pentester que solo quería
 entender cómo funcionaba un protocolo— encontró un RCE crítico en React. No
 era una aplicación mal configurada. Era el propio framework. Lo llamó
-React2Shell, y Meta lo parcheó en tres días con el identificador
+React2Shell y Meta lo parcheó en tres días con el identificador
 CVE-2025-55182.
 
 Lo fascinante no es solo la vulnerabilidad en sí, sino la cadena de
@@ -35,7 +35,7 @@ objeto serializado se ve así:
 1:{"name":"Jane","email":"[email protected]"}
 ```
 
-Aquí `$D` es un Date, y `$1` es una referencia a otro chunk del mensaje.
+Aquí `$D` es un Date y `$1` es una referencia a otro chunk del mensaje.
 Puedes incluso seleccionar propiedades con `$1:name`. Hasta aquí, todo
 razonable — es lo mínimo que necesitas para reconstruir un grafo de objetos
 en el servidor.
