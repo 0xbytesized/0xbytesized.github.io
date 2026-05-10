@@ -1,0 +1,96 @@
+---
+title: "He prohibido los query strings en mi sitio web"
+date: "2026-05-10T19:49"
+tags: ["web", "caddy", "nginx", "tracking", "privacidad"]
+excerpt: "Chris Morgan ha decidido eliminar los query strings de su sitio personal. No es un capricho: es una declaración de principios sobre quién controla tus URLs."
+---
+
+Hay una frase en el artículo de Chris Morgan que me golpeó como un ladrillo:
+
+> "I don't like people adding tracking stuff to URLs. Still less do I like people adding tracking stuff to *my* URLs."
+
+El 8 de mayo de 2026, Chris Morgan —un desarrollador conocido en el ecosistema Rust y autor de bibliotecas como `unicode-normalization`— publicó un post en su web personal titulado "I've banned query strings". En Hacker News acumuló 523 puntos y 272 comentarios en menos de 48 horas. La idea es tan simple que parece una broma, pero no lo es: ha configurado su servidor para rechazar cualquier petición que incluya parámetros en la query string.
+
+No es una medida de seguridad. No es una optimización de rendimiento. Es un acto de soberanía digital.
+
+## El problema no es el `?`, es lo que viene después
+
+Los query strings nacieron como un mecanismo inocente para pasar parámetros entre páginas. En los 90 tenían sentido: formularios de búsqueda, filtros, paginación. Pero en 2026 el 90% de los query strings que veo en mi día a día no son funcionales: son tracking.
+
+El enlace que compartes en Telegram lleva `?utm_source=telegram&utm_medium=social&utm_campaign=spring_launch`. El que encuentras en Twitter añade `?ref=profile_page&t=1746900000`. El de una newsletter lleva `?utm_campaign=weekly_142&utm_content=cta_button`. Ninguno de estos parámetros cambia lo que ves al abrir la página. Solo sirven para que alguien, en algún dashboard de analytics, sepa exactamente desde dónde hiciste clic.
+
+Morgan lo resume con precisión quirúrgica:
+
+> "If I wanted to know I'd look at the Referer header; and if it isn't there, it's probably for a good reason."
+
+Tiene razón. El header `Referer` ya existe. Si el usuario quiere compartir de dónde viene, el navegador lo incluye automáticamente. Si lo ha bloqueado, es porque no quiere que lo sepas. Añadir parámetros de tracking a una URL ajena es sobreescribir esa decisión sin permiso.
+
+## Cómo se implementa en la práctica
+
+La belleza está en la sencillez. Morgan usa Caddy como servidor web y su solución cabe en unas pocas líneas:
+
+```caddy
+# Si la petición tiene query string, redirigir a la versión limpia
+@hasQuery query *
+redir @hasQuery {uri} permanent
+```
+
+Esto intercepta cualquier petición con query string y la redirige (código 301) a la URL sin parámetros. El `{uri}` en Caddy contiene la ruta sin query string, así que simplemente descartas todo lo que venga después del `?`.
+
+Si usas nginx, el equivalente es igual de directo:
+
+```nginx
+# nginx: eliminar query strings
+if ($args != "") {
+    rewrite ^ $uri? permanent;
+}
+```
+
+`$args` contiene los query parameters y `$uri` la ruta limpia. El `?` al final del rewrite es clave: le dice a nginx que no añada los argumentos originales a la redirección.
+
+Para quien quiera implementarlo a nivel de aplicación en Node.js, un middleware de Express es trivial:
+
+```javascript
+// middleware para eliminar query strings
+app.use((req, res, next) => {
+  if (Object.keys(req.query).length > 0) {
+    const cleanUrl = req.path;
+    return res.redirect(301, cleanUrl);
+  }
+  next();
+});
+```
+
+Esto comprueba si `req.query` tiene entradas y, si las tiene, redirige permanentemente a la ruta sin parámetros. Express ya parsea los query strings automáticamente a través de `req.query`, así que no necesitas tocar la URL manualmente.
+
+## Los casos límite existen
+
+Morgan es honesto sobre las excepciones. Reconoce que en el pasado usó query strings para cache-busting de hojas de estilo (`?t=…` y `?h=…`) y que está dispuesto a romper esas peticiones. Su razonamiento: "no debería haber peticiones legítimas con esos parámetros hoy".
+
+La solución para quien necesite query strings legítimos es igual de simple: una whitelist. En Caddy se puede afinar:
+
+```caddy
+# Permitir solo parámetros conocidos (ej. paginación, búsqueda)
+@badQuery {
+    query *
+    not query page=*
+    not query q=*
+}
+redir @badQuery {uri} permanent
+```
+
+Esto permite `?page=2` y `?q=rust` pero bloquea cualquier otro query string. Es una postura más pragmática que la prohibición total de Morgan, pero conserva el mismo principio: tú controlas qué parámetros entran en tu sitio.
+
+## Un detalle que me encanta: la URL del propio artículo
+
+Morgan cuenta que estuvo tentado de publicar el artículo en la URL `https://chrismorgan.info/?` —con la ruta vacía pero el signo de interrogación presente— o en `/%3F` (que es `?` codificado como parte del path). La idea era hacer un statement: si el artículo va sobre prohibir query strings, que su propia URL sea una query string de broma.
+
+Acabó publicándolo en `/no-query-strings` por razones prácticas: `curl` aparentemente elimina el `?` final en ciertos casos y Caddy se comporta de forma impredecible con paths que contienen `%3F` cuando interactúan con `try_files`.
+
+## Mi veredicto
+
+Voy a ser directo: prohibir todos los query strings en un sitio de contenido estático me parece una decisión correcta y valiente. No es para todo el mundo —si tu negocio depende de atribución de campañas, necesitas UTM—, pero para un blog personal, un portfolio o una landing page de documentación, es una postura que comunica algo importante: respeto por quien lee.
+
+Lo que más me gusta del gesto de Morgan es que convierte una decisión técnica en un statement político. No es "he optimizado mi web". Es "he recuperado el control de mis URLs". En una web donde cada enlace que compartimos lleva una cola de parámetros que no pedimos, ese control es revolucionario.
+
+La pregunta incómoda que deja el artículo es: si tú, como desarrollador, no controlas qué parámetros aceptan tus URLs, ¿quién lo hace?
