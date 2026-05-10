@@ -1,0 +1,154 @@
+---
+title: "ymawky: un servidor web en ensamblador ARM64 y puro arte"
+date: "2026-05-10T13:28"
+tags: ["assembly", "arm64", "macos", "servidores", "open-source"]
+excerpt: "ymawky es un servidor web escrito en ensamblador ARM64 para macOS. Sin libc, solo syscalls y con 418 I'm a teapot. Así se hackea de verdad."
+---
+
+El otro día me topé en Hacker News con un proyecto que me hizo sonreír de oreja a oreja. El título lo decía todo: _"Building a web server in assembly to give my life (a lack of) meaning"_. Se llama **ymawky** (pronunciado "yuh maw kee") y es, literalmente, un servidor web escrito a mano en ensamblador ARM64 para macOS. Sin libc. Sin bibliotecas externas. Solo el programador, el set de instrucciones ARM y el kernel de Darwin hablando mediante `svc #0x80`.
+
+El autor, [imtomt](https://github.com/imtomt), lo publicó el 29 de abril de 2026 bajo GPLv3 y en menos de dos semanas ha acumulado 159 estrellas en GitHub y más de 325 puntos en HN con 156 comentarios. Y no es hype vacío: el código es real, funciona y está escrito con un nivel de _craftsmanship_ que ya quisieran muchos servicios "enterprise".
+
+## Qué hace ymawky
+
+ymawky es un servidor de ficheros estáticos. Nada de server-side rendering ni lógica de negocio. Pero dentro de ese scope aparentemente modesto, implementa:
+
+- Soporte para **GET, HEAD, PUT, DELETE y OPTIONS**
+- Protección contra **path traversal** (con detección inteligente que no bloquea archivos con puntos legítimos como `hehe..txt`)
+- Decodificación de **percent-encoding** (`%20` → espacio)
+- Protección básica contra ataques **slowloris** mediante timeouts configurables
+- Soporte para **Range requests** (HTTP 206 Partial Content)
+- Listado de directorios
+- Páginas de error personalizables servidas desde `err/`
+- Y, por supuesto, el código de estado **418 I'm a teapot**, porque si escribes un servidor HTTP desde cero tienes la obligación moral de implementarlo
+
+## Arquitectura: fork-per-connection con syscalls puras
+
+ymawky usa el modelo clásico **fork-per-connection**: el proceso padre hace `accept()` y por cada conexión entrante hace `fork()`. El hijo maneja la petición y muere; el padre recolecta los zombies con `SIGCHLD` + `SA_NOCLDWAIT`.
+
+Pero lo interesante no es el modelo, sino cómo está implementado. Aquí no hay `libc`. Cada operación —abrir un socket, hacer `bind`, leer de un descriptor de fichero, mapear memoria— se hace invocando directamente el kernel de macOS con la instrucción `svc #0x80`.
+
+Así define el proyecto las constantes de syscall de Darwin:
+
+```asm
+# desde src/defs.S — definiciones de syscalls de macOS (XNU)
+.equ SYS_exit,         1
+.equ SYS_fork,         2
+.equ SYS_read,         3
+.equ SYS_write,        4
+.equ SYS_open,         5
+.equ SYS_close,        6
+.equ SYS_accept,       30
+.equ SYS_socket,       97
+.equ SYS_bind,         104
+.equ SYS_setsockopt,   105
+.equ SYS_listen,       106
+.equ SYS_mmap,         197
+.equ SYS_munmap,       73
+.equ SYS_getpid,       20
+```
+
+Y así se monta el socket del servidor:
+
+```asm
+# socket(AF_INET, SOCK_STREAM, 0)
+mov x16, SYS_socket
+mov x0, #2          # AF_INET
+mov x1, #1          # SOCK_STREAM
+mov x2, #0          # protocolo: TCP por defecto
+svc #0x80
+
+# bind(sockfd, &addr, 16)
+mov x16, SYS_bind
+# x0 ya contiene el fd del socket
+adr_l x1, addr      # struct sockaddr_in con IP y puerto
+mov x2, #16
+svc #0x80
+
+# listen(sockfd, 5)
+mov x16, SYS_listen
+mov x1, #5
+svc #0x80
+```
+
+El registro `x16` actúa como selector de syscall, los argumentos van en `x0`-`x5` y el resultado (y el flag de carry si hay error) vuelve en `x0`. Esto es **exactamente** la convención de llamada del kernel XNU en ARM64.
+
+## El bucle principal y el control de procesos
+
+Una de las partes que más me gusta es cómo controla el número máximo de procesos concurrentes. En lugar de llevar un contador manual, usa una syscall **no documentada** de macOS: `proc_info`:
+
+```asm
+# proc_info: obtiene la lista de procesos hijos de nuestro PID
+sub sp, sp, #2048      # reserva stack para el buffer
+mov x16, SYS_proc_info
+mov x2, x0             # nuestro PID (recién obtenido con getpid)
+mov x0, #1             # PROC_INFO_CALL_LISTPIDS
+mov x1, #6             # PROC_PPID_ONLY
+mov x4, sp             # buffer en el stack
+mov x5, #2048
+svc #0x80
+
+# x0 contiene bytes escritos; dividir entre 4 da el número de procesos
+lsr x0, x0, #2
+add sp, sp, #2048      # liberar stack
+
+# si hay más de MAX_PROCS, devolver 503
+cmp x0, #MAX_PROCS
+b.ls 8f
+mov x0, #503
+mov x1, #1
+```
+
+Esto es ingeniería de verdad: conoces tu sistema operativo tan bien que te permites usar APIs internas cuando la solución "oficial" no existe o es más torpe.
+
+## Servir ficheros con mmap
+
+Para GET, ymawky no usa `read()` en bucle. Hace `mmap()` del fichero completo y luego un solo `write()` al socket:
+
+```asm
+# mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0)
+mov x16, SYS_mmap
+mov x0, #0
+mov x1, x19           # tamaño del fichero
+mov x2, #1            # PROT_READ
+mov x3, #2            # MAP_PRIVATE
+ldr_l x4, file_des    # descriptor del fichero abierto
+mov x5, #0            # offset = 0
+svc #0x80
+# x0 -> puntero al fichero mapeado en memoria
+
+# Escribir cabecera HTTP...
+# ...y luego el cuerpo:
+add x1, x12, x22      # inicio = puntero + start_range
+sub x2, x23, x22      # longitud = end_range - start_range
+add x2, x2, #1        # +1 porque los rangos son inclusivos
+bl write_all
+
+# Limpiar:
+mov x16, SYS_munmap
+mov x0, x12
+mov x1, x19
+svc #0x80
+```
+
+Si el fichero está vacío (0 bytes), se salta el `mmap` y solo envía la cabecera. Limpio, eficiente, sin desperdiciar una syscall.
+
+## El debate en Hacker News: artesanía vs. pragmatismo
+
+Los comentarios en HN fueron una delicia. Por un lado estaban los nostálgicos, lamentando que "ya no se premia la artesanía en esta industria". Por otro, estaban los que señalaban que escribir en ensamblador con buenos macros no es tan diferente de programar en un lenguaje de alto nivel — solo más verboso.
+
+Un comentarista lo comparó con construir en Minecraft: hay quien hace granjas industriales de hierro y quien se pasa tres meses esculpiendo una catedral gótica. Ninguno está mal; son motivaciones distintas.
+
+Hubo también quien preguntó cuánto habría tardado un LLM en generar este código. La respuesta implícita del proyecto es: **ese no es el punto**. ymawky no existe porque fuera la forma más rápida de tener un servidor web. Existe porque alguien quiso _entender_ cada maldita instrucción que se ejecuta entre que un cliente dice `GET /` y los bytes de `index.html` llegan al socket.
+
+## Mi opinión
+
+Llevo meses viendo proyectos generados por IA, andamiajes de 200 MB para un "hola mundo" con 47 dependencias y desarrolladores que no saben qué hace `malloc` pero lanzan servicios en Kubernetes. ymawky es el antídoto.
+
+No voy a montar un servidor en ensamblador para producción. Pero ver código como este me recuerda por qué me metí en esto. Hay una belleza profunda en saber exactamente qué instrucción se está ejecutando, qué registro toca qué y cómo el kernel recibe tu petición. En una industria obsesionada con la abstracción, ymawky es un recordatorio de que debajo de todo ese JavaScript, tu ordenador sigue siendo una máquina que mueve bytes con instrucciones concretas.
+
+Y oye, que tenga un **418 I'm a teapot** implementado me dice que el autor no se toma a sí mismo demasiado en serio. Que es justo como debería ser.
+
+---
+
+Si quieres echarle un ojo al código (y deberías), el repo está en [github.com/imtomt/ymawky](https://github.com/imtomt/ymawky). Coge un Mac con Apple Silicon, clónalo y ejecuta `make && ./ymawky`. Luego abre `127.0.0.1:8080` en el navegador. Como dice el README: _"Bask in the warmth of assembly"_.
