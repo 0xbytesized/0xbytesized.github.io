@@ -1,0 +1,113 @@
+---
+title: "Bun en Rust: 99.8% de tests pasando en solo seis días"
+date: "2026-05-10T07:19"
+tags: ["bun", "rust", "zig", "claude", "javascript"]
+excerpt: "A seis días del experimento inicial, la migración de Bun a Rust alcanza un 99.8% de tests pasando. El prototipo de Jarred Sumner ya no parece un prototipo."
+---
+
+A las 7 de la mañana de un sábado de mayo, Jarred Sumner publicó un tuit con dos frases y una captura de pantalla:
+
+> "99.8% of bun's pre-existing test suite passes on Linux x64 glibc in the rust rewrite."
+
+En cualquier otro contexto, un porcentaje con decimales pasaría desapercibido. Pero estamos hablando de Bun —el runtime de JavaScript con casi 90.000 estrellas en GitHub, escrito originalmente en Zig y adquirido hace semanas por Anthropic— y de un experimento que hace seis días parecía una curiosidad de fin de semana.
+
+Ya no lo parece.
+
+## Seis días, tres fases
+
+El 4 de mayo Jarred subió al repositorio de Bun un documento de 576 líneas titulado "Zig → Rust porting guide". Era la guía que usaría Claude —el modelo de Anthropic— para traducir cientos de miles de líneas de Zig a Rust. En aquel momento la rama `claude/phase-a` acumulaba 774.000 líneas de código que ni siquiera compilaban.
+
+La comunidad reaccionó con escepticismo. "Vibe coding", lo llamaron algunos. "Código que acabará en la basura", dijo el propio Jarred. El post en Hacker News acumuló 540 comentarios en cuestión de horas.
+
+Pero Jarred no tiró el código. Lo iteró.
+
+El plan tenía tres fases claras desde el principio:
+
+- **Fase A:** generar un borrador `.rs` por cada `.zig`, sin preocuparse de que compile. El objetivo era capturar la lógica fielmente.
+- **Fase B:** hacer que compile crate por crate, cableando dependencias.
+- **Fase C:** pasar la suite de tests existente y validar el comportamiento.
+
+El tuit del 9 de mayo confirma que la Fase C está prácticamente completada para Linux x64 glibc. En menos de una semana.
+
+Para ponerlo en perspectiva: Bun tiene más de un millón de líneas de código. Migrar un proyecto de ese tamaño entre lenguajes de sistemas —de Zig a Rust, con modelos de memoria y sistemas de tipos diferentes— es una tarea que tradicionalmente requeriría meses de trabajo de un equipo completo. Claude lo ha hecho en días.
+
+## Cómo funciona la traducción
+
+La guía de portado es fascinante por sí misma. No es un prompt genérico de "tradúceme esto a Rust". Son 576 líneas de reglas extremadamente detalladas que cubren cada rincón de la gramática de Zig y su equivalente en Rust idiomático.
+
+Veamos algunos ejemplos de lo que especifica:
+
+```rust
+// Zig: defer x.deinit()
+// Rust: impl Drop for T
+// La guía ordena ELIMINAR la línea defer y convertir
+// deinit en una implementación de Drop. Ejemplo real:
+
+// ANTES (Zig)
+pub fn deinit(self: *HttpClient) void {
+    self.allocator.free(self.buffer);
+    self.socket.close();
+}
+
+// DESPUÉS (Rust)
+impl Drop for HttpClient {
+    fn drop(&mut self) {
+        // self.buffer es Box<[u8]>, se libera automáticamente
+        // Solo mantenemos el cierre del socket
+        self.socket.close();
+    }
+}
+```
+
+Cada regla está pensada para que el código resultante sea idiomático en Rust, no una traducción palabra por palabra. Por ejemplo, los `errdefer` de Zig —limpieza en caso de error— se eliminan por completo porque el operador `?` de Rust los vuelve redundantes:
+
+```rust
+// Zig original
+fn procesar_peticion(alloc: Allocator, data: []const u8) !Response {
+    const buf = try alloc.alloc(u8, 1024);
+    errdefer alloc.free(buf); // limpieza manual en error
+    const parsed = try parse(data);
+    // ...
+}
+
+// Rust después de la migración
+fn procesar_peticion(data: &[u8]) -> Result<Response, Error> {
+    let mut buf = vec![0u8; 1024]; // Vec<T> implementa Drop
+    let parsed = parse(data)?;     // '?' libera buf automáticamente
+    // ...
+}
+```
+
+Lo más impresionante es la tabla de mapeo de tipos. Cada construcción de Zig tiene una contrapartida precisa: `[]const u8` va a `&[u8]`, `anyerror!T` a `Result<T, bun_core::Error>`, `@fieldParentPtr` a `offset_of!` con `unsafe`. No hay ambigüedad. Es una especificación de traducción tan rigurosa como las reglas de un compilador.
+
+## ¿Y el rendimiento?
+
+Aquí es donde hay que ser honestos: no hay datos públicos.
+
+La guía deja pistas. En varios puntos menciona que ciertos patrones de Zig —como la monomorfización en tiempo de compilación con `comptime`— se traducen a genéricos de Rust que el compilador optimizará igual. Pero también hay concesiones: los `@intCast` de Zig (truncamiento sin verificación) se convierten en `try_from().unwrap()` en Rust, que añade una comprobación en tiempo de ejecución.
+
+La pregunta del millón es si el runtime en Rust será más rápido, más lento o igual que en Zig. Mi apuesta —y es solo una apuesta— es que será marginalmente más lento en microbenchmarks pero indistinguible en uso real. Rust y Zig ocupan un espacio de rendimiento similar; lo que ganas en seguridad de memoria con el borrow checker lo pagas con el coste de las comprobaciones de límites que Zig evita con `@intCast` sin verificar.
+
+Pero la verdadera pregunta no es de rendimiento. Es de mantenibilidad.
+
+## Mi opinión
+
+El experimento de Bun me parece uno de los hitos más honestos del año en ingeniería de software. No es una demo de marketing. No es un anuncio de producto. Es un ingeniero —un ingeniero brillante, el tipo que escribió Bun prácticamente solo— preguntándose qué pasa si pruebas algo radical.
+
+Y la respuesta es: pasa que funciona.
+
+El escepticismo inicial de Hacker News ("son líneas que ni compilan", "vibe coding sin criterio") ha envejecido mal en apenas seis días. Un 99.8% de tests pasando no es un prototipo de juguete. Es un sistema que se comporta igual que el original en prácticamente todos los casos.
+
+Pero lo realmente transformador no es Bun ni Rust. Es el método.
+
+Una guía de 576 líneas, escrita por un humano que conoce ambas tecnologías en profundidad, alimentando a un LLM que ejecuta la traducción mecánica. El humano piensa en la arquitectura de la migración. La máquina ejecuta el trabajo repetitivo. Es la división del trabajo que siempre hemos soñado: el ingeniero diseñando reglas y validando resultados, la IA haciendo de compilador neuronal.
+
+No sé si Bun acabará siendo un runtime en Rust. Jarred no ha dicho que vaya a ocurrir. Pero si ocurre, habrá sido el proyecto de migración más rápido en la historia del software de sistemas. Y el patrón —guía detallada + iteración rápida + validación contra tests existentes— es replicable para cualquier codebase con una suite de tests decente.
+
+El listón acaba de subir. Otra vez.
+
+## Referencias
+
+- [Tweet de Jarred Sumner](https://twitter.com/jarredsumner/status/2053047748191232310) — 9 de mayo de 2026
+- [PORTING.md en el repo de Bun](https://github.com/oven-sh/bun/commit/46d3bc29f270fa881dd5730ef1549e88407701a5) — commit original del 4 de mayo de 2026
+- [Hilo en Hacker News](https://news.ycombinator.com/item?id=48073680) — 516 puntos, 476 comentarios
