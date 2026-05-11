@@ -1,0 +1,159 @@
+---
+title: "cuda-oxide: Nvidia apuesta por Rust para programar GPUs"
+date: "2026-05-11T20:14"
+tags: ["rust", "cuda", "gpu", "nvidia", "compiladores"]
+excerpt: "Nvidia ha publicado cuda-oxide, un compilador oficial que permite escribir kernels CUDA en Rust puro: sin DSLs, sin bindings externos, sin C++. Así funciona."
+---
+
+Hace tres semanas Nvidia publicó algo que llevábamos años esperando sin atrevernos a pedir: un compilador oficial que convierte Rust en código CUDA. Se llama cuda-oxide y viene del equipo de NVlabs, el brazo de investigación de Nvidia que ya nos ha dado joyas como Instant NeRF o el trabajo original de StyleGAN. La diferencia es que esta vez lo que han construido es una herramienta de desarrollo, no un paper. Y es exactamente lo que parece: un backend de rustc que compila funciones anotadas con `#[kernel]` directamente a PTX, el lenguaje ensamblador de las GPUs Nvidia.
+
+El proyecto tiene apenas tres semanas de vida pública y ya acumula más de 1.400 estrellas en GitHub y 288 puntos en Hacker News. La pregunta obvia es: ¿realmente necesitamos otro compilador de GPU? ¿No tenemos ya CUDA C++, OpenCL, Vulkan compute shaders, SYCL y hasta Python con Numba? La respuesta está en los detalles de implementación. cuda-oxide no es un DSL embebido ni un wrapper sobre el runtime de CUDA — es un compilador real que toma Rust estándar y lo traduce a código de GPU respetando el sistema de tipos, el borrow checker y la semántica del lenguaje.
+
+## El pipeline de compilación: de Rust a PTX sin salir de Rust
+
+El viaje que hace tu código es fascinante y merece la pena entenderlo. El pipeline completo es:
+
+```
+Rust → Rust MIR → Pliron IR → LLVM IR → PTX
+```
+
+La primera etapa es estándar: rustc analiza tu código y produce MIR (Mid-level Intermediate Representation), su representación intermedia. Aquí no hay magia — es el mismo MIR que usarías para compilar a x86-64 o ARM64.
+
+La magia empieza en la segunda etapa. En lugar de pasar el MIR al backend de LLVM, cuda-oxide lo importa a Pliron, un framework de IR inspirado en MLIR pero escrito completamente en Rust. Sí, lo has leído bien: mientras MLIR es C++ de arriba a abajo, Pliron es Rust puro. Esto significa que todo el pipeline — análisis, transformaciones, lowerings y generación de código — ocurre dentro del ecosistema de Rust, sin dependencias de libLLVM para las etapas intermedias.
+
+Pliron define sus propios dialectos para representar conceptos de GPU: memoria compartida, sincronización de warps, TMA (Tensor Memory Accelerator) y operaciones atómicas con scoping. Desde Pliron se baja a LLVM IR y de ahí a PTX, el ensamblador que entienden las GPUs Nvidia.
+
+¿Por qué es relevante este diseño? Porque permite que el compilador razone sobre la semántica de GPU en términos de Rust, no de C++. Las garantías de seguridad del sistema de tipos sobreviven durante todo el pipeline, incluso dentro del código que se ejecuta en la GPU.
+
+## Escribiendo tu primer kernel
+
+La filosofía de cuda-oxide se resume en "single-source compilation": el código de host y el de dispositivo viven en el mismo archivo y se compilan con un solo comando. No hay archivos `.cu` separados, no hay strings de PTX inline, no hay DSL.
+
+Así se ve un kernel mínimo:
+
+```rust
+use cuda_device::{cuda_module, kernel, thread, DisjointSlice};
+use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+
+#[cuda_module]
+mod kernels {
+    use super::*;
+
+    #[kernel]
+    pub fn map<T: Copy, F: Fn(T) -> T + Copy>(
+        f: F,
+        input: &[T],
+        mut out: DisjointSlice<T>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if let Some(out_elem) = out.get_mut(idx) {
+            *out_elem = f(input[i]);
+        }
+    }
+}
+```
+
+Fíjate en varios detalles importantes. Primero, el módulo se anota con `#[cuda_module]`, lo que le dice al compilador que todo lo que lleve `#[kernel]` dentro debe compilarse a PTX. Segundo, el kernel es genérico sobre el tipo `T` — algo que en CUDA C++ tradicional requiere templates con una sintaxis bastante más verbosa. Tercero, la función acepta cualquier closure `F: Fn(T) -> T`, lo que significa que puedes pasar una lambda desde el host y el compilador la monomorfiza, la captura y la serializa automáticamente como parámetros del kernel.
+
+Lanzar este kernel desde el host es igual de directo:
+
+```rust
+fn main() {
+    let ctx = CudaContext::new(0).unwrap();
+    let stream = ctx.default_stream();
+
+    let data: Vec<f32> = (0..1024).map(|i| i as f32).collect();
+    let input = DeviceBuffer::from_host(&stream, &data).unwrap();
+    let mut output = DeviceBuffer::<f32>::zeroed(&stream, 1024).unwrap();
+
+    let module = kernels::load(&ctx).unwrap();
+
+    let factor = 2.5f32;
+    module
+        .map::<f32, _>(
+            &stream,
+            LaunchConfig::for_num_elems(1024),
+            move |x: f32| x * factor,
+            &input,
+            &mut output,
+        )
+        .unwrap();
+
+    let result = output.to_host_vec(&stream).unwrap();
+    assert!((result[1] - 2.5).abs() < 1e-5);
+}
+```
+
+El closure `move |x: f32| x * factor` se captura en el host, se pasa al compilador en tiempo de compilación, se monomorfiza a un tipo concreto y viaja a la GPU como parte del estado del kernel. Esto es algo que simplemente no existe en CUDA C++: allí los closures de C++ no pueden cruzar la frontera host-device porque las lambdas con capturas no son trivialmente copiables en el modelo de memoria de CUDA. Aquí lo resuelve el compilador en tiempo de compilación.
+
+## Composición asíncrona sin callbacks
+
+Si has trabajado con CUDA sabrás que manejar la asincronía es uno de los puntos más dolorosos. Tienes streams, eventos, sincronización explícita y un modelo mental que no encaja bien con el código síncrono tradicional. cuda-oxide propone algo distinto: operaciones de GPU como valores componibles.
+
+```rust
+use cuda_async::device_operation::DeviceOperation;
+
+let factor = 2.5f32;
+let op = module
+    .map_async::<f32, _>(
+        LaunchConfig::for_num_elems(1024),
+        move |x: f32| x * factor,
+        &input,
+        &mut output,
+    )?;
+
+// Ejecutar y esperar:
+op.sync()?;
+
+// O integrarlo en un runtime async de Rust:
+// op.await?;
+```
+
+La clave aquí es `map_async`. No lanza el kernel inmediatamente, sino que devuelve un `DeviceOperation` — una descripción perezosa del trabajo que quieres hacer en la GPU. Puedes componer varias operaciones, encadenarlas y ejecutarlas de golpe, o integrarlas en un runtime async de Rust con `.await`. El scheduler interno gestiona las dependencias entre operaciones, las transferencias de memoria y los streams de CUDA sin que tengas que preocuparte por la orquestación manual.
+
+Este patrón — lazy evaluation de operaciones de GPU con composición declarativa — es muy superior a la alternativa de callbacks y sincronización manual que domina el ecosistema CUDA tradicional. Y funciona porque el compilador tiene visibilidad completa del grafo de operaciones en tiempo de compilación.
+
+## Seguridad en la GPU: el modelo de DisjointSlice
+
+Uno de los aspectos más interesantes de cuda-oxide es cómo traslada las garantías de seguridad de Rust al modelo de ejecución SIMT de CUDA. En una GPU, cientos de threads ejecutan el mismo kernel simultáneamente. Si dos threads escriben en la misma posición de memoria, tienes una condición de carrera. En CUDA C++ esto se maneja con disciplina manual, atómicos y oraciones a Santa Bárbara.
+
+cuda-oxide introduce `DisjointSlice<T>`, un tipo que garantiza en tiempo de compilación que cada thread accede a una región de memoria que no se solapa con la de otros threads. Cuando escribes:
+
+```rust
+#[kernel]
+pub fn process_chunk(input: &[f32], mut out: DisjointSlice<f32>) {
+    let idx = thread::index_1d();
+    // El compilador sabe que out.get_mut(idx) es seguro
+    // porque DisjointSlice garantiza no solapamiento entre threads
+    if let Some(elem) = out.get_mut(idx) {
+        *elem = input[idx.get()].sqrt();
+    }
+}
+```
+
+El sistema de tipos verifica que no hay dos threads que puedan obtener una referencia mutable al mismo elemento. Esto no es un runtime check — es una propiedad que se demuestra estáticamente. Si intentas hacer algo que viole la garantía de disjunción, el compilador te lo rechaza.
+
+Junto con los atómicos con scoping (donde el compilador sabe qué operaciones atómicas afectan a qué scope de memoria) y las barreras tipadas, esto acerca la programación de GPU a lo que los programadores de Rust esperan: si compila, no tienes data races.
+
+## Mi veredicto
+
+Llevo semanas viendo este proyecto y creo que es uno de los anuncios más importantes en el espacio de computación GPU en lo que va de año. No por lo que hace hoy — está en alpha, tiene bugs y probablemente no deberías usarlo en producción — sino por lo que significa.
+
+Nvidia ha decidido que el futuro de la programación de sus GPUs no pasa exclusivamente por CUDA C++. Una de las empresas más herméticas del mundo, con el ecosistema de software más cerrado de la industria del chip, ha abierto la puerta a que escribas kernels en Rust con soporte oficial. No es una iniciativa comunitaria como cudarc, ni un experimento académico. Es un proyecto de NVlabs con documentación seria, tests de integración en CI y un diseño de compilador que integra el sistema de tipos de Rust de verdad, no como decoración sintáctica.
+
+Hay tres cosas que me parecen especialmente acertadas:
+
+Primero, el modelo de closures en GPU. Poder pasar `move |x| x * factor` a un kernel y que el compilador se encargue de todo — captura, monomorfización, serialización — es el tipo de ergonomía que hace que la gente se quede en un ecosistema.
+
+Segundo, `DisjointSlice`. No es exagerado decir que es la primera vez que veo un sistema de tipos previniendo data races en GPU en tiempo de compilación de forma práctica, sin anotaciones invasivas ni dialectos experimentales.
+
+Tercero, el pipeline Pliron. Que Nvidia haya construido un MLIR alternativo en Rust en lugar de aceptar la dependencia de C++ de LLVM dice mucho de hacia dónde quieren ir. No es casualidad que el proyecto se llame cuda-oxide — el óxido es lo que le da nombre a Rust y es también lo que corroe el hierro viejo.
+
+Dicho esto, hay preguntas abiertas importantes. ¿Qué pasa con las bibliotecas existentes del ecosistema CUDA como cuBLAS, cuFFT o CUTLASS? ¿Habrá bindings desde Rust o tendremos que reimplementarlas? ¿Cómo afecta el bounds checking de Rust al uso de registros y al occupancy de los kernels? Varios comentaristas en Hacker News señalaban esta preocupación y es legítima: en un kernel donde cada registro cuenta, una comprobación de límites adicional puede bajar la ocupación. El equipo no ha dado cifras aún y hasta que no las tengamos conviene ser prudente.
+
+También está la cuestión del momento. cuda-oxide llega en un panorama donde ya existen Slang (de Nvidia, por cierto), TileLang, Triton y el propio cudarc en Rust. Cada uno ataca un segmento distinto del problema. cuda-oxide aspira a ser la respuesta canónica para quien quiera Rust en GPU, pero el camino de alpha a herramienta de producción es largo y está lleno de esqueletos.
+
+Si tuviera que apostar, diría que cuda-oxide va a ser relevante aunque nunca salga de experimental en su forma actual. El diseño — Rust-first, safety garantizado en compilación, composición asíncrona con valores — es demasiado bueno para que otros compiladores lo ignoren. Y si Nvidia termina integrando estas ideas en el toolchain oficial de CUDA, habremos pasado de escribir `__global__ void kernel(float* data)` a escribir `#[kernel] pub fn kernel(data: &[f32])` sin darnos cuenta.
+
+Yo, por mi parte, ya tengo el compilador instalado y estoy jugando con él. Si te interesa la programación de GPU y te gusta Rust, creo que es el proyecto más ilusionante para seguir de cerca este trimestre.
