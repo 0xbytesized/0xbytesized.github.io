@@ -1,0 +1,141 @@
+---
+title: "TanStack hackeado: la cadena de ataques que burló npm"
+date: "2026-05-12T02:30"
+tags: ["seguridad", "npm", "github-actions", "supply-chain", "javascript"]
+excerpt: "Un atacante publicó 84 versiones maliciosas en 42 paquetes de TanStack encadenando tres vulnerabilidades de GitHub Actions. Así lo hizo."
+---
+
+El 11 de mayo de 2026, entre las 19:20 y las 19:26 UTC, un atacante publicó 84 versiones maliciosas repartidas en 42 paquetes del ecosistema TanStack. Hablamos de una de las familias de librerías más usadas del ecosistema JavaScript: TanStack Query tiene casi 50.000 estrellas en GitHub, TanStack Router otras 14.000 y entre todas suman millones de descargas semanales. Si usas React, Solid, Svelte o Vue en producción, es muy probable que alguna dependencia tuya tire de `@tanstack/query` o `@tanstack/router`.
+
+Lo que hace este ataque especialmente interesante — y alarmante — es que no robó tokens de npm. No hubo phishing, no hubo credenciales filtradas, no hubo un maintainer con la sesión secuestrada. El atacante usó tres mecanismos perfectamente legítimos de GitHub Actions y los encadenó para conseguir que el propio CI de TanStack publicase el malware en npm. Y todo empezó con un pull request que no modificaba ni una línea de código visible.
+
+## El ataque en tres actos
+
+La postmortem publicada por Tanner Linsley es una de las más detalladas que he leído. Merece la pena entender cada eslabón porque ninguno es suficiente por sí solo, pero juntos forman una cadena imparable.
+
+### Acto 1: pull_request_target — la puerta de entrada
+
+El atacante creó un fork de TanStack/router con un nombre deliberadamente distinto — `zblgg/configuration` — para evadir búsquedas de forks. Dentro de ese fork, un commit firmado con la identidad falsa `claude <claude@users.noreply.github.com>` introdujo un archivo llamado `vite_setup.mjs`: unas 30.000 líneas de JavaScript ofuscado.
+
+Luego abrió un PR contra `TanStack/router#main`. El título era inofensivo: "WIP: simplify history build". La trampa estaba en qué workflows se disparaban.
+
+TanStack tenía un workflow `bundle-size.yml` que usaba el evento `pull_request_target`. Este evento es peligroso por diseño: se ejecuta en el contexto del repositorio base, con acceso a secretos, en lugar de ejecutarse en el contexto aislado del fork. El workflow hacía esto:
+
+```yaml
+on:
+  pull_request_target:
+    paths: ['packages/**', 'benchmarks/**']
+
+jobs:
+  benchmark-pr:
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+      - uses: TanStack/config/.github/setup@main
+      - run: pnpm nx run @benchmarks/bundle-size:build
+```
+
+La línea clave es `ref: refs/pull/${{ github.event.pull_request.number }}/merge`. Ese ref contiene el código del fork fusionado con main, y el workflow lo checkoutea y lo ejecuta directamente. El paso `pnpm nx run @benchmarks/bundle-size:build` ejecutó el `vite_setup.mjs` malicioso dentro del runner del repositorio base, con acceso a sus cachés y contexto.
+
+### Acto 2: envenenamiento de caché
+
+Lo que hizo el JavaScript malicioso durante esa build no fue publicar nada — aún no podía. En su lugar, escribió datos cuidadosamente diseñados dentro del directorio de la caché de pnpm, apuntando a una clave muy concreta:
+
+```
+Linux-pnpm-store-${hashFiles('**/pnpm-lock.yaml')}
+```
+
+Cuando el job de `pull_request_target` terminó, el post-step de `actions/cache@v5` guardó esa caché envenenada bajo una clave que el workflow de release — el que se ejecuta en pushes a main — buscaría y restauraría la próxima vez.
+
+Este es el quid del ataque. La caché de GitHub Actions se comparte a nivel de repositorio, cruzando la frontera entre PRs de forks y pushes a main. Un PR de un fork puede escribir en la caché del repo base, y un push a main puede leer lo que ese PR escribió. Adnan Khan documentó este vector en 2024; el atacante simplemente lo aplicó.
+
+```yaml
+# Lo que release.yml restauraba, sin saber que estaba envenenado:
+- name: Setup Tools
+  uses: TanStack/config/.github/setup@main
+  # ↑ internamente llama a actions/cache@v5 con clave:
+  #   Linux-pnpm-store-${hashFiles('**/pnpm-lock.yaml')}
+```
+
+### Acto 3: extracción del token OIDC de la memoria del runner
+
+Cuando un maintainer hizo push a main horas después, `release.yml` se disparó. Restauró la caché envenenada — porque la clave coincidía — y al ejecutar los pasos de build, los binarios del atacante ya estaban en disco.
+
+El workflow de release tenía `id-token: write`, un permiso necesario para la publicación OIDC en npm. Los binarios maliciosos hicieron algo que suena a película de hackers pero es perfectamente posible en Linux:
+
+1. Localizaron el proceso `Runner.Worker` de GitHub Actions escaneando `/proc/*/cmdline`
+2. Leyeron `/proc/<pid>/maps` para encontrar las regiones de memoria del proceso
+3. Accedieron a `/proc/<pid>/mem` para volcar la memoria en bruto
+4. Extrajeron el token OIDC — que el runner genera en memoria bajo demanda cuando `id-token: write` está presente
+
+Con ese token, hicieron un POST directo a `registry.npmjs.org` para publicar 84 versiones en 42 paquetes. Todo esto ocurrió durante la fase de tests del workflow, no durante el paso de publicación. El paso que debería haber publicado no llegó a ejecutarse porque los tests fallaron — el malware rompió cosas a su paso.
+
+La ironía es que los tests rotos fueron una bendición. Si el atacante hubiera sido más cuidadoso, el paso de publish legítimo también se habría ejecutado y el ataque habría sido mucho más difícil de detectar.
+
+## Lo que hacía el malware una vez instalado
+
+Cuando un desarrollador o un CI ejecutaba `npm install` contra una versión afectada, el `package.json` malicioso incluía una entrada en `optionalDependencies` que apuntaba a un commit huérfano en la red de forks:
+
+```json
+{
+  "optionalDependencies": {
+    "@tanstack/setup": "github:tanstack/router#79ac49eedf774dd4b0cfa308722bc463cfe5885c"
+  }
+}
+```
+
+Esa dependencia descargaba y ejecutaba un script de ~2.3 MB llamado `router_init.js` a través del hook `prepare` de npm. El payload:
+
+- Cosechaba credenciales de ubicaciones estándar: AWS IMDS, GCP metadata, tokens de Kubernetes, Vault, `~/.npmrc`, tokens de GitHub, claves SSH
+- Exfiltraba los datos usando la red de Session/Oxen Messenger (`filev2.getsession.org`, `seed{1,2,3}.getsession.org`), cifrados de extremo a extremo y sin C2 controlado por el atacante — lo que hace que el bloqueo por IP/dominio sea la única mitigación de red posible
+- Se autopropagaba: consultaba `registry.npmjs.org` para encontrar otros paquetes mantenidos por la misma persona y los republicaba con la misma inyección
+
+## Cómo se detectó
+
+La detección fue externa. Un investigador — identificado como `carlini` — abrió un issue en el tracker de TanStack apenas 20 minutos después de la publicación, con un análisis técnico completo y la lista de paquetes afectados. Poco después, el equipo de Socket.dev llamó por teléfono a Tanner Linsley para confirmar la situación.
+
+En menos de una hora, el equipo había:
+- Eliminado los permisos de push de todos los maintainers por precaución
+- Deprecado las 84 versiones maliciosas en npm
+- Solicitado a npm security que retirase los tarballs del registro
+- Publicado un aviso de seguridad en GitHub y redes sociales
+- Identificado y purgado todas las cachés envenenadas de GitHub Actions
+- Mergeado un PR de hardening que reestructura `bundle-size.yml`
+
+## Cómo proteger tus workflows
+
+Lo que pasó con TanStack no es un bug de GitHub Actions — es un uso de funcionalidades legítimas encadenadas de forma creativa. La buena noticia es que las mitigaciones son concretas:
+
+**1. No uses `pull_request_target` para ejecutar código de forks.** Si necesitas ejecutar builds de PRs, usa `pull_request` (sin el `_target`), que se ejecuta en el contexto aislado del fork y no tiene acceso a secretos ni cachés del repo base. Reserva `pull_request_target` exclusivamente para tareas de confianza como etiquetado, asignación de reviewers o comentarios automatizados.
+
+**2. Usa el guard `repository_owner` en workflows `pull_request_target`.** Si realmente necesitas el evento para builds, verifica que el PR viene de una rama del repo base, no de un fork:
+
+```yaml
+jobs:
+  benchmark-pr:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+```
+
+**3. Pinnea las acciones de terceros a SHA, no a tags ni ramas.** `@main`, `@v6.0.2` o `@v5` son referencias flotantes. Si alguien compromete el repositorio de una acción, tu workflow ejecutará código malicioso la próxima vez que se dispare. Usa el hash completo del commit:
+
+```yaml
+# En lugar de usar @v6.0.2 (tag flotante), usa el hash completo:
+- uses: actions/checkout@<commit-sha-completo>  # ejemplo: versión v6.0.2 pineada
+```
+
+**4. Separa los jobs de publicación del resto del workflow.** Si el job de publish es independiente del job de build, la superficie de ataque se reduce. Puedes usar environments de GitHub con protecciones de revisión manual para jobs de publish.
+
+**5. Habilita el provenance de npm.** Aunque la publicación OIDC se hizo desde un paso no esperado del workflow, la generación de attestations de procedencia permite detectar discrepancias entre el paso que debería haber publicado y el que realmente publicó.
+
+## Mi veredicto
+
+Este ataque me parece brillante en su ejecución y aterrador en sus implicaciones. El atacante no descubrió un zero-day; cogió tres técnicas documentadas — pull_request_target "pwn requests", cache poisoning y extracción de memoria de procesos — y las unió con una precisión quirúrgica. De hecho, el script de extracción de memoria era literalmente el mismo que se usó en el compromiso de `tj-actions/changed-files` en marzo de 2025, con el comentario de atribución intacto.
+
+Lo que más me preocupa no es este ataque concreto — TanStack reaccionó rápido y bien — sino cuántos proyectos medianos y pequeños tienen configuraciones de CI igual de vulnerables y no se van a enterar hasta que sea demasiado tarde. La combinación `pull_request_target` + `actions/cache` + `id-token: write` es extremadamente común en proyectos que publican en npm. Y el hecho de que la caché se comparta entre PRs de forks y pushes a main es un problema de diseño de GitHub Actions que no se ha resuelto desde que Adnan Khan lo documentó hace dos años.
+
+Si mantienes un paquete en npm con OIDC y tienes algún workflow `pull_request_target` que ejecuta código de forks, asume que eres vulnerable. Haz la auditoría hoy. No esperes a que un investigador externo te avise.
