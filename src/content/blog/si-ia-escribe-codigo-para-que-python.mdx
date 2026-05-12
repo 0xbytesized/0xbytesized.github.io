@@ -1,0 +1,164 @@
+---
+title: "Si la IA escribe tu código, ¿para qué usar Python?"
+date: "2026-05-12T08:00"
+tags: ["ia", "python", "rust", "go", "desarrollo"]
+excerpt: "La vieja promesa de Python —rápido de escribir, lento de ejecutar— se desmorona cuando quien escribe el código es una IA. Rust y Go ya no son la opción difícil."
+---
+
+Durante la última década, elegir lenguaje para un proyecto nuevo era casi un acto reflejo. Usabas Python o TypeScript porque los ecosistemas eran enormes, encontrabas talento en cualquier parte y tenías un prototipo funcionando el viernes. Rust, Go o C++ te daban entre 10 y 100 veces más rendimiento, pero pagabas el precio: meses de ramp-up, menos desarrolladores disponibles y un sistema de compilación que te peleaba a cada paso. Así que sacabas la versión en Python, la vendías y te prometías a ti mismo que «ya lo harás rápido más adelante». Casi nunca lo hacías, y no pasaba nada, porque nadie más lo hacía tampoco.
+
+Ese pacto se ha roto. Y se ha roto porque la IA se ha vuelto buena en los lenguajes difíciles. Esa es la tesis que defiende Noah Mitchem en un artículo publicado en Medium el 28 de abril que ha explotado en Hacker News con más de 450 puntos y casi 500 comentarios. Y tiene razón.
+
+## Los lenguajes difíciles se volvieron fáciles primero
+
+Hace dos años, GPT-4 no podía escribir una función en Rust sin alucinar nombres de crates. A mediados de 2026, los modelos más recientes de Anthropic, OpenAI, Google y DeepSeek han superado el 80% en SWE-bench Verified con semanas de diferencia. Los laboratorios están optimizando abiertamente para trabajo de sistemas: bugs de concurrencia, condiciones de carrera y fallos arquitectónicos detectados durante la fase de planificación.
+
+Hay un tuit de @CtrlAltDwayne que lo resume mejor que cualquier paper académico:
+
+> «El mejor argumento para Rust en 2026 no es la seguridad de memoria ni el rendimiento. Es que la IA escribe mejor Rust que C++. El bucle de feedback del compilador es tan cerrado que los modelos se autocorrigen en tiempo real. Cada mensaje de error es una señal de entrenamiento gratuita. Rust fue diseñado accidentalmente para el desarrollo asistido por IA diez años antes de que nadie supiera que eso importaría.»
+
+La misma lógica aplica, en distintos grados, a Go y Swift. Los sistemas de tipos fuertes más ciclos rápidos de compilación y verificación les dan a los agentes el bucle de iteración más cerrado posible. Los lenguajes que eran más difíciles para los humanos resultan ser los más fáciles para los agentes.
+
+## Lo que se ha construido en meses
+
+Los ejemplos no son teóricos. Mira lo que ha aterrizado en producción en un solo trimestre.
+
+**Microsoft reescribió el compilador de TypeScript en Go.** El equipo detrás del superset de JavaScript más usado del mundo ha lanzado TypeScript 7.0 beta, aproximadamente 10 veces más rápido que la versión 6.0. Anders Hejlsberg explicó que Go ofrecía la mayor parte del beneficio de rendimiento a una fracción del coste de ingeniería. La empresa que mantiene la herramienta más ubicua del ecosistema JavaScript escogió un lenguaje más rápido y difícil. Y lo hizo porque el cálculo de esfuerzo cambió bajo sus pies.
+
+**Nicholas Carlini orquestó 16 agentes paralelos de Claude para escribir un compilador de C en Rust.** 100.000 líneas. Arranca Linux 6.9 en x86, ARM y RISC-V. Compila QEMU, FFmpeg, SQLite, PostgreSQL y Redis. Ejecuta Doom. Coste total: poco menos de 20.000 dólares en casi 2.000 sesiones de Claude Code. Un compilador de C en Rust solía ser una tesis doctoral. Ya no.
+
+**Andreas Kling portó el motor JavaScript de Ladybird de C++ a Rust en dos semanas.** Usando Claude Code y Codex, 25.000 líneas de Rust, paridad byte a byte con el original en C++, cero regresiones en más de 65.000 tests combinados. Sus propias palabras: «El mismo trabajo me habría llevado varios meses a mano.»
+
+**Armin Ronacher porteó MiniJinja a Go en 10 horas.** Siete sin supervisión, tres con supervisión. Tiempo humano real: 45 minutos. Coste en API: 60 dólares. Cuando portar una librería entre lenguajes es un trabajo de 45 minutos, la ecuación de «uso Python por el ecosistema» se tambalea.
+
+## El ecosistema Python ya es Rust con sombrero
+
+El argumento más sólido a favor de Python nunca fue el lenguaje en sí, sino el ecosistema: FastAPI, Django, PyTorch, pandas. Pero eso lleva erosionándose dos años.
+
+Cuando haces `import pydantic`, el núcleo de validación es una librería en Rust. Polars, la alternativa a pandas, es Rust. Los tokenizers de Hugging Face son Rust. `orjson` es Rust. La encuesta de JetBrains sobre Python en 2025 capturó la telemetría: el uso de Rust para extensiones binarias de Python saltó del 27% al 33% en un solo año.
+
+El ecosistema Python es cada vez más un ecosistema Rust que lleva un sombrero de Python.
+
+Y la trayectoria de las herramientas lo confirma. Astral —creada por Charlie Marsh en 2022— lanzó ruff, uv y ty. Las tres escritas en Rust, las tres pasaron de cero a cientos de millones de descargas mensuales. El 19 de marzo de 2026, OpenAI adquirió Astral; la justificación interna fue que uv le ahorra a Codex aproximadamente un millón de minutos de cómputo por semana. Diez semanas antes, Anthropic adquirió Bun y lo enmarcó como «infraestructura esencial para ingeniería de software liderada por IA». VoidZero lanzó Rolldown-Vite, un bundler en Rust que redujo el build de GitLab de 2,5 minutos a 40 segundos con 100 veces menos memoria.
+
+Lo que queda del argumento del ecosistema es esto: los paquetes que importas en Python son cada vez más wrappers alrededor de código escrito en lenguajes que te dijeron que no podías usar en producción. Ahora puedes usar esos lenguajes directamente, y el wrapper empieza a parecer sobrecarga.
+
+## Dos ejemplos de código: el antes y el después
+
+Para que se entienda de qué va esto, pongamos dos ejemplos realistas. El primero es un script que cuenta frecuencias de palabras en un texto grande. El segundo es un endpoint de API.
+
+### Ejemplo 1: Contador de palabras
+
+Esto en Python es trivial y cualquier junior lo escribe en minutos:
+
+```python
+from collections import Counter
+import re
+
+def contar_palabras(archivo):
+    with open(archivo) as f:
+        texto = f.read().lower()
+    palabras = re.findall(r'\b\w+\b', texto)
+    return Counter(palabras).most_common(10)
+```
+
+Funciona. Pero para un archivo de 500 MB, se arrastra. En Rust, un agente de IA genera esto sin que tú escribas una línea:
+
+```rust
+use std::collections::HashMap;
+use std::fs;
+use regex::Regex;
+
+fn contar_palabras(archivo: &str) -> Vec<(String, usize)> {
+    let texto = fs::read_to_string(archivo)
+        .unwrap()
+        .to_lowercase();
+    let re = Regex::new(r"\b\w+\b").unwrap();
+    let mut conteo: HashMap<&str, usize> = HashMap::new();
+
+    for palabra in re.find_iter(&texto) {
+        *conteo.entry(palabra.as_str()).or_insert(0) += 1;
+    }
+
+    let mut resultados: Vec<(&&str, &usize)> = conteo.iter().collect();
+    resultados.sort_by(|a, b| b.1.cmp(a.1));
+    resultados.into_iter()
+        .take(10)
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect()
+}
+```
+
+El resultado es entre 5 y 20 veces más rápido dependiendo del tamaño del archivo. Y no has tenido que aprender Rust. Has tenido que saber qué pedirle al agente y revisar que lo que generó tiene sentido.
+
+### Ejemplo 2: De Flask a Axum
+
+Imagina que tienes un endpoint sencillo en Flask:
+
+```python
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/api/analizar', methods=['POST'])
+def analizar():
+    datos = request.get_json()
+    texto = datos.get('texto', '')
+    return jsonify({
+        'palabras': len(texto.split()),
+        'caracteres': len(texto)
+    })
+```
+
+Le pides a un agente que lo porte a Rust con Axum. En segundos obtienes:
+
+```rust
+use axum::{Router, routing::post, Json};
+use axum::extract::Json as ExtJson;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct Peticion {
+    texto: String,
+}
+
+#[derive(Serialize)]
+struct Respuesta {
+    palabras: usize,
+    caracteres: usize,
+}
+
+async fn analizar(ExtJson(payload): ExtJson<Peticion>) -> Json<Respuesta> {
+    Json(Respuesta {
+        palabras: payload.texto.split_whitespace().count(),
+        caracteres: payload.texto.chars().count(),
+    })
+}
+// En main: Router::new().route("/api/analizar", post(analizar))
+```
+
+Cada petición consume un orden de magnitud menos de CPU y memoria. El código es seguro en memoria por construcción. Y el desarrollador no ha necesitado conocer los detalles de `tokio`, el runtime asíncrono de Rust, ni el sistema de borrowing: el agente se encarga.
+
+## Dónde se rompe el argumento
+
+No todo es un paseo triunfal. Hay que reconocer los matices.
+
+**Prisma eliminó su motor de consultas en Rust** en favor de un núcleo TypeScript/WASM. ¿El resultado? El tamaño del bundle cayó un 85% y las consultas se aceleraron hasta 3,4 veces. Los binarios nativos de Rust son hostiles a los runtimes serverless, y por cada regla hay una excepción que la confirma.
+
+**Los lenguajes minoritarios siguen en desventaja.** Zig, Haskell y Gleam no tienen la misma calidad de código generado por IA. La razón es simple: los datos de entrenamiento mandan. Rust y Go se llevaron la lotería porque sus repositorios inundaron GitHub durante años.
+
+**PyTorch sigue dominando el 85% de la investigación en deep learning.** Y eso no va a cambiar porque los pesos del modelo no preguntan en qué lenguaje está el wrapper. Si tu stack es ML puro, Python es y será la opción correcta.
+
+Pero si estás construyendo una API, un CLI, un servicio que procesa datos o cualquier cosa que vaya a correr en producción 24/7, la pregunta ya no es retórica.
+
+## Mi opinión
+
+El artículo de Mitchem toca un nervio real y me alegra que lo haga, pero creo que el debate está mal encuadrado. No es «Python vs Rust». Es «¿qué rol juega el humano en el desarrollo de software?».
+
+Si tu trabajo va a ser revisar código generado por IA —y ese es el futuro inmediato para la mayoría—, entonces Python no te da ventaja. La ergonomía del lenguaje era para quien tecleaba. Ahora teclea la máquina. Lo que importa es la velocidad de ejecución, el coste de infraestructura y la superficie de bugs en producción. Y ahí Rust y Go aplastan a Python sin discusión.
+
+La frase de @CtrlAltDwayne me parece profética: Rust fue diseñado accidentalmente para el desarrollo asistido por IA. El compilador es el revisor incansable que el agente necesita. Cada error de tipos es feedback instantáneo. Python no tiene ese mecanismo —o lo tiene diluido en excepciones en tiempo de ejecución que el agente no ve hasta que el código falla.
+
+Dicho esto, no voy a dejar de usar Python mañana. Pero mi regla personal ha cambiado: si un servicio va a recibir tráfico real y lo va a escribir una IA, que lo escriba en Rust o Go. Si es un script de usar y tirar, un notebook de análisis o plumbing de datos para un modelo, Python sigue siendo imbatible.
+
+El futuro de los lenguajes de programación no lo van a decidir las preferencias de los desarrolladores. Lo van a decidir las capacidades de los agentes. Y los agentes ya han elegido.
