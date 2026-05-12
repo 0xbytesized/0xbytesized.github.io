@@ -1,0 +1,142 @@
+---
+title: "Python 3.15 estrena Tachyon: perfilado estadístico en la stdlib"
+date: "2026-05-12T14:00"
+tags: ["python", "rendimiento", "profiling", "python3.15", "debugging"]
+excerpt: "Python 3.15 incorpora profiling.sampling, un perfilador estadístico que se conecta a procesos en caliente sin tocar una línea de código. Adiós a decorar funciones."
+---
+
+Si alguna vez has intentado perfilar una aplicación Python en producción, sabes que el proceso estándar es un suplicio. Instalas `py-spy`, cruzas los dedos para que no se coma la CPU, rezas para que los símbolos de depuración estén disponibles, y al final consigues un flame graph que medio se entiende. O peor: metes `cProfile` en el código, reinicias el servicio —porque `cProfile` no se conecta a procesos en caliente— y rezas para que el overhead no desfigure las métricas que intentas medir.
+
+Python 3.15.0b1 acaba de cambiar esto. El nuevo módulo `profiling.sampling`, cuyo nombre en clave es **Tachyon**, trae el perfilado estadístico directamente a la biblioteca estándar. Sin pip. Sin reinicios. Sin tocar el código.
+
+## Qué es el perfilado estadístico y por qué importa
+
+Los perfiladores tradicionales como `cProfile` son deterministas: registran cada entrada y salida de función. Esto te da una precisión quirúrgica, pero paga un precio altísimo en overhead —fácilmente 2x o 5x de ralentización— que distorsiona lo que estás midiendo. Si tu cuello de botella real está en una llamada a base de datos que tarda 50ms, meterle `cProfile` encima no cambia mucho la foto. Pero si tu problema es una función puramente computacional que se llama un millón de veces, `cProfile` la convierte en otra bestia distinta.
+
+El perfilado estadístico funciona al revés. En lugar de instrumentar cada llamada, Tachyon toma **instantáneas periódicas de la pila de llamadas** —por defecto a 100 Hz— y construye una estimación: las funciones que más aparecen en las muestras son las que más tiempo consumen. Cuantas más muestras recoges, más precisa es la estimación. Y como la lectura de la pila la hace un hilo externo al proceso, el overhead es virtualmente cero.
+
+Es la diferencia entre grabar un vídeo de toda tu carrera (determinista) y tomar una foto cada 100 metros (estadístico). Con suficientes fotos, sabes exactamente dónde pasaste más tiempo, pero la cámara no te ralentizó.
+
+## Conectarse a un proceso en caliente
+
+La killer feature de Tachyon es que puedes conectarlo a cualquier proceso Python que esté corriendo. Sin modificar el código. Sin reiniciar. Sin instalar dependencias.
+
+Imagina que tienes un servidor web en producción que está usando más CPU de la cuenta. Con Tachyon haces esto:
+
+```bash
+# Encuentras el PID del proceso
+pgrep -f "gunicorn"
+
+# Te conectas durante 30 segundos y vuelcas los datos
+python -m profiling.sampling attach 12345 --duration 30
+```
+
+Eso es todo. Treinta segundos después tienes un perfil completo de dónde está quemando CPU tu servidor. El proceso monitorizado ni se entera —no hay imports nuevos, no hay monkey-patching, no hay decoradores mágicos.
+
+Y no es solo para perfilar. Puedes grabar sesiones enteras para reproducirlas después sin tocar el proceso original:
+
+```bash
+# Grabar 60 segundos a un archivo binario para análisis posterior
+python -m profiling.sampling attach 12345 \
+  --duration 60 \
+  --output-format binary \
+  --output trace.tachyon
+
+# Analizarlo offline, cuando quieras, sin presión
+python -m profiling.sampling replay trace.tachyon
+```
+
+Este flujo de grabar y reproducir es oro para entornos de producción. Tomas la muestra cuando el problema está ocurriendo y la analizas con calma más tarde.
+
+## Los modos de perfilado
+
+Tachyon no se limita a medir tiempo de CPU. Trae cuatro modos distintos que cubren casi todos los escenarios que te vas a encontrar:
+
+**Wall-clock mode.** El modo por defecto. Mide tiempo real de reloj. Si tu función se bloquea esperando I/O, ese tiempo cuenta. Es lo que quieres para servicios web, workers de colas o cualquier cosa que pase más tiempo esperando que calculando.
+
+**CPU mode.** Solo cuenta tiempo de CPU real. Útil para código computacional puro —procesamiento de imágenes, cálculos numéricos, compresión— donde quieres saber qué función está friendo el procesador, no cuál está esperando un socket.
+
+**GIL mode.** Mide cuánto tiempo pasa cada hilo esperando el Global Interpreter Lock. Si tienes código multithreaded y el rendimiento no escala como esperabas, este modo te dice exactamente qué función está monopolizando el GIL y durante cuánto tiempo.
+
+**Exception mode.** Perfila excepciones. Te dice qué excepciones se lanzan, desde dónde y cuánto tiempo se pierde en manejarlas. Pensado para esa base de código heredada donde alguien decidió que `except Exception: pass` era una estrategia válida de control de flujo.
+
+Elige el modo con el flag `--mode`:
+
+```bash
+python -m profiling.sampling run mi_app.py --mode cpu
+python -m profiling.sampling attach 12345 --mode gil --duration 20
+```
+
+## Formatos de salida: del .prof al flame graph en un comando
+
+Una de las frustraciones clásicas del ecosistema de profiling en Python es la cadena de herramientas. Con `cProfile` generas un `.prof`, luego necesitas `flameprof` o `gprof2dot` para convertirlo, luego `flamegraph.pl` para el SVG... y al final del todo te das cuenta de que los nombres de función están truncados.
+
+Tachyon soporta ocho formatos de salida directamente:
+
+```bash
+# Flame graph interactivo (el más útil visualmente)
+python -m profiling.sampling run mi_app.py --output-format flamegraph
+
+# Collapsed stacks para la herramienta flamegraph.pl de Brendan Gregg
+python -m profiling.sampling run mi_app.py --output-format collapsed
+
+# Gecko para el visor de perfiles de Firefox
+python -m profiling.sampling run mi_app.py --output-format gecko
+```
+
+El que más me interesa es el formato flame graph nativo. Sin herramientas extra, sin scripts en Perl de 2011, sin dependencias. Ejecutas y tienes tu SVG listo para inspeccionar.
+
+## Comparación rápida con cProfile
+
+Para que se vea la diferencia de enfoque, aquí tienes un script sencillo que simula una carga mixta —un poco de cálculo y un poco de I/O— y cómo lo perfilarías con cada herramienta:
+
+```python
+# workload.py — código que queremos perfilar
+import time
+import hashlib
+
+def calcular_hashes(n=100_000):
+    """Trabajo CPU-intensivo."""
+    for i in range(n):
+        hashlib.sha256(f"dato-{i}".encode()).hexdigest()
+
+def esperar_red():
+    """Simula espera de I/O."""
+    time.sleep(0.5)
+
+def endpoint_principal():
+    """Función que mezcla CPU e I/O."""
+    calcular_hashes(10_000)
+    esperar_red()
+    calcular_hashes(5_000)
+
+if __name__ == "__main__":
+    for _ in range(4):
+        endpoint_principal()
+```
+
+Con `cProfile`, el enfoque clásico requiere modificar el código o invocarlo como módulo:
+
+```bash
+python -m cProfile -o salida.prof workload.py
+# Luego necesitas otra herramienta para visualizarlo
+python -m pstats salida.prof
+```
+
+Con Tachyon es un solo comando y obtienes el perfil directamente en el formato que quieras, sin archivos intermedios, sin overhead que distorsione la medición.
+
+## Mi opinión
+
+Llevo años usando `py-spy` para este tipo de perfilado y siempre me ha parecido un parche sobre una carencia evidente del lenguaje. Que en 2026 necesitases una herramienta externa escrita en Rust para perfilar Python sin destrozar el rendimiento era una anomalía.
+
+Tachyon no es revolucionario técnicamente —los perfiladores estadísticos existen desde hace décadas, y `py-spy` lleva años haciendo exactamente esto— pero es revolucionario por dónde vive. Estar en la stdlib significa que está en todas partes: en tu portátil, en el contenedor de CI, en la instancia de producción. No hay excusa para no perfilar.
+
+Lo que más me gusta es el flujo de grabación y reproducción. Poder capturar un perfil en el momento exacto en que un servicio de producción se vuelve loco y analizarlo offline cambia las reglas del juego para equipos pequeños que no tienen infraestructura de observabilidad montada.
+
+Lo que menos me gusta: la documentación actual es una beta. Faltan ejemplos del mundo real, tutoriales de interpretación y guías de migración desde `cProfile`. Es el peaje de salir en una beta, y confío en que mejore para la release final.
+
+Pero el veredicto es claro. Si trabajas con Python, la versión 3.15 va a cambiar cómo depuras rendimiento. Y eso es una buena noticia para cualquiera que haya pasado una madrugada mirando un flame graph de `py-spy` preguntándose por qué `json.loads()` tarda el triple de lo que debería.
+
+---
+
+El módulo está disponible en Python 3.15.0b1. Para probarlo: `python -m profiling.sampling run tu_script.py --output-format flamegraph`.
