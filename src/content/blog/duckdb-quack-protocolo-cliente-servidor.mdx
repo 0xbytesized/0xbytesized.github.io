@@ -1,0 +1,165 @@
+---
+title: "DuckDB se pasa al multiplayer: llega Quack"
+date: "2026-05-13T03:00"
+tags: ["duckdb", "bases-de-datos", "sql", "http", "analytics"]
+excerpt: "DuckDB estrena Quack, un protocolo cliente-servidor sobre HTTP para escrituras concurrentes. Mueve 60M de filas en 5s y no llega a 10 líneas de configuración."
+---
+
+El 12 de mayo de 2026 el equipo de DuckDB soltó una bomba: **Quack**, un protocolo cliente-servidor que permite que varias instancias de DuckDB se hablen entre sí. Sí, el mismo DuckDB que llevaba años diciendo que lo suyo era _in-process_, sin servidor, sin protocolo, solo llamadas a la API en el mismo proceso. Pues resulta que han cambiado de opinión.
+
+Y me alegro. Llevo tiempo usando DuckDB para todo tipo de tráfico de datos — desde analizar CSVs sueltos hasta servir de motor analítico en side projects — y la limitación de no poder escribir desde varios procesos simultáneamente siempre ha dolido. Hasta ahora tenías tres opciones: montar un RPC casero, usar soluciones third-party como Arrow Flight SQL, o rendirte y usar PostgreSQL. Con Quack, ninguna de las tres hace falta.
+
+## El problema de ser un pato solitario
+
+DuckDB siempre ha defendido la arquitectura in-process con un argumento sólido: si la base de datos corre en el mismo proceso que tu aplicación, no hay sobrecarga de red, no hay serialización, no hay _round-trips_. Para análisis interactivo — el típico caso de una científica de datos abriendo un notebook de Python y lanzando consultas sobre un CSV — esto es perfecto.
+
+El problema aparece cuando quieres que varios procesos escriban en la misma base de datos a la vez. Imagina un escenario real:
+
+- Un clúster de workers insertando datos de telemetría
+- Un proceso sirviendo un dashboard que consulta esas mismas tablas
+- Un job nocturno que corre agregaciones
+
+Con DuckDB tradicional esto no funciona bien. La base de datos mantiene estado en memoria y no hay forma de sincronizarlo entre procesos que escriben concurrentemente. Las alternativas han sido parches, soluciones externas o migrar a PostgreSQL, que es justo lo que el equipo de DuckDB quería evitar.
+
+## Quack: dos patos que se hablan
+
+La solución es elegante. Quack es un protocolo que corre sobre HTTP y usa un formato de serialización propio (MIME type `application/duckdb`) basado en las mismas primitivas que DuckDB lleva años usando en su Write-Ahead Log. Nada de Arrow como formato interno — los mensajes se codifican con lo que DuckDB ya sabe hacer.
+
+La experiencia de uso es mínima. Así se monta un servidor:
+
+```sql
+-- En la instancia servidor (DuckDB #1)
+INSTALL quack FROM core_nightly;
+LOAD quack;
+CALL quack_serve('quack:localhost', token = 'super_secret');
+
+CREATE TABLE hello AS FROM VALUES ('world') v(s);
+```
+
+Y así se conecta un cliente:
+
+```sql
+-- En la instancia cliente (DuckDB #2)
+INSTALL quack FROM core_nightly;
+LOAD quack;
+CREATE SECRET (TYPE quack, TOKEN 'super_secret');
+ATTACH 'quack:localhost' AS remote;
+
+-- Leer datos remotos
+FROM remote.hello;
+-- Resultado: 'world'
+```
+
+También puedes enviar consultas completas al servidor con `remote.query()`, que es útil cuando trabajas con volúmenes grandes y quieres que toda la ejecución ocurra en el lado remoto:
+
+```sql
+-- Ejecutar una agregación compleja del lado del servidor
+FROM remote.query(
+  'SELECT category, COUNT(*) as n, AVG(price) as avg_price
+   FROM products
+   GROUP BY category
+   ORDER BY n DESC
+   LIMIT 10'
+);
+```
+
+Un detalle importante: Quack está diseñado para resolver consultas en **un solo round-trip** una vez establecida la conexión. Esto no es un capricho — el protocolo Arrow Flight SQL requiere al menos dos round-trips (`CommandStatementQuery` + `DoGet`), lo que penaliza las operaciones pequeñas en entornos con latencia.
+
+## Ejemplo práctico: telemetría centralizada
+
+El caso de uso que más me interesa es el de centralizar telemetría. Aquí va un ejemplo en Python con el worker escribiendo datos y el dashboard leyéndolos desde procesos separados:
+
+```python
+# worker.py — inserta datos de telemetría cada segundo
+import duckdb
+import time
+import random
+
+con = duckdb.connect()
+con.execute("INSTALL quack FROM core_nightly")
+con.execute("LOAD quack")
+con.execute("CREATE SECRET (TYPE quack, TOKEN 'super_secret')")
+con.execute("ATTACH 'quack:localhost' AS remote")
+
+# Crear la tabla si no existe
+con.execute("""
+  CREATE TABLE IF NOT EXISTS remote.telemetry (
+    ts TIMESTAMP,
+    service TEXT,
+    latency_ms INTEGER,
+    status INTEGER
+  )
+""")
+
+services = ["api-gateway", "auth", "payment", "search"]
+
+while True:
+    svc = random.choice(services)
+    lat = random.randint(5, 500)
+    status = random.choices([200, 200, 200, 500, 503], weights=[70, 15, 5, 5, 5])[0]
+
+    con.execute("""
+      INSERT INTO remote.telemetry VALUES (now(), ?, ?, ?)
+    """, [svc, lat, status])
+
+    time.sleep(1)
+```
+
+```python
+# dashboard.py — consulta las métricas agregadas en tiempo real
+import duckdb
+import time
+
+con = duckdb.connect()
+con.execute("INSTALL quack FROM core_nightly")
+con.execute("LOAD quack")
+con.execute("CREATE SECRET (TYPE quack, TOKEN 'super_secret')")
+con.execute("ATTACH 'quack:localhost' AS remote")
+
+while True:
+    result = con.execute("""
+      SELECT
+        service,
+        COUNT(*) as requests,
+        AVG(latency_ms)::INTEGER as avg_latency,
+        COUNT(*) FILTER (WHERE status >= 500) as errors
+      FROM remote.telemetry
+      WHERE ts > now() - INTERVAL 10 SECONDS
+      GROUP BY service
+      ORDER BY requests DESC
+    """).fetchall()
+
+    print("\033[2J\033[H")  # Limpiar terminal
+    print(f"{'Service':<15} {'Req/s':>8} {'Avg ms':>8} {'Errors':>8}")
+    print("-" * 45)
+    for row in result:
+        print(f"{row[0]:<15} {row[1]:>8} {row[2]:>8} {row[3]:>8}")
+
+    time.sleep(2)
+```
+
+Dos procesos independientes, misma base de datos, uno escribiendo y el otro leyendo. Esto antes de Quack simplemente no funcionaba sin malabares.
+
+## Seguridad: sencilla pero extensible
+
+Por defecto, Quack genera un token aleatorio al arrancar el servidor y solo escucha en localhost. No usa SSL por defecto porque para comunicación local sería meter complejidad innecesaria. Si quieres exponer el endpoint a internet, la recomendación oficial es poner nginx delante con Let's Encrypt.
+
+Lo interesante es que tanto la autenticación como la autorización son **extensibles mediante callbacks** que pueden ser funciones SQL. El equipo ha sido inteligente: en lugar de intentar cubrir todos los casos de uso posibles con una configuración monolítica, te dejan enchufar tu propia lógica. ¿Quieres autenticar contra LDAP? Escribe tu callback. ¿Quieres autorizar consultas según el token usado? Otro callback. Lo documentan [aquí](https://duckdb.org/docs/extensions/quack).
+
+## Los números: rapidísimo en bulk, sorprendente en writes pequeños
+
+Los benchmarks del anuncio oficial son contundentes. En transferencia masiva de datos con la tabla `lineitem` de TPC-H (escala factor 10), Quack movió 60 millones de filas en 4.94 segundos. Arrow Flight SQL tardó 17.4 segundos y PostgreSQL 158 segundos.
+
+En escrituras pequeñas — inserts individuales en transacciones separadas, que es el escenario de centralizar telemetría — Quack alcanzó 5,434 transacciones por segundo con 8 hilos concurrentes, superando a PostgreSQL (4,320 tx/s en la misma máquina). Arrow Flight SQL se quedó en 1,358 tx/s.
+
+La única pega reconocida por el equipo: a partir de 8 hilos concurrentes hay un cuello de botella interno en DuckDB para inserciones sobre la misma tabla, y PostgreSQL escala mejor. Es algo que planean abordar antes del lanzamiento de producción.
+
+## Mi veredicto
+
+Quack me parece el movimiento correcto en el momento adecuado. DuckDB ha pasado de ser "SQLite para analytics" a convertirse en una pieza central de la arquitectura de datos moderna, y para eso necesitaba un protocolo de red. Han evitado la trampa de casarse con Arrow Flight SQL — que es un formato de intercambio, no un protocolo de base de datos — y han construido algo que juega con sus puntos fuertes: serialización eficiente, round-trips mínimos y una superficie de configuración simple pero extensible.
+
+Lo que más me gusta es que no han sacrificado la simplicidad. Instalar una extensión, ejecutar `quack_serve` y hacer `ATTACH`. Punto. Si has usado DuckDB, esto te lleva cero esfuerzo mental. Y si eres nuevo, la barrera de entrada sigue siendo mínima.
+
+El roadmap pinta bien: integración con DuckLake para que DuckDB actúe como servidor de catálogo remoto, un protocolo de replicación sobre Quack para clústeres de read-replicas y la producción estable con DuckDB v2.0 prevista para otoño de 2026.
+
+Si te pica la curiosidad, el equipo hará demos y hablará de la adopción inicial en la DuckCon #7 el 24 de junio en Ámsterdam. Mientras tanto, Quack ya está disponible en la versión nightly de DuckDB v1.5.2. A probarlo.
