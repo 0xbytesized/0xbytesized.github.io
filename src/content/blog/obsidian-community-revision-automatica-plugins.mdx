@@ -1,0 +1,168 @@
+---
+title: "Obsidian auditará cada plugin automáticamente"
+date: "2026-05-13T03:00"
+tags: ["obsidian", "plugins", "typescript", "herramientas", "seguridad"]
+excerpt: "Obsidian lanza su Community site con escaneo automático de seguridad para cada plugin. 120M de descargas después, el ecosistema se profesionaliza."
+---
+
+Obsidian acaba de lanzar su nuevo **Community site**, y no es un rediseño cosmético. Es un cambio de infraestructura que afecta a cómo se construyen, revisan y distribuyen los más de 4.000 plugins y temas del ecosistema. La cifra de contexto: 120 millones de descargas acumuladas desde 2020. Con ese volumen, el modelo de revisión manual que tenían hasta ahora era insostenible.
+
+El equipo lo admite sin rodeos: el _backlog_ de submissions pendientes de revisión no paraba de crecer, los agentes de código están acelerando la creación de plugins, y revisar solo la versión inicial era una laguna de seguridad evidente. La respuesta es un sistema de **revisión automatizada** que escanea cada versión, no solo la primera.
+
+## Cómo funciona el nuevo sistema
+
+Hasta ahora, cuando publicabas un plugin en Obsidian, un revisor humano miraba el código una vez y listo. Las actualizaciones posteriores no pasaban ningún filtro. El nuevo sistema cambia esto de raíz:
+
+- **Cada versión** se escanea automáticamente al publicarse
+- Se verifica el cumplimiento de las _Developer Policies_
+- Se buscan vulnerabilidades conocidas y malware
+- Se comprueban buenas prácticas de código
+- Los resultados aparecen en un **scorecard** público
+
+Si una nueva versión no pasa la revisión, el plugin desaparece de la búsqueda en 24 horas. No se bloquea a quien ya lo tenga instalado, pero deja de ser descubrible. Para plugins legacy que no cumplen los nuevos estándares, hay una excepción temporal, pero se irán eliminando del directorio progresivamente.
+
+La revisión manual no desaparece: se redirige hacia plugins populares, destacados o reportados por la comunidad. Tiene sentido: automatizas lo repetitivo y reservas el criterio humano para lo que de verdad lo necesita.
+
+En los últimos días ya han procesado más de 2.300 submissions acumuladas con el nuevo sistema. El cuello de botella ha volado.
+
+## Montar un plugin con el nuevo tooling
+
+Junto con el Community site, el equipo ha lanzado herramientas para desarrolladores que aceleran el ciclo de creación y validación. La más relevante es el **Obsidian CLI**, que genera la estructura base de un plugin en segundos:
+
+```bash
+# Instalar el CLI y crear un plugin desde cero
+npm install -g obsidian-cli
+obsidian-cli init mi-primer-plugin
+
+cd mi-primer-plugin
+# Estructura generada automáticamente:
+# ├── main.ts
+# ├── manifest.json
+# ├── styles.css
+# ├── versions.json
+# └── .eslintrc.js
+```
+
+El `manifest.json` generado ya incluye los metadatos que el nuevo sistema de revisión va a comprobar:
+
+```json
+{
+  "id": "mi-primer-plugin",
+  "name": "Mi Primer Plugin",
+  "version": "1.0.0",
+  "minAppVersion": "1.5.0",
+  "description": "Un plugin de ejemplo para Obsidian",
+  "author": "0xbytesized",
+  "authorUrl": "https://0xbytesized.github.io",
+  "isDesktopOnly": false
+}
+```
+
+Y aquí va el `main.ts` mínimo que genera el CLI, extendido con un comando y un panel de configuración:
+
+```typescript
+import { App, Plugin, PluginSettingTab, Setting, Notice } from "obsidian";
+
+interface MiPluginSettings {
+  saludo: string;
+}
+
+const DEFAULT_SETTINGS: MiPluginSettings = {
+  saludo: "¡Hola desde Obsidian!",
+};
+
+export default class MiPlugin extends Plugin {
+  settings: MiPluginSettings;
+
+  async onload() {
+    await this.loadSettings();
+
+    // Registrar un comando en la paleta
+    this.addCommand({
+      id: "mostrar-saludo",
+      name: "Mostrar saludo personalizado",
+      callback: () => {
+        new Notice(this.settings.saludo);
+      },
+    });
+
+    // Añadir panel de configuración
+    this.addSettingTab(new MiPluginSettingTab(this.app, this));
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+}
+
+class MiPluginSettingTab extends PluginSettingTab {
+  plugin: MiPlugin;
+
+  constructor(app: App, plugin: MiPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    new Setting(containerEl)
+      .setName("Saludo personalizado")
+      .setDesc("El texto que aparecerá al ejecutar el comando")
+      .addText((text) =>
+        text
+          .setValue(this.plugin.settings.saludo)
+          .onChange(async (value) => {
+            this.plugin.settings.saludo = value;
+            await this.plugin.saveSettings();
+          })
+      );
+  }
+}
+```
+
+Este es el esqueleto estándar que cualquier plugin de Obsidian usa. Las clases `Plugin`, `PluginSettingTab`, `Setting` y `Notice` forman parte de la API pública de Obsidian desde hace años. No hay nada inventado aquí.
+
+## Validación local antes de publicar
+
+Uno de los aciertos del nuevo sistema es que no te obliga a publicar para saber si tu código pasa la revisión. Tienes dos opciones:
+
+1. **eslint plugin oficial**: instalas `@obsidian/eslint-plugin` y ejecutas el linter en local. Te señala las violaciones de las _Developer Policies_ antes de hacer push.
+2. **Preview scan desde el dashboard**: apuntas a cualquier rama, tag o commit del repositorio y el sistema ejecuta el escaneo sin publicar nada.
+
+El flujo ideal queda así:
+
+```bash
+# Validar localmente antes de hacer nada
+npm install --save-dev @obsidian/eslint-plugin
+npx eslint main.ts --rulesdir node_modules/@obsidian/eslint-plugin
+
+# Si todo pasa, publicar con confianza
+git tag -a 1.1.0 -m "Release 1.1.0"
+git push --tags
+```
+
+El dashboard del desarrollador recoge el nuevo tag automáticamente (si tienes el repo conectado), lanza el escaneo, y en minutos tienes el resultado. Si pasa, el plugin aparece en el directorio en menos de 24 horas.
+
+## Transparencia para el usuario: scorecards y disclosures
+
+Cada plugin tiene ahora una página de detalle con un **scorecard** que muestra el estado de las comprobaciones automáticas. Esto es un avance bestial en transparencia: antes solo confiabas en las estrellas de GitHub y la palabra del autor. Ahora ves si el plugin pasa los escaneos de seguridad, si el autor está verificado, y próximamente qué capacidades del sistema usa (red, sistema de archivos, portapapeles).
+
+Las **disclosures** son particularmente relevantes. Un plugin va a tener que declarar si accede a la red, lee ficheros, o usa el portapapeles, y esa información será visible antes de instalarlo. Para una aplicación que maneja notas personales, diarios, y a menudo información sensible, esto es básico.
+
+También se introduce un sistema de etiquetado de precios — `Free`, `Optional payments` y `Paid` — que obliga a los desarrolladores a ser honestos sobre el modelo de negocio. Si tu plugin se conecta a una API de pago, tiene que marcarse como _Optional payments_, aunque tenga un tier gratuito.
+
+## Mi opinión
+
+Llevo usando Obsidian a diario desde hace un par de años y tengo sentimientos encontrados con los plugins de la comunidad. Por un lado, hay joyas como Dataview, Calendar o Excalidraw que amplían la herramienta de formas que el equipo base jamás habría cubierto. Por otro, he visto plugins abandonados que rompen con cada actualización, y más de una vez me he preguntado qué hace exactamente ese plugin oscuro que solo tiene 12 estrellas en GitHub y pide acceso a la red.
+
+Este movimiento me parece el único camino sensato para un ecosistema del tamaño de Obsidian. No puedes revisar manualmente 4.000 plugins cuando cada uno publica varias versiones al año y los agentes de IA están generando código a una velocidad que ningún equipo humano puede seguir. La automatización con supervisión humana selectiva es el modelo correcto.
+
+Lo que más valoro es que no han sido paternalistas. No han cerrado el ecosistema, no han puesto un _walled garden_ al estilo Apple. Han construido infraestructura abierta, con un eslint plugin que puedes ejecutar en local, un dashboard que te da feedback inmediato y scorecards que empoderan al usuario para tomar decisiones informadas. Eso es hacer las cosas bien.
+
+El roadmap para los próximos meses incluye autores verificados, disclosures de capacidades y herramientas para que equipos gestionen plugins privados. Si el equipo mantiene este ritmo, el ecosistema de plugins de Obsidian va a ser referente de cómo se escala una plataforma de extensiones sin perder el control de calidad. Y eso, en 2026, no es poca cosa.
