@@ -1,0 +1,96 @@
+---
+title: "scrcpy v4.0: SDL3, pantalla flexible y control de cámara"
+date: "2026-05-13T15:30"
+tags: ["android", "scrcpy", "sdl3", "herramientas", "codigo-abierto"]
+excerpt: "La herramienta de mirroring Android más popular salta a v4.0 con migración a SDL3, pantallas virtuales redimensionables y control de cámara."
+---
+
+## ¿Qué es scrcpy?
+
+Si alguna vez has necesitado ver y controlar tu Android desde el PC, scrcpy es probablemente la herramienta que has usado. Es un proyecto open source desarrollado por [Genymobile](https://github.com/Genymobile/scrcpy) que permite hacer mirroring y control de dispositivos Android desde Windows, macOS y Linux, con latencia mínima y sin instalar nada en el teléfono.
+
+El 12 de mayo de 2026 lanzaron la versión 4.0, y es uno de esos saltos de versión que vienen cargados de cambios.
+
+## El salto a SDL3
+
+El cambio estructural más importante es la migración de SDL2 a SDL3. SDL (Simple DirectMedia Layer) es la librería que gestiona ventanas, eventos de teclado y ratón, y renderizado. scrcpy depende de ella para todo lo que ves en pantalla.
+
+SDL2 llevaba años en modo mantenimiento. SDL3 trae APIs nuevas que permiten cosas como forzar el aspect ratio de una ventana mientras la redimensionas, algo que antes requería cálculos manuales y añadir barras negras.
+
+El equipo de SDL colaboró directamente con fixes para scrcpy durante la migración, y el resultado es visible: la ventana ahora mantiene la proporción de la pantalla del dispositivo automáticamente.
+
+## Pantalla flexible: lo que más me ha gustado
+
+La feature estrella de esta versión es `--flex-display` (o `-x`). Hasta ahora, cuando creabas una pantalla virtual con `--new-display`, el tamaño era fijo. Con el modo flexible, la pantalla virtual se redimensiona dinámicamente según el tamaño de la ventana del cliente.
+
+Esto es brutal para desarrollo y testing. Imagina que pruebas una app Android y quieres ver cómo responde a diferentes tamaños de pantalla. En lugar de crear múltiples displays virtuales, redimensionas la ventana y ya está:
+
+```bash
+# Pantalla virtual que se adapta al tamaño de la ventana
+scrcpy --new-display=1024x768/160 --start-app=com.android.settings --flex-display
+
+# Con -x como atajo
+scrcpy --new-display --start-app=com.android.settings -x
+
+# Con keep-active para que no se apague la pantalla
+scrcpy --new-display -x --keep-active
+```
+
+Para mantener calidad en ventanas grandes, puedes subir el bitrate y cambiar el codec:
+
+```bash
+scrcpy --new-display -x --video-codec=h265 -b16M
+```
+
+También puedes combinarlo con aplicaciones concretas. Por ejemplo, abrir Firefox en una pantalla virtual redimensionable sin decoraciones del sistema:
+
+```bash
+scrcpy --new-display=/192 -x --start-app=org.mozilla.firefox --keep-active --no-vd-system-decorations
+```
+
+Esto convierte scrcpy en una herramienta de testing de UI mucho más potente de lo que era.
+
+## Control de cámara: antorcha y zoom
+
+Otra novedad práctica: ahora puedes controlar la cámara del dispositivo directamente desde scrcpy. La antorcha y el zoom se manejan con atajos de teclado:
+
+- `MOD+t`: encender antorcha de la cámara
+- `MOD+Shift+t`: apagar antorcha
+- `MOD+↑`: zoom in
+- `MOD+↓`: zoom out
+
+También puedes iniciar con la antorcha ya encendida o con un nivel de zoom concreto:
+
+```bash
+# Cámara con antorcha activada al inicio
+scrcpy --video-source=camera --camera-torch
+
+# Con zoom 1.5x
+scrcpy --video-source=camera --camera-zoom=1.5
+```
+
+El rango de zoom admitido por cada cámara aparece con `--list-cameras`.
+
+## Lo que han pulido en esta versión
+
+Más allá de las features grandes, hay un montón de arreglos que mejoran la experiencia:
+
+- **Aspect ratio**: la ventana mantiene la proporción al redimensionar. Si por algún motivo no quieres este comportamiento, tienes `--no-window-aspect-ratio-lock`.
+- **Atajos nuevos**: `F11` para pantalla completa y `Mod+q` para salir.
+- **Color de fondo**: antes era negro puro, ahora es gris oscuro por defecto. Configurable con `--background-color`.
+- **Icono de desconexión**: ahora se muestra un icono cuando el dispositivo se desconecta, en lugar de cerrar la ventana directamente.
+- **Consola Windows**: por fin usa UTF-8 y se mantiene abierta cuando hay errores, para que puedas leerlos.
+- **Fixes de rendimiento**: corrigieron un bug de CPU alta con silencio en audio OPUS, un deadlock en el runner de OpenGL, y flickering en Meta Quest.
+- **Dependencias actualizadas**: platform-tools 37.0.0, FFmpeg 8.1.1, SDL 3.4.8, dav1d 1.5.3.
+
+El fix de flickering en Meta Quest es interesante porque muestra que scrcpy se usa en contextos que van más allá del escritorio tradicional. Hay gente usando esto con gafas de realidad virtual.
+
+## Mi opinión
+
+scrcpy es de esas herramientas que funcionan tan bien que casi te olvidas de que existen. No pide permisos raros, no te cobra suscripción, no te pone marcas de agua. Funciona y punto.
+
+La v4.0 me gusta porque no rompe lo que ya funcionaba. El salto a SDL3 es un cambio interno enorme que el usuario no nota, salvo porque todo va un poco mejor. La pantalla flexible es un avance real para quien hace desarrollo o testing en Android. Y los atajos de cámara son útiles para quien usa el móvil como webcam o hace streaming.
+
+Hay algo que valoro especialmente: el changelog es honesto. Cada cambio tiene su número de issue enlazado. No hay "mejoras de rendimiento" genéricas. Puedes trazar cada decisión. Así se hace software open source del bueno.
+
+Mi veredicto: si usas scrcpy, actualiza. Si no lo usas y trabajas con Android, pruébalo. Sigue siendo la mejor herramienta de mirroring Android que existe, y la v4.0 la hace aún mejor sin pedir nada a cambio.
