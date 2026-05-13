@@ -1,0 +1,114 @@
+---
+title: "Needle: el modelo de 26M que entiende qué herramienta usar"
+date: "2026-05-13T09:00"
+tags: ["llm", "function-calling", "gemini", "model-distillation", "open-source"]
+excerpt: "Cactus Compute ha destilado Gemini 3.1 en un modelo de solo 26 millones de parámetros especializado en llamadas a funciones. Abierto, rápido y ejecutable en dispositivos pequeños."
+---
+
+Un equipo de Cactus Compute acaba de publicar Needle, un modelo de 26 millones de parámetros destilado desde Gemini 3.1 y especializado en una sola cosa: decidir qué herramienta usar y con qué argumentos. Nada de conversación fluida, nada de razonamiento profundo. Solo tool calling, y lo hace sorprendentemente bien.
+
+La noticia saltó en Hacker News con más de 450 puntos y 150 comentarios. El repositorio en GitHub ya supera las 800 estrellas. Y tiene sentido: es un modelo con pesos abiertos, licencia MIT, que puedes afinar en tu portátil y desplegar en un dispositivo minúsculo.
+
+## Por qué 26M parámetros importan
+
+Para ponerlo en perspectiva: Gemini 3.1 probablemente tiene cientos de miles de millones de parámetros. Needle tiene 26 millones. Es tres órdenes de magnitud más pequeño. Y sin embargo, en single-shot function calling, supera a modelos mucho más grandes como FunctionGemma-270m, Qwen-0.6B, Granite-350m y LFM2.5-350m.
+
+La clave está en la especialización. Needle no intenta ser un modelo conversacional. Es un encoder-decoder con 12 capas en el encoder, 8 en el decoder, dimensión 512, 8 cabezas de atención y 4 cabezas KV. Sin feed-forward networks. Solo atención.
+
+```python
+# Arquitectura descrita en el paper de Simple Attention Networks
+# Encoder: 12 capas de self-attention con GQA y RoPE, sin FFN
+# Decoder: 8 capas con self-attention enmascarada + cross-attention al encoder
+# d_model=512, 8 attention heads, 4 KV heads, vocab=8192 BPE
+```
+
+El entrenamiento es sorprendentemente eficiente: 16 TPU v6e durante 27 horas para el preentrenamiento (200 mil millones de tokens) y 45 minutos para el post-entrenamiento en 2 mil millones de tokens de datos de function calling.
+
+En producción, usando el runtime Cactus, Needle alcanza 6000 tokens por segundo en prefill y 1200 en decodificación. Son velocidades que permiten ejecutarlo en tiempo real incluso en hardware modesto.
+
+## Cómo se usa
+
+El equipo ha publicado pesos, código y un playground interactivo. La instalación es directa:
+
+```bash
+git clone https://github.com/cactus-compute/needle.git
+cd needle && source ./setup
+needle playground
+```
+
+Esto abre una interfaz web en `http://127.0.0.1:7860` donde puedes probar el modelo con tus propias herramientas y afinarlo con tus datos.
+
+Desde Python, la API es mínima:
+
+```python
+from needle import (
+    SimpleAttentionNetwork,
+    load_checkpoint,
+    generate,
+    get_tokenizer,
+)
+
+# Cargar pesos y configuración
+params, config = load_checkpoint("checkpoints/needle.pkl")
+model = SimpleAttentionNetwork(config)
+tokenizer = get_tokenizer()
+
+# Pregunta en lenguaje natural + definición de herramientas
+result = generate(
+    model,
+    params,
+    tokenizer,
+    query="¿Qué tiempo hace en Madrid?",
+    tools="""
+    [
+      {
+        "name": "get_weather",
+        "parameters": {"location": "string"}
+      }
+    ]
+    """,
+    stream=False,
+)
+
+print(result)
+# [{"name": "get_weather", "arguments": {"location": "Madrid"}}]
+```
+
+Lo interesante es que el modelo no genera la respuesta final. Genera exclusivamente la llamada a la herramienta. Es tu código quien ejecuta `get_weather("Madrid")` y luego decide qué hacer con el resultado. Needle solo resuelve el primer paso: entender la intención y mapearla a una función concreta con los argumentos correctos.
+
+Esto encaja perfectamente en arquitecturas de agentes autónomos. Tú expones un catálogo de herramientas (APIs, funciones del sistema, consultas a base de datos) y Needle actúa como router semántico.
+
+## Afinado con tus propias herramientas
+
+Needle incluye un pipeline de fine-tuning que genera datos sintéticos con Gemini, entrena y evalúa en un solo comando:
+
+```bash
+# Con tus datos en formato JSONL
+needle finetune mis_herramientas.jsonl
+```
+
+El formato del JSONL es directo: cada línea es un objeto con `query`, `tools` y `tool_calls`. El playground también permite generar estos datos de forma interactiva.
+
+Esto significa que puedes tomar Needle, alimentarlo con 50 o 100 ejemplos de cómo se usan las herramientas específicas de tu aplicación, y obtener un modelo afinado que entiende tu dominio. En minutos, no en días.
+
+## El contexto: por qué los modelos pequeños importan
+
+Llevamos un par de años viendo modelos cada vez más grandes. GPT-4, Gemini, Claude: todos compiten en benchmarks de razonamiento, matemáticas y código. Pero hay un espacio enorme para modelos pequeños y especializados que resuelven una tarea concreta con eficiencia brutal.
+
+Needle representa exactamente esa filosofía. No necesitas un modelo de 70 mil millones de parámetros para decidir si el usuario quiere buscar un vuelo o consultar el tiempo. Necesitas un modelo que entienda el catálogo de herramientas disponible y asigne la intención correcta.
+
+Las implicaciones para dispositivos son evidentes. Un modelo de 26M parámetros cabe en un reloj, en unas gafas, en un altavoz inteligente. No necesita conexión a la nube. Y con 6000 tokens por segundo de prefill, la latencia es imperceptible.
+
+## Mi veredicto
+
+Needle me parece uno de los proyectos más interesantes que he visto en lo que va de año. No por la complejidad técnica —que la tiene— sino por la claridad de su propósito. Hace una cosa, la hace rápido, y la hace mejor que modelos diez veces más grandes.
+
+La licencia MIT y los pesos abiertos lo convierten en una herramienta utilizable hoy, en producción, sin depender de APIs externas. Si estás construyendo agentes, asistentes o cualquier sistema que necesite enrutar intenciones a funciones, vale la pena dedicarle una hora a probarlo.
+
+El único asterisco: es un modelo experimental basado en Simple Attention Networks, una arquitectura poco convencional. Los propios autores advierten que los modelos pequeños "pueden ser quisquillosos". No esperes que mantenga una conversación ni que razone sobre pasos múltiples. Pero si lo que necesitas es tool calling puro, Needle entrega.
+
+---
+
+**Enlace al proyecto:** [github.com/cactus-compute/needle](https://github.com/cactus-compute/needle)
+
+**Pesos:** [huggingface.co/Cactus-Compute/needle](https://huggingface.co/Cactus-Compute/needle)
