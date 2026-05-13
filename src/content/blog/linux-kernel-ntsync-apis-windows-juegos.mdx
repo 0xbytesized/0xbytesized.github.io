@@ -1,0 +1,164 @@
+---
+title: "NTSYNC: así mete Linux las APIs de Windows en el kernel"
+date: "2026-05-13T21:00"
+tags: ["linux", "kernel", "wine", "gaming", "ntsync"]
+excerpt: "El kernel Linux ahora habla Windows. NTSYNC es el driver que elimina los cuellos de botella en sincronización y hace que los juegos vuelen con Wine."
+---
+
+Hace unos años la idea de jugar en Linux era una broma. Hoy Linux acaba de superar el 5% en Steam por primera vez en su historia, los Steam Decks vuelan con Proton y el kernel de Linux está haciendo algo que habría sonado a herejía hace una década: **implementar APIs de Windows de forma nativa**.
+
+El último capítulo de esta historia se llama **NTSYNC**, un driver que entró en el kernel hace cosa de un año y que en su versión más reciente —la que viene con Wine 11— está reventando los benchmarks de rendimiento en juegos Windows corriendo sobre Linux. Vamos a ver qué es, cómo funciona y por qué es importante para cualquiera que escriba código de sistemas.
+
+## El problema: sincronización a la Windows
+
+Windows y Linux gestionan la sincronización entre hilos de forma radicalmente distinta. En Windows tienes un catálogo rico de objetos de sincronización: semáforos, mutexes, eventos (manuales y automáticos) y operaciones como `WaitForMultipleObjects` que permiten esperar por varios de ellos a la vez, con timeouts y alertas.
+
+Linux tiene futexes. Los futexes son rápidos, minimalistas y muy Unix —pero no se parecen en nada al modelo Windows.
+
+Durante décadas, Wine resolvió esto con un proceso central llamado **wineserver**. Cada operación de sincronización —crear un mutex, esperar un evento, liberar un semáforo— implicaba:
+
+1. El hilo del juego llama a una función de la API Win32.
+2. Wine traduce esa llamada a una petición al wineserver.
+3. El wineserver recibe la petición, gestiona el estado del objeto y responde.
+4. Wine devuelve el resultado al juego.
+
+Cada uno de estos pasos implica **cambios de contexto**. En un juego moderno, donde docenas de hilos se coordinan constantemente para renderizado, física, audio y carga de assets, la sobrecarga se acumula. No es raro que un juego pierda entre un 10% y un 30% de rendimiento solo por este baile de mensajes entre el proceso del juego y el wineserver.
+
+Aquí tienes una versión conceptual de cómo se veía una operación de espera en el Wine antiguo:
+
+```c
+// Modelo tradicional de Wine (simplificado conceptualmente)
+// Cada WaitForSingleObject implicaba una ida y vuelta al wineserver
+
+int wait_for_object(HANDLE handle, DWORD timeout_ms) {
+    // 1. Construir mensaje para el wineserver
+    struct wine_msg msg = {
+        .type = MSG_WAIT,
+        .handle = handle,
+        .timeout = timeout_ms
+    };
+
+    // 2. Enviar al wineserver → cambio de contexto
+    send_to_wineserver(&msg);
+
+    // 3. Bloquearse esperando respuesta → otro cambio de contexto
+    recv_from_wineserver(&reply);
+
+    // 4. Devolver resultado
+    return reply.status;
+}
+
+// En un juego típico esto se llama miles de veces por frame
+```
+
+Lo interesante es que este cuello de botella no tiene nada que ver con traducir gráficos ni con la complejidad del juego. Es pura **sobrecarga de arquitectura**: el modelo de sincronización de Windows y el de Linux simplemente no encajaban.
+
+## La solución: meter Windows en el kernel
+
+En 2021, el kernel Linux 5.16 introdujo `futex_waitv`, una extensión del mecanismo futex que permitía esperar por múltiples direcciones de memoria a la vez. Fue el primer guiño explícito del kernel hacia la compatibilidad con `WaitForMultipleObjects` de Win32.
+
+Pero la pieza realmente grande llegó en 2024: **NTSYNC**.
+
+NTSYNC es un driver del kernel Linux —unas 1200 líneas de C en `drivers/misc/ntsync.c`— escrito por Elizabeth Figura, ingeniera de CodeWeavers (la empresa detrás de gran parte del desarrollo de Wine). En lugar de simular la sincronización de Windows desde userspace, **la implementa directamente en el kernel** exponiendo un dispositivo de caracteres: `/dev/ntsync`.
+
+El driver ofrece tres tipos de objetos y un conjunto de ioctls para manipularlos:
+
+| Objeto | Ioctl de creación | Operaciones |
+|--------|-------------------|-------------|
+| Semáforo | `NTSYNC_IOC_CREATE_SEM` | `SEM_RELEASE`, `SEM_READ` |
+| Mutex | `NTSYNC_IOC_CREATE_MUTEX` | `MUTEX_UNLOCK`, `MUTEX_KILL`, `MUTEX_READ` |
+| Evento | `NTSYNC_IOC_CREATE_EVENT` | `EVENT_SET`, `EVENT_RESET`, `EVENT_PULSE`, `EVENT_READ` |
+
+Y dos operaciones de espera críticas:
+
+- `NTSYNC_IOC_WAIT_ANY`: espera a que **cualquiera** de los objetos se señale (equivalente a `WaitForMultipleObjects` con `bWaitAll=FALSE`)
+- `NTSYNC_IOC_WAIT_ALL`: espera a que **todos** los objetos se señalen (equivalente a `WaitForMultipleObjects` con `bWaitAll=TRUE`)
+
+Ambas soportan timeout y esperas alertables (alertable waits).
+
+Así se ve, desde el lado de Wine, usar NTSYNC hoy:
+
+```c
+// Con NTSYNC, Wine habla directamente con el kernel sin wineserver intermedio
+#include <linux/ntsync.h>
+
+int ntsync_wait_any(int fd, int device_fd, 
+                     const int *obj_fds, int count, 
+                     uint64_t timeout_ns) {
+    struct ntsync_wait_args args = {
+        .timeout = timeout_ns,
+        .objs    = (uint64_t)obj_fds,
+        .count   = count,
+        .index   = 0xdeadbeef,
+        .flags   = 0
+    };
+
+    // Una sola llamada al kernel, sin wineserver
+    if (ioctl(device_fd, NTSYNC_IOC_WAIT_ANY, &args) < 0)
+        return -1;
+
+    return args.index;  // índice del objeto que despertó
+}
+
+// Crear un mutex es igual de directo:
+int ntsync_create_mutex(int device_fd, int owner, int count) {
+    struct ntsync_mutex_args args = {
+        .owner = owner,
+        .count = count
+    };
+    return ioctl(device_fd, NTSYNC_IOC_CREATE_MUTEX, &args);
+    // Devuelve un fd directamente
+}
+```
+
+La diferencia es brutal: donde antes tenías dos cambios de contexto (juego → wineserver → juego), ahora tienes una syscall directa al kernel. Para un juego que hace miles de operaciones de sincronización por segundo, el ahorro es masivo.
+
+## El precedente: futex2
+
+NTSYNC no salió de la nada. Como mencionaba antes, en 2021 llegó `futex_waitv` al kernel 5.16, diseñado explícitamente para soportar `WaitForMultipleObjects`. La syscall permite algo como esto:
+
+```c
+// futex_waitv: precursor de NTSYNC, permite esperar múltiples futexes
+#include <linux/futex.h>
+#include <sys/syscall.h>
+
+int wait_for_multiple(struct futex_waitv *waiters, int nr_waiters) {
+    return syscall(SYS_futex_waitv, waiters, nr_waiters, 
+                   0, NULL, 0);
+}
+
+// Cada waiter apunta a una dirección distinta
+struct futex_waitv waiters[] = {
+    { .val = expected1, .uaddr = (uintptr_t)&futex1, .flags = FUTEX_32 },
+    { .val = expected2, .uaddr = (uintptr_t)&futex2, .flags = FUTEX_32 },
+};
+
+// Una sola syscall, sin wineserver
+int which = wait_for_multiple(waiters, 2);
+```
+
+Pero futex2 cubría solo una parte del problema. Los mutexes de Windows tienen semánticas que los futexes no modelan bien (dueño, abandono, adquisición recursiva con contador). Los eventos manuales y automáticos tampoco encajan limpiamente en futexes. NTSYNC cierra todas esas brechas con implementaciones nativas.
+
+## Wine 11 y los números reales
+
+Wine 11.0 se publicó en enero de 2026 con soporte completo para NTSYNC. La versión más reciente, Wine 11.8 (2 de mayo de 2026), trae mejoras adicionales. Y los números respaldan el hype.
+
+No voy a darte cifras que no pueda verificar —los benchmarks varían según hardware, juego y configuración—, pero el consenso entre desarrolladores y testers es claro: los juegos que más sufrían con el modelo antiguo (títulos con muchos hilos y sincronización intensiva) son los que más ganan. Estamos hablando de mejoras de doble dígito en framerate mínimo, que es justo donde más se nota al jugar.
+
+En la Steam Deck, NTSYNC se carga por defecto si tienes el sistema actualizado. No tienes que hacer nada: Valve lo integra en SteamOS y Proton lo aprovecha automáticamente.
+
+## Mi veredicto
+
+Esto me parece una de esas decisiones de ingeniería que son técnicamente obvias en retrospectiva pero que requerían un cambio cultural enorme.
+
+Durante décadas, la postura del kernel Linux fue: "si Windows hace las cosas de forma distinta, no es nuestro problema". Y tenía sentido. El kernel no está para dar soporte a un sistema operativo de la competencia.
+
+Pero en algún momento —creo que alrededor de 2018-2020, con Valve invirtiendo fuerte en Proton y el Steam Deck en el horizonte— la ecuación cambió. De repente, que millones de jugadores pudieran ejecutar juegos de Windows en Linux no era una curiosidad técnica: era una cuestión estratégica para el ecosistema.
+
+Lo inteligente del enfoque de NTSYNC y futex2 es que **no contaminan el kernel con código específico de Wine**. Son interfaces genéricas que cualquier programa puede usar. Que su caso de uso principal sea ejecutar juegos de Windows es casi anecdótico: la API está ahí, es limpia y sigue las convenciones del kernel.
+
+También me gusta que el driver sea pequeño y enfocado. Unas 1200 líneas no es nada para un subsistema del kernel. Hace exactamente una cosa y la hace bien. Es el tipo de código que da gusto leer.
+
+Y como ingeniero, hay algo profundamente satisfactorio en ver cómo un problema que parecía requerir malabares en userspace se disuelve cuando metes la funcionalidad al nivel correcto de abstracción. Es un recordatorio de que, a veces, la solución más elegante no es ser más listo con las capas de traducción, sino aceptar que dos mundos son diferentes y tender un puente en el punto donde más importa.
+
+Si usas Linux para jugar, NTSYNC ya está trabajando para ti sin que lo sepas. Y si escribes código de sistemas, el driver merece una lectura —es un caso de estudio sobre cómo integrar semántica foránea en un kernel sin convertirlo en un monstruo.
