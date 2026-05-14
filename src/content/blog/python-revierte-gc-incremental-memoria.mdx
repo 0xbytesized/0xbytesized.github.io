@@ -1,0 +1,124 @@
+---
+title: "Python revierte su GC incremental: memoria 5x en producción"
+date: "2026-05-14T04:00"
+tags: ["python", "gc", "memoria", "cpython", "rendimiento"]
+excerpt: "Python 3.14 y 3.15 revertirán su recolector de basura incremental por picos de memoria de hasta 5x. Vuelve el GC generacional de siempre."
+---
+
+Python 3.14 trajo muchas cosas buenas. Pero una de sus decisiones más silenciosas acaba de dar marcha atrás de forma estrepitosa. El nuevo recolector de basura incremental —presentado sin pasar por el proceso formal de PEP— ha provocado tal presión de memoria en entornos reales que el core team ha decidido revertirlo en las ramas 3.14 y 3.15. Es una decisión inusual y un recordatorio de que la memoria no se gestiona sola, por mucho que Python nos mime.
+
+## ¿Qué pasó exactamente?
+
+El 16 de abril de 2026, Hugo van Kemenade (release manager de Python) publicó en el foro de core development un anuncio que pocos esperaban: el GC incremental introducido en Python 3.14 se revierte. La razón no fue un bug concreto, sino "una cantidad significativa de reportes de presión de memoria en entornos de producción". Traducción: servicios reales, de empresas reales, empezaron a comerse la RAM como si no hubiera un mañana.
+
+Lo interesante es que esto ya había pasado antes. El mismo GC incremental se intentó colar en Python 3.13 y se retiró a última hora antes del release final. En aquel momento no hubo PEP ni evaluación formal. En 3.14 volvió a aparecer y esta vez llegó a producción. El resultado: procesos que consumían 5 veces más memoria que con el GC generacional clásico.
+
+Neil Schemenauer, uno de los desarrolladores que ha trabajado en el GC incremental, publicó datos concretos: en pruebas con mucha basura cíclica, el tiempo máximo de pausa bajaba de 26 ms (GC generacional) a 1.3 ms (GC incremental), pero el pico de RSS se multiplicaba por 2.7x. En el peor caso documentado: 5x.
+
+## GC generacional vs GC incremental: la diferencia de fondo
+
+Para entender por qué esto importa, hay que saber cómo funciona cada enfoque.
+
+El GC generacional de CPython (el de toda la vida) divide los objetos en tres generaciones. Los objetos nuevos entran en la generación 0. Si sobreviven a una recolección, promocionan a la generación 1 y luego a la 2. La idea es sencilla: la mayoría de los objetos mueren jóvenes, así que basta con barrer la generación 0 frecuentemente y tocar las generaciones viejas solo de vez en cuando.
+
+El problema clásico de este diseño son las pausas. Cuando toca recolectar la generación 2, el intérprete se para en seco. Si tienes millones de objetos vivos, esa pausa puede ser dolorosa.
+
+El GC incremental prometía resolver esto troceando el trabajo de recolección en pasos pequeños, intercalados con la ejecución normal del programa. Menos latencia, pausas más cortas. Suena genial. Y en benchmarks de laboratorio lo era.
+
+El problema es que trocear la recolección tiene un coste oculto: los objetos que deberían haberse liberado siguen vivos entre paso y paso. Si tu programa genera mucha basura cíclica más rápido de lo que el GC incremental la recoge, la memoria se acumula. Y se acumula. Y se acumula.
+
+## Cómo detectar si tu código sufre de presión de GC
+
+El módulo `gc` de Python expone varias herramientas para depurar problemas de memoria relacionados con el recolector. Aquí van algunas que puedes usar hoy mismo:
+
+```python
+import gc
+import sys
+
+# Activar debug para ver qué está recolectando el GC
+gc.set_debug(gc.DEBUG_STATS)
+
+# Forzar una recolección completa
+gc.collect()
+
+# Ver cuántos objetos hay en cada generación
+print(gc.get_count())  # (gen0, gen1, gen2)
+
+# Estadísticas detalladas: colecciones, objetos recolectados, inalcanzables
+for i, stats in enumerate(gc.get_stats()):
+    print(f"Generación {i}: {stats}")
+```
+
+Si ves que `gc.get_count()` devuelve números que no dejan de crecer entre recolecciones, tienes un problema. Especialmente si la generación 0 alcanza el umbral constantemente. Eso significa que estás generando objetos de vida corta a un ritmo que satura al recolector.
+
+```python
+import gc
+
+# Ver el total de objetos vivos gestionados por el GC
+objetos = gc.get_objects()
+print(f"Objetos rastreados por el GC: {len(objetos)}")
+
+# Agrupar por tipo para encontrar fugas
+from collections import Counter
+tipos = Counter(type(obj).__name__ for obj in objetos)
+for tipo, count in tipos.most_common(10):
+    print(f"  {tipo}: {count}")
+```
+
+Este snippet no te dirá exactamente dónde está la fuga, pero te da una foto instantánea de qué tipos de objetos están monopolizando la memoria. Si ves 300.000 `dict` cuando esperabas 500, algo huele mal.
+
+## El problema de los ciclos de referencia
+
+El GC de CPython solo existe por una razón: los ciclos de referencia. Python usa conteo de referencias como mecanismo principal de liberación de memoria. Cuando el contador de referencias de un objeto llega a cero, se libera inmediatamente. Esto es determinista y rápido.
+
+Pero falla estrepitosamente con ciclos:
+
+```python
+class Nodo:
+    def __init__(self, nombre):
+        self.nombre = nombre
+        self.vecino = None
+
+a = Nodo("A")
+b = Nodo("B")
+a.vecino = b
+b.vecino = a  # Ciclo: A -> B -> A
+
+del a
+del b
+# Ambos objetos siguen vivos. Sus contadores de referencia nunca
+# llegarán a cero porque se referencian mutuamente.
+# Solo el GC generacional (o incremental) puede liberarlos.
+```
+
+Este tipo de estructuras son ubicuas: árboles con referencias a padres, grafos, caches, observers. Cada vez que dos objetos se apuntan mutuamente, el conteo de referencias se vuelve ciego y el GC cíclico tiene que intervenir.
+
+El GC incremental, al trocear el trabajo, mantenía estos ciclos vivos durante más tiempo del necesario. Si tu aplicación generaba ciclos rápido, la memoria se disparaba antes de que el GC terminara su barrido troceado.
+
+## ¿Por qué no tener ambos GCs y que el usuario elija?
+
+Es la pregunta obvia. Antoine Pitrou y Serhiy Storchaka la plantearon en la discusión. La respuesta del core team fue un no rotundo: mantener dos GCs simultáneamente es demasiado costoso en mantenimiento. El código del GC de CPython ya es delicado. Tim Peters, que trabajó en él durante años, lo resumió bien: "The simpler we can keep that code, the better for all. Especially in a free-threading world."
+
+Neil Schemenauer añadió datos: en su prototipo, el GC incremental añade unas 1600 líneas de código y tener ambos como unidades de compilación separadas no causaba regresión de rendimiento medible. Pero reconoció que Java, que sí ofrece múltiples GCs seleccionables, tiene un equipo de investigación dedicado. CPython tiene "un par de personas trasteando en su tiempo libre".
+
+## Lo que viene ahora
+
+El plan es claro y tiene fechas:
+
+- **Python 3.15**: revertir antes de la primera beta. Si el PR está listo a tiempo, se publicará una alpha 9 extra.
+- **Python 3.14**: el parche 3.14.5 estaba planeado para el 9 de junio de 2026, pero se adelantará para incluir la reversión cuanto antes.
+- **Python 3.16**: si el GC incremental vuelve, será mediante un PEP formal con evaluación rigurosa. Nada de colarlo por la puerta de atrás.
+
+## Mi opinión
+
+Hay dos lecturas de esta historia. La técnica y la de proceso.
+
+La técnica es clara: el GC incremental no estaba listo para producción. Las pausas más cortas son deseables, pero no a costa de multiplicar la memoria por cinco. El GC generacional de CPython es aburrido, predecible y funciona. A veces eso es exactamente lo que necesitas.
+
+La de proceso es más interesante. Que un cambio de este calibre —sustituir el recolector de basura— llegara a una versión estable sin pasar por un PEP es un fallo de governance. Los PEP existen precisamente para esto: forzar a que las ideas se defiendan en público, con casos de uso, benchmarks y escrutinio de la comunidad. Si el GC incremental hubiera pasado por ese proceso, probablemente alguien habría corrido tests de memoria en cargas reales y el problema se habría detectado antes.
+
+El caso me recuerda a lo que pasó con el GIL y el free-threading. Son cambios tan profundos que no basta con que funcionen en benchmarks sintéticos. Necesitan meses de uso real, con tráfico real, por parte de equipos que no saben cómo funciona el GC por dentro.
+
+La buena noticia es que el core team ha reaccionado rápido y con transparencia. La mala es que la confianza cuesta ganarla y se pierde fácil. Si yo estuviera migrando servicios a 3.14 ahora mismo, me pensaría dos veces antes de actualizar a cualquier versión "punto cero" en el futuro.
+
+Al final, esta historia es un recordatorio de algo que los que llevamos tiempo en esto ya sabemos: la memoria es la parte más difícil de cualquier runtime. Ni siquiera los que escriben el intérprete la gestionan bien a la primera.
