@@ -1,0 +1,161 @@
+---
+title: "C++26 reflection: cuánto cuesta el enum-to-string"
+date: "2026-05-14T09:55"
+tags: ["c++", "c++26", "reflection", "compilacion", "rendimiento"]
+excerpt: "GCC 16 ya está aquí con reflection de C++26. ¿Cuánto cuesta compilar un simple enum-to-string? Analizo los benchmarks y lo comparo con X-macros y enchantum."
+---
+
+Hace dos semanas, GCC 16.1 salió oficialmente con soporte parcial para reflection de C++26 (P2996). Es uno de los cambios más esperados en décadas: por fin podemos iterar sobre los miembros de un enum, una struct o una clase sin macros, sin boilerplate y sin trucos de `__PRETTY_FUNCTION__`.
+
+Pero todo tiene un precio. Vittorio Romeo —ingeniero de Bloomberg, autor de _Embracing Modern C++ Safely_ y miembro activo del comité— acaba de publicar un benchmark exhaustivo midiendo exactamente cuánto cuesta la reflection en tiempo de compilación. Y los resultados son… sorprendentes.
+
+## El "hola mundo" de la reflection: enum-to-string
+
+Convertir un enumerador a su nombre como string es probablemente el primer caso de uso que cualquier desarrollador prueba con reflection. Es útil de verdad: logging, serialización, debugging, mensajes de error. Si adoptas reflection en un proyecto real, vas a escribir esto en los primeros cinco minutos.
+
+El problema es que el `enum-to-string` en C++ siempre ha sido doloroso. No hay soporte nativo. Históricamente las soluciones han sido macros horribles o bibliotecas que abusan de `__PRETTY_FUNCTION__`.
+
+C++26 promete arreglarlo. La pregunta es: **¿a qué precio de compilación?**
+
+## Los tres contendientes
+
+Vittorio midió tres enfoques distintos:
+
+### 1. Reflection nativa (C++26)
+
+Nada de macros. Nada de boilerplate. Funciona con cualquier enum:
+
+```cpp
+#include <meta>
+#include <string_view>
+#include <type_traits>
+
+template <typename T>
+  requires std::is_enum_v<T>
+constexpr std::string_view to_enum_string(T val) {
+  template for (constexpr auto e :
+    std::define_static_array(std::meta::enumerators_of(^^T)))
+  {
+    if (val == [:e:]) {
+      return std::meta::identifier_of(e);
+    }
+  }
+  return "<unknown>";
+}
+```
+
+Tres elementos nuevos de C++26 trabajando juntos:
+
+- `^^T` es el operador de reflection: produce un valor de tipo reflection que representa `T`.
+- `std::meta::enumerators_of` devuelve una secuencia con todos los enumeradores de `T`.
+- `[:e:]` es el _splicer_: inyecta el valor representado por la reflection `e` de vuelta al código.
+- `template for` expande en tiempo de compilación cada elemento de la secuencia.
+
+El resultado es un `switch` generado automáticamente en tiempo de compilación, sin que escribas una sola etiqueta `case` a mano.
+
+### 2. enchantum (C++17, sin macros)
+
+[enchantum](https://github.com/ZXShady/enchantum) es una biblioteca header-only que usa un truco ingenioso: parsea `__PRETTY_FUNCTION__` (o equivalentes por compilador) para extraer los nombres de los enumeradores en tiempo de compilación.
+
+```cpp
+#include <enchantum/enchantum.hpp>
+
+enum class Color { rojo, verde, azul, amarillo };
+
+std::string_view nombre = enchantum::to_string(Color::rojo);
+// nombre == "rojo"
+```
+
+Cero configuración en el sitio de declaración del enum y funciona con C++17. La parte negativa: `enchantum` escanea un rango fijo de valores (por defecto `[-256, 256]`) y prueba cada uno. Es costoso para enums grandes, pero para enums pequeños es sorprendentemente competitivo.
+
+### 3. X-macros (preprocesador, la vieja escuela)
+
+La solución clásica. Listas los enumeradores una vez y un conjunto de macros expande tanto la definición del `enum class` como la función `to_string`:
+
+```cpp
+#include <string_view>
+
+// --- magia de preprocesador (una sola vez en una cabecera) ---
+#define XMACRO_VALUE_(name) name,
+#define XMACRO_CASE_(name)  \
+  case EnumType_::name: return #name;
+
+#define DEFINE_ENUM(enum_name, list)          \
+  enum class enum_name { list(XMACRO_VALUE_) }; \
+  constexpr std::string_view to_string(enum_name e) { \
+    using EnumType_ = enum_name;              \
+    switch (e) { list(XMACRO_CASE_) }         \
+    return "<unknown>";                       \
+  }
+
+// --- uso real (una línea por enum) ---
+#define MI_ENUM(X) X(rojo) X(verde) X(azul)
+DEFINE_ENUM(Color, MI_ENUM)
+```
+
+Es feo. No compone. Te obliga a usar macros para definir enums. Pero **compila en 27 ms** incluso con `const char*` y sin incluir ninguna cabecera de la estándar.
+
+## Los números: tiempo de compilación por TU
+
+El benchmark se ejecutó en un i9-13900K, Fedora 44, GCC 16.1.1 (release oficial, no snapshot), con Hyperfine (`--warmup 5 --min-runs 20`). Se midió el tiempo de compilar una translation unit que define un enum con `N` enumeradores y llama a la conversión una vez.
+
+Estos son los resultados más relevantes para `N=16` (un enum mediano, típico en código real):
+
+| Enfoque | Tiempo por TU |
+|---|---|
+| X-macro (`const char*`, sin stdlib) | 26.9 ms |
+| X-macro (`string_view`) | 138.1 ms |
+| enchantum | 170.9 ms |
+| Reflection C++26 | 187.7 ms |
+
+El X-macro con `const char*` y cero dependencias es **7 veces más rápido** que la reflection. Pero ojo: la diferencia no viene de la reflection en sí.
+
+## La cabecera `<meta>` es el problema, no la reflection
+
+Vittorio separó dos costes: incluir la cabecera vs. ejecutar la reflection. El resultado es revelador:
+
+- Solo incluir `<meta>` cuesta **155 ms** más que la baseline.
+- El algoritmo de reflection en sí añade solo **~0.07 ms por enumerador**.
+- El `switch` del X-macro añade **~0.06 ms por enumerador**.
+
+Son prácticamente idénticos. La reflection como mecanismo de generación de código es **casi tan rápida como un `switch` escrito a mano**.
+
+El problema es `<meta>`. Es una cabecera enorme con dependencias transitivas pesadas. Cada TU que la toca paga 155 ms antes de hacer nada útil con reflection.
+
+En un proyecto de 500 TUs, un enum de 16 valores cuesta ~94 segundos con reflection frente a ~13 segundos con X-macros. La diferencia no es el algoritmo: es `<meta>` multiplicado por 500.
+
+## ¿Y si precompilamos?
+
+Aquí viene lo interesante. Vittorio probó dos técnicas para mitigar el coste de `<meta>`:
+
+| Configuración | Tiempo para `N=4` |
+|---|---|
+| Reflection (include normal) | 186.7 ms |
+| Reflection + PCH | 80.6 ms |
+| Reflection + módulos C++20 | 403.4 ms |
+
+La **PCH** (precompiled header) reduce el tiempo a la mitad y convierte la reflection en la opción más rápida de las tres, por delante de enchantum y del X-macro con `string_view`.
+
+Los **módulos C++20**, sorprendentemente, empeoran las cosas: 2.2× más lento. Vittorio lo verificó con `-ftime-report` y `-flang-info-module-cmi`: GCC 16 carga ~34 MB de artefactos de módulo y gasta ~190 ms solo en importar, más otros ~190 ms en instanciar templates que el módulo dispara. Es un problema de implementación actual, no del concepto. Pero a día de hoy, PCH gana por goleada.
+
+## Mi opinión
+
+Tres cosas me parecen especialmente relevantes aquí:
+
+**Primero**, esto confirma lo que muchos sospechábamos: la lentitud de compilación en C++ rara vez viene del código que escribimos. Viene de las cabeceras de la estándar. `<meta>` es solo el último ejemplo. `<iostream>`, `<regex>`, `<chrono>` llevan años haciéndonos lo mismo. La reflection es rápida. Es la estándar la que arrastra los pies.
+
+**Segundo**, el hecho de que los módulos de C++20 vayan más lentos que `#include` en 2026 es preocupante. Se supone que los módulos eran la bala de plata para los tiempos de compilación. Que tres años después de C++20, en el compilador de referencia, cargar un módulo estándar cueste el doble que un include es… frustrante. Entiendo que es una cuestión de madurez de la implementación, no del diseño. Pero duele verlo.
+
+**Tercero** y esto es lo importante: **no dejéis que el miedo al coste de compilación os aleje de la reflection**. Usad PCH. Meted `<meta>` solo en `.cpp`, nunca en cabeceras públicas. Y para código donde cada milisegundo de compilación importa, seguid usando X-macros. Pero para el 90% de los proyectos, una PCH bien configurada hace que la reflection sea la opción correcta.
+
+El panorama es este: la reflection de C++26 es el futuro. Solo necesita que `<meta>` adelgace y que los módulos maduren. Ambas cosas pasarán. Mientras tanto, PCH es el truco que cierra la brecha.
+
+## Resumiendo
+
+- La reflection de C++26 **no es lenta**. El algoritmo compite con un `switch` artesanal.
+- `<meta>` cuesta ~155 ms por TU. Esa es la factura real.
+- Con PCH, la reflection es **la opción más rápida** de todas.
+- Los módulos C++20 en GCC 16 todavía no están a la altura.
+- Para proyectos donde cada ms cuenta, X-macros con `const char*` sigue siendo imbatible.
+
+Si estás empezando un proyecto nuevo en C++ y puedes usar GCC 16, mi recomendación es: activa PCH para `<meta>`, usa reflection para enum-to-string y sé feliz. Esas macros horribles tienen los días contados.
