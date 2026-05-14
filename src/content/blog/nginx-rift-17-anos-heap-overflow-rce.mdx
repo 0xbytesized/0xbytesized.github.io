@@ -1,0 +1,152 @@
+---
+title: "nginx Rift: el heap overflow que estuvo 17 años oculto"
+date: "2026-05-14T22:14"
+tags: ["nginx", "seguridad", "c", "exploit", "rce"]
+excerpt: "CVE-2026-42945 es un heap overflow en nginx introducido en 2008. Afecta a todas las versiones hasta la 1.30.0 y permite ejecución remota de código sin autenticación. Así funciona."
+---
+
+## El bug
+
+El 13 de mayo de 2026, F5 publicó un aviso de seguridad que hizo que medio internet contuviera la respiración: **CVE-2026-42945**, un heap buffer overflow crítico (CVSS 9.2) en el módulo `ngx_http_rewrite_module` de nginx. La parte escalofriante no es solo que permita RCE sin autenticación. Es que el bug llevaba ahí desde **2008**, escondido en el código que procesa las directivas `rewrite` y `set` que usan millones de sitios.
+
+El investigador Zhenpeng Lin, de depthfirst, publicó un análisis técnico impecable y un proof of concept funcional. En HN alcanzó 228 puntos en pocas horas. Vamos a desmenuzarlo.
+
+## Contexto rápido: el script engine de nginx
+
+Cuando escribes algo como esto en tu configuración de nginx:
+
+```nginx
+location ~ ^/api/(.*)$ {
+    rewrite ^/api/(.*)$ /internal?migrated=true;
+    set $original_endpoint $1;
+}
+```
+
+nginx no interpreta estas directivas línea por línea en cada petición. Las **compila** en una secuencia de operaciones que ejecuta su script engine interno. Y ese engine usa un diseño de dos pasadas:
+
+1. **Pasada de cálculo**: recorre las operaciones para determinar cuánta memoria necesita el resultado final. Reserva un buffer con ese tamaño exacto desde el pool de memoria de nginx.
+2. **Pasada de copia**: vuelve a recorrer las mismas operaciones y escribe los datos reales en el buffer reservado.
+
+Es un diseño elegante — evita múltiples allocs pequeños y aprovecha los memory pools de nginx. Pero tiene un requisito implacable: **el tamaño calculado en la primera pasada debe coincidir perfectamente con lo que se escribe en la segunda**. Si el estado del engine cambia entre pasadas, tienes un problema.
+
+Y eso es exactamente lo que pasó.
+
+## La condición de carrera... contra uno mismo
+
+El fallo está en `src/http/ngx_http_script.c` y la secuencia es quirúrgica:
+
+Cuando el `rewrite` contiene un `?` en la cadena de reemplazo, la función `ngx_http_script_start_args_code` establece una flag en el engine:
+
+```c
+void
+ngx_http_script_start_args_code(ngx_http_script_engine_t *e)
+{
+    e->is_args = 1;   // "a partir de aquí, escapa los args"
+    e->args = e->pos;
+    e->ip += sizeof(uintptr_t);
+}
+```
+
+El problema es que esa flag **nunca se resetea**. Persiste en el engine principal.
+
+Cuando después se ejecuta un `set` que referencia un grupo de captura (`$1`), se invoca `ngx_http_script_complex_value_code`. Y aquí viene la grieta:
+
+```c
+void
+ngx_http_script_complex_value_code(ngx_http_script_engine_t *e)
+{
+    ngx_http_script_engine_t  le;   // sub-engine local
+
+    ngx_memzero(&le, sizeof(ngx_http_script_engine_t)); // TODO ESTO A CERO
+    le.ip = code->lengths->elts;
+    // ... calcular longitud con 'le', no con 'e' ...
+}
+```
+
+Para la pasada de cálculo de longitud se crea un sub-engine `le` completamente limpio, inicializado a cero. Eso incluye `le.is_args = 0`.
+
+Así que el cálculo de longitud (`ngx_http_script_copy_capture_len_code`) decide que no hay que escapar nada y devuelve el tamaño raw del capture:
+
+```c
+// En la pasada de cálculo (sub-engine le, is_args = 0):
+if ((e->is_args || e->quote)
+    && (e->request->quoted_uri || e->request->plus_in_uri))
+{
+    // Calcular con escaping: raw + 2 * escapables
+    return cap[n + 1] - cap[n]
+           + 2 * ngx_escape_uri(NULL, &p[cap[n]], ...);
+} else {
+    // Sin escaping: solo el tamaño raw  ← POR AQUÍ PASA
+    return cap[n + 1] - cap[n];
+}
+```
+
+Pero en la pasada de copia, la función hermana `ngx_http_script_copy_capture_code` se ejecuta sobre el engine principal `e`, donde `e->is_args` sigue valiendo 1. La misma condición ahora es true y se llama a `ngx_escape_uri`:
+
+```c
+// En la pasada de copia (engine principal e, is_args = 1):
+if ((e->is_args || e->quote)
+    && (e->request->quoted_uri || e->request->plus_in_uri))
+{
+    // ¡OVERFLOW! El buffer se reservó con raw bytes,
+    // pero ngx_escape_uri expande cada byte escapable a 3
+    e->pos = (u_char *) ngx_escape_uri(pos, &p[cap[n]],
+                                        cap[n + 1] - cap[n],
+                                        NGX_ESCAPE_ARGS);
+}
+```
+
+El resultado: escribes `raw + 2*N` bytes en un buffer que solo tiene espacio para `raw`. Si el URI de la petición contiene caracteres escapables — y tienes control total sobre eso como atacante — puedes decidir exactamente cuántos bytes desbordas y con qué datos.
+
+## El exploit: heap feng shui contra nginx
+
+Llegar del overflow a una shell no es trivial. nginx usa pools de memoria (`ngx_pool_t`) para gestionar las asignaciones por conexión y por petición. La estructura del pool tiene este aspecto (simplificado):
+
+```c
+struct ngx_pool_s {
+    ngx_pool_data_t       d;
+    size_t                max;
+    ngx_pool_t           *current;
+    ngx_chain_t          *chain;
+    ngx_pool_large_t     *large;
+    ngx_pool_cleanup_t   *cleanup;  // offset 64, nuestro objetivo
+    ngx_log_t            *log;
+};
+```
+
+El campo `cleanup` es una lista enlazada de handlers que se ejecutan cuando el pool se destruye:
+
+```c
+struct ngx_pool_cleanup_s {
+    ngx_pool_cleanup_pt   handler;  // puntero a función
+    void                 *data;     // argumento
+    ngx_pool_cleanup_t   *next;
+};
+```
+
+Si consigues sobreescribir `cleanup` con un puntero a una estructura falsa que hayas colocado en memoria, cuando nginx destruya el pool ejecutará tu `handler` con tu `data`. Apuntar `handler` a `system()` y `data` a un comando te da RCE.
+
+El problema es que para llegar al offset 64 del pool tienes que pisotear antes los campos `d`, `max`, `current`, `chain` y `large`. Si la conexión intenta usar cualquiera de ellos antes de que el pool se destruya, nginx hace crash. Game over.
+
+La solución de Lin es un ejercicio de **heap feng shui** entre conexiones:
+
+1. Abre una conexión inicial y envía cabeceras HTTP parciales. nginx asigna un pool.
+2. Abre una segunda conexión (víctima). Su pool cae justo después del primero en el heap.
+3. Completa las cabeceras de la primera conexión. El overflow atraviesa el pool inicial y corrompe el `cleanup` del pool víctima.
+4. Cierra la conexión víctima inmediatamente. nginx llama a `ngx_destroy_pool()`, que recorre la lista de cleanup y ejecuta tu handler falso antes de que los campos corruptos causen problemas.
+
+Como nginx usa un modelo multi-proceso donde los workers hacen fork del master, el layout del heap es idéntico entre workers. Si crasheas uno, el master levanta otro con la misma disposición de memoria. Puedes reintentar hasta acertar.
+
+## Mi veredicto
+
+Este bug me parece fascinante por tres razones.
+
+**Primero**, es un recordatorio de que el código C de infraestructura crítica tiene una superficie de ataque enorme y silenciosa. La función `ngx_http_script_complex_value_code` y su sub-engine `le` probablemente se escribieron como una optimización inocente hace casi dos décadas. Nadie imaginó que la discrepancia de estado entre dos pasadas separadas por un `ngx_memzero` se convertiría en un RCE 9.2.
+
+**Segundo**, me parece brillante el exploit. La idea de usar la arquitectura multi-proceso de nginx a tu favor — "si crasheo, el master me da otro intento gratis con el mismo layout" — es de una elegancia que raya lo poético. La mayoría de los exploits luchan contra ASLR y la aleatoriedad; este las convierte en aliadas.
+
+**Tercero**, esto afecta a prácticamente todas las instalaciones de nginx que usan `rewrite` con `?` seguidas de `set` que referencian capturas. No es un edge case: es un patrón común en APIs gateways, migraciones de endpoints y proxies inversos. Si tienes nginx expuesto, comprueba tu configuración y actualiza a 1.30.1 o 1.31.0.
+
+Las versiones afectadas van desde la 0.6.27 hasta la 1.30.0. También están afectados NGINX Plus (R32-R36), NGINX Ingress Controller, NGINX Gateway Fabric y varios productos más del ecosistema F5. La lista completa está en el [aviso oficial](https://my.f5.com/manage/s/article/K000160932).
+
+No es el primer RCE de nginx y no será el último. Pero 17 años es mucho tiempo para que un bug de este calibre pase desapercibido. Y me hace preguntarme cuántos más seguirán ahí, esperando a que alguien — humano o máquina — mire el código con los ojos adecuados.
