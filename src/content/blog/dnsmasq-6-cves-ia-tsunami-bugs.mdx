@@ -1,0 +1,155 @@
+---
+title: "6 CVEs en dnsmasq: la IA encuentra bugs, los devs se ahogan"
+date: "2026-05-14T14:00"
+tags: ["seguridad", "c", "open-source", "ia", "dnsmasq"]
+excerpt: "Seis vulnerabilidades graves en dnsmasq, todas descubiertas por IA. El maintainer habla de un tsunami de reportes que no puede procesar."
+---
+
+El 11 de mayo de 2026, el CERT publicó seis CVEs para dnsmasq. No es una noticia cualquiera. Lo interesante no son solo los bugs —algunos llevaban décadas ahí— sino **cómo** se encontraron: todos mediante investigación de seguridad asistida por IA. Y el maintainer, Simon Kelley, ha soltado una frase que debería preocuparnos: "el tsunami de reportes generados por IA no muestra signos de parar".
+
+Vamos a ver qué pasó, qué bugs se encontraron y qué significa esto para el open source.
+
+## Qué es dnsmasq y por qué te debería importar
+
+dnsmasq es el servidor DNS/DHCP ligero que probablemente corre en tu router, en tu Raspberry Pi, en miles de dispositivos IoT y en una cantidad absurda de distribuciones Linux. Hace forwarding de DNS, caching, sirve DHCP, TFTP —todo en un binario de pocos cientos de KB.
+
+Es software que está en **todas partes** y que casi nadie actualiza. Cuando salen CVEs para dnsmasq, el radio de impacto es enorme.
+
+## Los seis CVEs, en detalle
+
+Estos son los bugs, con lo esencial de cada uno:
+
+**CVE-2026-2291 — Buffer overflow en `bigname`**. Un atacante remoto que pueda enviar consultas DNS o responder consultas DNS puede provocar un out-of-bounds write en el heap. La causa: una estructura interna declaraba `char name[MAXDNAME]` cuando necesitaba `(2*MAXDNAME) + 1` porque dnsmasq escapa ciertos caracteres en su representación interna. El parche son dos líneas:
+
+```c
+// Antes (src/dnsmasq.h:482)
+char name[MAXDNAME];
+
+// Después
+char name[(2*MAXDNAME) + 1];
+```
+
+Un error de dimensionamiento de buffer. 20 años ahí. Descubierto por Andrew S. Fasano.
+
+**CVE-2026-4890 — Problemas en validación de paquetes DNS**. Dos bugs relacionados con la validación de respuestas DNS. Si un atacante puede enviar paquetes malformados, puede saltarse comprobaciones de integridad. Los parches son más complejos —hay versiones distintas para 2.91 y 2.92.
+
+**CVE-2026-4891 y CVE-2026-4892 — Validación de mensajes DHCP**. Fallos en el parseo de opciones DHCP que permiten lecturas fuera de rango. Reportados por Royce M y Haiyang Huang.
+
+**CVE-2026-4893 — Bypass de validación ECS (EDNS Client Subnet)**. Este es especialmente elegante en su estupidez. Cuando tienes `--add-subnet` activado, la función `process_reply()` pasa la longitud del registro OPT (~23 bytes) en lugar de la longitud del paquete completo a `check_source()`. Como el valor es minúsculo, **todas** las comprobaciones internas fallan y la función siempre devuelve 1 —es decir, "todo correcto". La validación de subred según RFC 7871 Sección 9.2 queda completamente anulada:
+
+```c
+// Antes (src/forward.c:727)
+if (option_bool(OPT_CLIENT_SUBNET) &&
+    !check_source(header, plen, pheader, query_source))
+
+// Después
+if (option_bool(OPT_CLIENT_SUBNET) &&
+    !check_source(header, n, pheader, query_source))
+```
+
+Un parámetro equivocado. `plen` en vez de `n`. Así de simple. Descubierto por Royce M.
+
+**CVE-2026-5172 — Crash por RRSIG malformado**. Un registro RRSIG malicioso puede crashear dnsmasq. DoS remoto, explotable sin autenticación.
+
+## La parte que da miedo: el tsunami de IA
+
+Simon Kelley, el maintainer, no se anda con rodeos en su anuncio:
+
+> "Ha habido una revolución en la investigación de seguridad basada en IA y he pasado muchísimo tiempo en los últimos dos meses lidiando con reportes de bugs, filtrando duplicados (¡tantos duplicados!) y clasificando bugs."
+
+La palabra "tsunami" es suya. La usa para describir el volumen de reportes generados por herramientas de IA que están fuzzeando y analizando código fuente automáticamente. No para.
+
+El problema no es que la IA encuentre bugs —eso es objetivamente bueno. El problema es la escala:
+
+1. **Duplicados masivos**. Múltiples herramientas de IA encuentran el mismo bug y generan reportes distintos. El maintainer tiene que leerlos todos para darse cuenta de que hablan de lo mismo.
+
+2. **Falsos positivos**. La IA no siempre acierta. Cada falso positivo consume tiempo de triage.
+
+3. **Coordinación imposible**. Con este volumen, el modelo tradicional de "embargo + coordinación con vendors + backport" se rompe. El propio Kelley dice que los embargos largos "parecen inútiles" cuando sabes que los malos también tienen acceso a estas herramientas.
+
+4. **El maintainer se quema**. Un proyecto con un solo maintainer principal no puede procesar cientos de reportes al mes. La asimetría es brutal: generar un reporte con IA cuesta segundos; verificarlo cuesta horas.
+
+## Cómo funciona el fuzzing asistido por IA
+
+Para entender la magnitud, hay que ver cómo trabajan estas herramientas. No es magia: es una combinación de fuzzing tradicional con cobertura guiada y modelos de lenguaje que entienden el código.
+
+Un pipeline típico (conceptual, no específico de ninguna herramienta) sería:
+
+```python
+import subprocess
+import tempfile
+import os
+
+def fuzz_dnsmasq_config(config: str) -> dict:
+    """
+    Ejecuta dnsmasq con una configuración generada por IA
+    y captura crashes/ASAN reports.
+    
+    Nota: este es un ejemplo conceptual. Las herramientas
+    reales de fuzzing usan AFL++, libFuzzer o Honggfuzz
+    con instrumentación de cobertura.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode='w', suffix='.conf', delete=False
+    ) as f:
+        f.write(config)
+        config_path = f.name
+
+    try:
+        result = subprocess.run(
+            ['dnsmasq', '--test', '-C', config_path],
+            capture_output=True, text=True, timeout=5
+        )
+        return {
+            'crashed': result.returncode != 0,
+            'stderr': result.stderr,
+            'config': config
+        }
+    except subprocess.TimeoutExpired:
+        return {'crashed': False, 'timeout': True, 'config': config}
+    finally:
+        os.unlink(config_path)
+```
+
+La diferencia con el fuzzing tradicional es que el modelo de lenguaje **genera inputs semánticamente válidos**. En vez de mutar bytes aleatorios, genera consultas DNS sintácticamente correctas pero con combinaciones de flags, longitudes y tipos de registro que ningún humano probaría.
+
+El resultado: se encuentran bugs que han sobrevivido 20 años de revisión manual. Y se encuentran por docenas. A la vez.
+
+## Mi opinión
+
+Esto es bueno y es malo a la vez. Y creo que tenemos que hablar de ambas caras.
+
+**Lo bueno**: software más seguro. dnsmasq lleva décadas en producción y tenía bugs triviales que nadie había visto. Si la IA los encuentra antes que los atacantes, ganamos todos. Los parches ya están publicados, dnsmasq 2.92rel2 está disponible y la 2.93 está en camino. Si tienes dnsmasq en algún sitio, **actualiza ya**.
+
+**Lo malo**: el modelo de open source actual no está preparado para esto. Simon Kelley es una persona. Mantiene dnsmasq desde hace más de 20 años. No tiene un equipo de seguridad, no tiene presupuesto, no tiene capacity para procesar cientos de reportes. Si el volumen sigue creciendo —y todo indica que sí— los maintainers van a quemarse o van a ignorar reportes. Ninguna de las dos opciones es buena.
+
+**Lo que hace falta**: herramientas de deduplicación automática. Si cinco IAs encuentran el mismo buffer overflow, el maintainer debería recibir un solo reporte agrupado. Y quizás —solo quizás— las empresas que se benefician de dnsmasq (básicamente todas las que venden routers, dispositivos IoT o distribuciones Linux) deberían plantearse financiar el mantenimiento.
+
+Porque ahora mismo la ecuación es: tú generas bugs con IA gratis y Simon Kelley los triagea en su tiempo libre. Así no funciona.
+
+## Qué hacer ahora mismo
+
+Si tienes dnsmasq corriendo en producción:
+
+```bash
+# Verifica tu versión
+dnsmasq --version
+
+# En Debian/Ubuntu
+sudo apt update && sudo apt install dnsmasq
+
+# O compila desde fuente
+git clone git://thekelleys.org.uk/dnsmasq.git
+cd dnsmasq
+git checkout v2.92
+make
+sudo make install
+```
+
+La 2.92rel2 tiene todos los parches. La 2.93rc1, que está a punto de salir, incluye refactors más profundos para atacar las causas raíz.
+
+---
+
+El código abierto ha sobrevivido a muchas cosas. Pero esto es nuevo: una avalancha de hallazgos de seguridad generada por máquinas que cae sobre equipos de mantenimiento que son, en el mejor de los casos, dos personas y un script de CI.
+
+No tengo la solución. Pero sí tengo claro que ignorarlo no es una opción.
