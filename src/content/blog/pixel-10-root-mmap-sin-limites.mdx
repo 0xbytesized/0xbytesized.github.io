@@ -1,0 +1,109 @@
+---
+title: "Pixel 10: root con 5 líneas por un mmap sin límites"
+date: "2026-05-15T22:45"
+tags: ["android", "kernel", "seguridad", "exploit", "project-zero"]
+excerpt: "Un bug en el driver VPU del Pixel 10 permite mapear toda la memoria física del kernel desde userspace. Cinco líneas de código bastan para obtener root."
+---
+
+Hace dos días, Seth Jenkins de Google Project Zero publicó el desglose de una cadena de exploits 0-click para el Pixel 10. La parte de escalada de privilegios es una de esas vulnerabilidades que te hacen soltar una carcajada nerviosa: un driver de vídeo que entrega acceso a toda la memoria física del kernel porque a alguien se le olvidó comprobar un tamaño.
+
+## La cadena: dos bugs para dominarlos
+
+El exploit chain completo tiene dos etapas:
+
+1. **CVE-2025-54957**: una vulnerabilidad 0-click en el descodificador Dolby (Universal Dolby Decoder) que afecta a todo Android y se parcheó en enero de 2026. Project Zero ya la había usado contra el Pixel 9 y solo necesitó actualizar offsets para que funcionase en el Pixel 10.
+2. **Escalada a root**: en el Pixel 9 usaban el driver BigWave. En el Pixel 10, ese driver ya no existe — pero hay uno nuevo que lo sustituye.
+
+Aquí es donde la historia se pone buena.
+
+## El driver VPU: un regalo envenenado
+
+El Tensor G5 del Pixel 10 incluye un chip Chips&Media Wave677DV para acelerar decodificación de vídeo. El driver que lo controla se expone en `/dev/vpu` y, según el análisis de Project Zero, lo desarrolla el mismo equipo que creó BigWave.
+
+Seth Jenkins y Jann Horn dedicaron **dos horas** a auditar este driver. Lo que encontraron es casi ofensivo de tan simple.
+
+Esta es la función `vpu_mmap`, el handler de `mmap` del driver:
+
+```c
+static int vpu_mmap(struct file *fp, struct vm_area_struct *vm)
+{
+    unsigned long pfn;
+    struct vpu_core *core =
+        container_of(fp->f_inode->i_cdev, struct vpu_core, cdev);
+
+    vm_flags_set(vm, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+    /* This is a CSRs mapping, use pgprot_device */
+    vm->vm_page_prot = pgprot_device(vm->vm_page_prot);
+    pfn = core->paddr >> PAGE_SHIFT;
+
+    return remap_pfn_range(vm, vm->vm_start, pfn,
+        vm->vm_end - vm->vm_start, vm->vm_page_prot)
+        ? -EAGAIN : 0;
+}
+```
+
+¿Ves el problema? `remap_pfn_range` recibe como tamaño `vm->vm_end - vm->vm_start`, que es **el tamaño que pide userspace en la llamada a `mmap`**. No hay ninguna comprobación que limite este valor al tamaño real de la región de registros MMIO del chip.
+
+La función debería tener algo como:
+
+```c
+if (vm->vm_end - vm->vm_start > VPU_REGION_SIZE)
+    return -EINVAL;
+```
+
+Pero no lo tiene.
+
+## Lo que esto significa en la práctica
+
+El driver expone a userspace la región de registros MMIO del chip VPU, ubicada en una dirección física concreta. Al llamar a `mmap` con un tamaño mayor que esa región, `remap_pfn_range` sigue mapeando — y lo que hay a continuación son páginas de memoria física del sistema.
+
+La imagen del kernel (`.text`, `.data`, todo) está en una dirección física más alta que los registros del VPU. Basta con pedir un `mmap` suficientemente grande para que el área mapeada cubra también el kernel entero.
+
+Y como en los Pixel el kernel **siempre** está en la misma dirección física, no hace falta ni escanear la memoria para encontrarlo. Sabes exactamente dónde está relativo al inicio de tu mapping.
+
+El exploit conceptual se reduce a esto:
+
+```c
+int fd = open("/dev/vpu", O_RDWR);
+
+// Mapeamos mucha más memoria de la que deberíamos poder
+size_t map_size = VPU_REGION_SIZE + KERNEL_SIZE;
+void *map = mmap(NULL, map_size, PROT_READ | PROT_WRITE,
+                 MAP_SHARED, fd, 0);
+
+// El kernel está a un offset conocido desde el inicio del mapping
+void *kernel_base = map + KERNEL_OFFSET_FROM_VPU;
+
+// A partir de aquí, puedes leer y escribir cualquier cosa del kernel
+// Por ejemplo, sobreescribir una syscall para elevar privilegios
+```
+
+Project Zero afirma que conseguir read-write arbitrario sobre el kernel requirió **5 líneas de código** (sin contar el boilerplate de open y mmap). El exploit completo se escribió en menos de un día.
+
+## Contexto: por qué esto es peor de lo que parece
+
+Un bug así es el santo grial de la explotación de kernel. Normalmente, para pasar de una vulnerabilidad en userspace a ejecución en kernel necesitas encadenar varias técnicas: heap spraying, bypass de KASLR, construir primitivas de lectura y escritura poco a poco, robar credenciales de proceso…
+
+Aquí no. Aquí tienes la RAM del kernel servida en bandeja. Sin KASLR (la dirección física es fija), sin race conditions, sin heap feng shui.
+
+Y lo peor: el equipo que desarrolló este driver es el mismo que ya había metido bugs similares en BigWave (el driver que Project Zero explotó para el Pixel 9). Cinco meses después del aviso, entregaron un driver nuevo con una vulnerabilidad aún más burda.
+
+## La parte buena: el parcheo fue rápido
+
+Hay que reconocerle a Android VRP una mejora notable. Jenkins reportó el bug el 24 de noviembre de 2025 y lo calificaron como severidad **High** (el bug equivalente de BigWave lo habían calificado como **Moderate**, que era ridículo). El parche llegó en 71 días, dentro del boletín de seguridad de febrero de 2026.
+
+Es la primera vez que un bug de driver Android reportado por este investigador se parchea en menos de 90 días desde que el vendor tiene conocimiento. Es una mejora real del proceso de triaje.
+
+## Mi opinión
+
+Este caso me deja una sensación agridulce.
+
+Por un lado, la velocidad de respuesta de Android VRP es genuinamente mejor. De Moderate a High, de meses a 71 días. Eso es progreso medible y hay que celebrarlo.
+
+Por otro lado, el patrón es desesperante: mismo equipo de desarrollo, mismo tipo de bug (exposición de región de memoria sin comprobación de límites), misma clase de impacto (root desde userspace sin esfuerzo). Cinco meses después del fiasco de BigWave.
+
+Esto no es un fallo sutil de lógica concurrente ni un off-by-one que requiere condiciones de carrera imposibles. Es un `mmap` que no comprueba el tamaño. Es el tipo de cosa que cualquier auditoría mínimamente competente debería pillar en la primera pasada — y de hecho Project Zero lo pilló en dos horas.
+
+La pregunta incómoda es: ¿cuántos drivers más de este equipo hay en dispositivos Android sin auditar? Porque si entregaron dos drivers consecutivos con bugs de este calibre, la apuesta segura es que hay más.
+
+Mientras tanto, si tienes un Pixel 10, asegúrate de tener el parche de seguridad de febrero de 2026 o posterior instalado. Y si desarrollas drivers de kernel, por favor: comprueba los tamaños en tus handlers de `mmap`. No es difícil. Son dos líneas.
