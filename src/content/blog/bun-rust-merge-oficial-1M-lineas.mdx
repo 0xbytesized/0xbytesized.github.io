@@ -1,0 +1,130 @@
+---
+title: "Bun ya es Rust: mergeado el rewrite de 1M de líneas"
+date: "2026-05-15T06:00"
+tags: ["bun", "rust", "zig", "javascript", "runtime"]
+excerpt: "El PR #30412 de Bun se ha mergeado a main: más de un millón de líneas de Rust reemplazan el Zig original. El runtime de JS más rápido cambia de lenguaje."
+---
+
+Ayer por la tarde, Jarred Sumner hizo clic en "Merge pull request". El PR #30412 de Bun —"Rewrite Bun in Rust"— pasó de rama experimental a main con 1.009.257 adiciones y 2.188 archivos modificados. Diez días después del experimento inicial con Claude, la reescritura es oficial.
+
+Lo que empezó como una curiosidad de fin de semana —una rama llamada `claude/phase-a` con 774K líneas que ni compilaban— es ahora el código que corre en `bun upgrade --canary`. La migración de Zig a Rust ha dejado de ser un "¿y si...?" para convertirse en la realidad del runtime de JavaScript más rápido del ecosistema.
+
+## Los números del merge
+
+El PR se abrió el 8 de mayo y se mergeó el 14. Seis días desde la apertura hasta el merge, diez días desde el primer commit experimental del 4 de mayo. Las cifras son contundentes:
+
+- **1.009.257 líneas añadidas**, 4.024 eliminadas
+- **2.188 archivos modificados**
+- **Binario entre 3 y 8 MB más pequeño**
+- **Rendimiento entre neutro y más rápido** que la versión en Zig
+- **Suite de tests completa pasando** en todas las plataformas
+
+Jarred lo resumió en el cuerpo del PR con la sobriedad de quien acaba de terminar una maratón:
+
+> "Pasa la suite de tests preexistente en todas las plataformas (y arregla varios memory leaks y tests flakey), el binario se encoge entre 3 y 8 MB, los benchmarks están entre neutros y más rápidos — y lo más importante: ahora tenemos herramientas asistidas por el compilador para detectar y prevenir bugs de memoria."
+
+Esa última frase es la clave. No es una reescritura por capricho ni por hype. Es una reescritura para comprar seguridad.
+
+## Por qué Zig no era suficiente
+
+Bun se escribió originalmente en Zig por una razón pragmática: Zig ofrece control manual de memoria sin la verbosidad de C y con una interoperabilidad excelente con código C existente. Para un runtime de JavaScript que necesita exprimir cada ciclo de CPU, Zig era una elección sensata.
+
+Pero Zig tiene un problema: no tiene borrow checker. La gestión de memoria depende del programador. Y Bun, como cualquier runtime de JS, está lleno de punteros a objetos del heap que el garbage collector de JavaScript (JavaScriptCore, en este caso) puede mover o liberar en cualquier momento.
+
+El resultado: años de bugs de memoria difíciles de cazar. Memory leaks. Use-after-free. Dobles liberaciones. Bugs que se escapaban en producción y costaban días de debugging.
+
+Rust no elimina todos estos problemas —cualquier cosa que cruce la frontera JS sigue siendo territorio sin ley— pero sí elimina categorías enteras de bugs. Las referencias nulas, las condiciones de carrera con datos compartidos, los accesos a memoria liberada. Todo eso lo pilla el compilador antes de que llegue a CI.
+
+## Cómo se hizo: Zig → Rust con esteroides
+
+La migración no fue un port manual línea a línea. El proceso merece un artículo aparte, pero la versión resumida es esta:
+
+1. **Guía de porting (576 líneas):** Jarred escribió un documento mapeando idiomáticamente cada patrón de Zig a Rust. Las structs de Zig se convierten en structs de Rust, los allocators de Zig en referencias a `std::alloc::Allocator`, los slices en `&[T]`.
+
+2. **Claude como traductor:** El modelo de Anthropic procesó el código Zig por lotes, aplicando la guía de porting. No se trataba de "reescribe esto en Rust" sino de seguir un mapeo preciso con reglas explícitas.
+
+3. **Iteración humana:** Jarred revisaba cada lote generado, ajustaba la guía, corregía errores sistemáticos y volvía a lanzar. El ciclo era: generar → compilar → arreglar errores del compilador → ejecutar tests → corregir guía → repetir.
+
+El resultado es un codebase que mantiene la misma arquitectura. Mismas estructuras de datos, mismos patrones. Bun sigue usando pocas librerías de terceros. No hay async Rust. Es Bun con otro lenguaje debajo.
+
+## Lo que cambia para los usuarios
+
+Si usas Bun a diario, la transición debería ser invisible. El comando es el mismo, las APIs son las mismas, los scripts siguen funcionando igual. La diferencia está en lo que no ves:
+
+```bash
+# Instalar la versión canary con el rewrite en Rust
+bun upgrade --canary
+
+# Todo sigue funcionando igual
+bun run index.ts
+bun test
+bun build ./src/index.ts --outdir ./dist
+```
+
+El binario es más pequeño. El arranque es igual o más rápido. Y cuando algo falle —porque todo software falla— las herramientas de diagnóstico de Rust (como los backtraces con información de tipos) hacen que el debugging sea más llevadero.
+
+Para los que usan Bun como herramienta de build en CI, la buena noticia es que `bun install` y `bun build` pasan los mismos tests y producen los mismos resultados. No hay breaking changes.
+
+## Las 10.428 veces que Rust dice "no confío en ti"
+
+Hay un dato que ha generado debate en Hacker News: el nuevo código de Bun contiene **10.428 bloques `unsafe`** repartidos en 736 archivos. Para quien no conozca Rust: `unsafe` es una palabra clave que le dice al compilador "aquí no me ayudes, sé lo que hago". Es una puerta trasera que desactiva las garantías de seguridad de memoria.
+
+¿Es esto un problema? Depende de a quién le preguntes. Los puristas de Rust ven 10.428 bloques unsafe y se echan las manos a la cabeza. Los pragmáticos responden: "son 10.428 sitios donde el peligro está acotado y documentado, en vez de estar repartido por todo el código sin señalizar".
+
+Mi opinión: un runtime de JavaScript necesita `unsafe`. No hay forma de implementar un binding a JavaScriptCore sin manipular punteros crudos. La diferencia es que ahora cada manipulación peligrosa está encapsulada en un bloque `unsafe` explícito. El resto del código —la mayor parte— se beneficia de las garantías del borrow checker.
+
+Pongo un ejemplo. En la versión Zig, cualquier función que recibiera un puntero a un objeto JS podía accidentalmente usarlo después de que el GC lo liberara. En la versión Rust, ese puntero vive dentro de un bloque `unsafe` y el compilador te obliga a justificar por qué es seguro usarlo ahí. El resto del código trabaja con referencias que el compilador verifica.
+
+```rust
+// Ejemplo conceptual de cómo Bun maneja punteros a objetos JS en Rust
+// Los punteros crudos viven en bloques unsafe delimitados
+// El resto del código usa wrappers seguros
+
+pub struct JSValue {
+    // El puntero real a un JSObjectRef de JavaScriptCore
+    // Solo se accede dentro de bloques unsafe
+    inner: *const std::ffi::c_void,
+}
+
+impl JSValue {
+    /// Crea un JSValue desde un puntero crudo.
+    /// # Safety
+    /// El caller debe garantizar que el puntero es válido
+    /// y que el GC no lo liberará mientras este JSValue exista.
+    pub unsafe fn from_raw(ptr: *const std::ffi::c_void) -> Self {
+        JSValue { inner: ptr }
+    }
+
+    /// Obtiene una propiedad del objeto JS.
+    /// La operación insegura está encapsulada aquí.
+    pub fn get_property(&self, name: &str) -> Option<JSValue> {
+        // Aquí es donde ocurre el unsafe, encapsulado y auditado
+        let result = unsafe {
+            // Llamada a la API de JavaScriptCore
+            JSObjectGetProperty(
+                self.inner as *const _,
+                create_property_name(name),
+            )
+        };
+        if result.is_null() {
+            None
+        } else {
+            Some(unsafe { JSValue::from_raw(result) })
+        }
+    }
+}
+```
+
+## Mi veredicto
+
+He seguido esta historia desde el día 1. El 4 de mayo escribí sobre mis dudas con la compra de Anthropic. El 5 de mayo cubrí el experimento inicial de la migración. El 10 de mayo celebré que los tests pasaran al 99.8%.
+
+Hoy, con el PR mergeado, mi opinión es esta: **Bun ha hecho lo correcto por las razones correctas.**
+
+No es un rewrite por hype. No es Rust por moda. Es una decisión de ingeniería tomada por alguien que conoce su codebase mejor que nadie y que ha pasado demasiadas horas cazando bugs de memoria que un compilador podría haber pillado.
+
+La comunidad reaccionará dividida, como siempre. Los que llevan años pidiendo un runtime de JS en Rust lo verán como una victoria. Los que preferían Zig lo verán como una traición. Los pragmáticos —como yo— harán `bun upgrade --canary` y seguirán trabajando.
+
+Lo que de verdad importa es que Bun sigue siendo Bun. Rápido, compatible, sin configuración. Solo que ahora con un compilador que le cubre las espaldas.
+
+Y para un proyecto con 90.000 estrellas en GitHub y millones de desarrolladores que dependen de él, eso no es poca cosa.
