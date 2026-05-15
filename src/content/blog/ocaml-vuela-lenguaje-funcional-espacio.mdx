@@ -1,0 +1,127 @@
+---
+title: "OCaml ya vuela: el lenguaje funcional que llegó al espacio"
+date: "2026-05-15T16:00"
+tags: ["ocaml", "functional-programming", "space", "security", "systems-programming"]
+excerpt: "El 23 de abril de 2026, una pila de protocolos CCSDS escrita en OCaml puro arrancó en órbita baja terrestre. Así es como un lenguaje funcional pasó de las aulas al espacio."
+---
+
+El 23 de abril de 2026, una pila de protocolos escrita completamente en OCaml arrancó en órbita baja terrestre. El proyecto se llama Borealis y corre dentro del módulo ClusterGate-2 de DPhi Space, en un satélite que da una vuelta a la Tierra cada noventa minutos. Thomas Gazagnaire y Virgile Robles, de la startup Parsimoni, lo construyeron durante las navidades. El 23 de abril vieron esto en la consola de misión:
+
+```
+2026-04-23 18:48:06  SpaceOS/Borealis (BPv7, BPSec, OTAR) by Parsimoni
+2026-04-23 18:48:06  ClusterGate-2 proxy [single iteration]
+2026-04-23 18:48:09  Telemetry health: { ... "status": "healthy" }
+```
+
+No es un experimento académico. Es un daemon real que habla CCSDS — la familia de protocolos que conecta naves espaciales con tierra — implementado íntegramente en OCaml, con cifrado extremo a extremo y rotación de claves post-cuánticas. Y lo más bestia: corre como tenant en hardware compartido con otros payloads, defendiéndose no con aislamiento de contenedores, sino con un sobre criptográfico alrededor de cada paquete.
+
+## ¿Por qué OCaml?
+
+La pregunta razonable es: ¿por qué alguien usaría un lenguaje funcional para software de vuelo?
+
+La respuesta corta: memoria segura. Alrededor del 70% de los CVEs graves en C/C++ vienen de corrupción de memoria, según el análisis histórico de Microsoft MSRC. La alternativa C establecida en este dominio, NASA CryptoLib, ha tenido sus propios bugs de heap overflow en el parser de tramas TC. Un stack en OCaml elimina esa clase de superficie de ataque del código de aplicación por construcción.
+
+La respuesta larga es más interesante. OCaml te da un sistema de tipos que convierte errores de protocolo en errores de compilación. Veamos cómo.
+
+## El tipo correcto para el paquete correcto
+
+El núcleo del stack CCSDS es el Space Packet: una cabecera binaria de 6 bytes que contiene el identificador de aplicación (APID), el tipo de paquete y la longitud. En C, desempaquetarías esto con aritmética de punteros y máscaras de bits. En OCaml, modelas el dominio con tipos:
+
+```ocaml
+(* Tipos phantom para distinguir telemetría de comandos *)
+type telemetry
+type command
+
+type 'kind space_packet = {
+  apid : int;
+  sequence_count : int;
+  length : int;
+}
+
+(* Decodificar una cabecera de 6 bytes en un registro tipado *)
+let decode_primary_header (buf : bytes) : _ space_packet =
+  let apid = ((Char.code buf.[0] land 0x07) lsl 8) lor (Char.code buf.[1]) in
+  let seq  = ((Char.code buf.[2] lsl 8) lor (Char.code buf.[3])) land 0x3FFF in
+  let len  = ((Char.code buf.[4] lsl 8) lor (Char.code buf.[5])) in
+  { apid; sequence_count = seq; length = len }
+```
+
+Fíjate en el tipo de retorno: `_ space_packet`. El underscore es un tipo existencial débil — el compilador no te deja asumir si es telemetría o comando. Para usar ese paquete, tienes que despacharlo explícitamente por APID con una función que devuelva el tipo concreto. El compilador no te deja mezclar canales de telemetría con canales de comando. Eso es un bug menos en producción y en órbita los bugs se pagan caros.
+
+## Máquinas de estados que no mienten
+
+El segundo truco que usa Borealis son los GADTs (tipos algebraicos de datos generalizados). La idea: codificar los estados válidos de un protocolo en el sistema de tipos para que el compilador rechace transiciones imposibles.
+
+```ocaml
+type _ session_state =
+  | Unauthenticated : [`unauthenticated] session_state
+  | KeyExchange : [`key_exchange] session_state
+  | Operational : [`operational] session_state
+
+type _ session = {
+  state : 'a session_state;
+  keys  : cryptographic_context option;
+}
+
+(* Solo se puede enviar telemetría en estado operacional *)
+let send_telemetry : [ `operational ] session -> telemetry_packet -> unit =
+  fun session packet ->
+    (* La clave existe porque el tipo garantiza Operational *)
+    let ctx = Option.get session.keys in
+    encrypt_and_send ctx packet
+```
+
+Si intentas llamar a `send_telemetry` con una sesión en estado `Unauthenticated`, el compilador te escupe un error de tipo. No necesitas tests para verificar esa invariante: el tipo ya la demuestra.
+
+Cuando Gazagnaire dice que priorizaron "corrección sobre rendimiento", se refiere exactamente a esto. Cada invariante que metes en los tipos es una clase de bugs que nunca llega a producción. En un satélite donde no puedes hacer `apt upgrade` ni reiniciar, eso marca la diferencia entre una misión de diez años y un ladrillo orbital.
+
+## El sobre criptográfico
+
+Borealis no confía en el aislamiento de contenedores porque corre como huésped en hardware compartido. El módulo ClusterGate-2 aloja múltiples tenants sobre un mismo kernel Linux y los CVEs de kernel que rompen el aislamiento entre tenants son una constante: Dirty Pipe en 2022, Copy Fail en abril de 2026 y una docena más entre medias.
+
+La defensa de Borealis es un sobre criptográfico BPSec alrededor de cada bundle BPv7. Cada comando, muestra de telemetría y chunk de imagen se serializa en un bundle, se envuelve en dos bloques de extensión — uno cifra, otro autentica — y se escribe a disco como bytes opacos. El operador del satélite solo ve bytes; nada en la ruta de encaminamiento puede leer, modificar o suplantar el contenido.
+
+```ocaml
+(* Envolver un bundle con BPSec: esquema conceptual *)
+let protect_bundle ~encrypt ~authenticate (bundle : bundle) : protected_bundle =
+  let payload  = Bundle.serialize bundle in
+  let ciphered = encrypt payload in        (* AES-GCM con clave simétrica *)
+  let tag      = authenticate ciphered in  (* HMAC-SHA256 para integridad *)
+  { encrypted = ciphered; auth_tag = tag; seq = Counter.next () }
+```
+
+Para la autenticación de comandos a largo plazo, Borealis usa ML-DSA-65, el estándar post-cuántico de NIST (FIPS 204). Las claves viven entre diez y quince años — la vida útil del satélite — y se rotan mediante OTAR (Over-The-Air Rekeying) sin necesidad de reflashear. Será la primera demostración pública de OTAR post-cuántico en órbita.
+
+## OxCaml: el truco de rendimiento
+
+Aquí viene la parte que más me gusta como ingeniero. OCaml puro es seguro, pero tiene GC. En el hot path de despacho CCSDS — donde cada paquete pasa por un decode de cabecera y un ruteo por APID — las alocaciones de heap por iteración generan presión de GC que se traduce en jitter.
+
+OxCaml, el fork experimental de Jane Street, añade anotaciones de localidad (`local_`) que le dicen al compilador "esta alocación no escapa de la función, ponla en el stack":
+
+```ocaml
+(* Sin OxCaml: alocación en el heap, presión de GC *)
+let dispatch_packet buf =
+  let header = decode_primary_header buf in  (* heap allocation *)
+  route_by_apid header.apid header
+
+(* Con OxCaml: alocación en el stack, cero GC *)
+let dispatch_packet_fast buf =
+  let local_ header = decode_primary_header buf in  (* stack allocation *)
+  route_by_apid_local header.apid header
+```
+
+El resultado medido: la latencia p99.9 baja de 29 ns a 9 ns por paquete y las recolecciones menores de GC pasan de 394 a **cero** sobre 25 millones de paquetes. La mejora no está en throughput bruto — el stack sigue siendo rápido en ambos casos — sino en jitter. Cuando tienes un presupuesto de microsegundos por paquete, eliminar las pausas de GC es el juego completo.
+
+## Mi veredicto
+
+Llevo años oyendo que los lenguajes funcionales son para trabajos académicos y que "en el mundo real" se usa C++ o Rust. Borealis es la réplica definitiva a ese argumento.
+
+Hay tres cosas que me parecen brillantes del enfoque:
+
+**Primero, la apuesta por corrección sobre moda.** No usaron Rust porque no necesitaban el borrow checker para este dominio; OCaml con GADTs y tipos phantom les da garantías más expresivas para máquinas de estados de protocolo. Cada herramienta para su problema.
+
+**Segundo, la herencia de MirageOS.** El stack no salió de la nada en tres meses. Viene de una década de bibliotecas de sistema en OCaml que ya corren en Docker Desktop en cientos de millones de portátiles. La gracia de un library OS es que las mismas piezas que funcionan en tierra funcionan en órbita. Eso es ingeniería de verdad, no un prototipo de feria.
+
+**Tercero, el modelo de seguridad por capas.** No confían en una sola defensa: tipos seguros en la aplicación, cifrado extremo a extremo en los bundles, primitivas criptográficas verificadas formalmente (libcrux, fiat-crypto), validadores de formato binario con verificación en F* (EverParse) y un pipeline de interop que compara salidas byte a byte contra implementaciones de referencia. Cada capa es independiente; si una falla, las demás aguantan.
+
+Si haces software de sistemas, satélites o cualquier cosa donde un bug cueste dinero de verdad, merece la pena leer el artículo completo de Gazagnaire. El futuro del software espacial no va de lenguajes de moda. Va de tipos que no mienten y bibliotecas que llevan una década en producción. Y OCaml, con sus treinta años a cuestas, acaba de demostrar que puede con ello.
