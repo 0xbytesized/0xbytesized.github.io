@@ -1,0 +1,133 @@
+---
+title: "Needle: 26M parámetros, sin FFN, tool calling imbatible"
+date: "2026-05-16T10:00"
+tags: ["ia", "tool-calling", "modelos", "open-source", "nlp"]
+excerpt: "Cactus Compute ha destilado Gemini 3.1 en un modelo de 26M de parámetros sin capas feed-forward que supera a modelos 10× más grandes en tool calling."
+---
+
+Hace unos días me topé con un proyecto que me hizo parar de scroll. Cactus Compute ha publicado **Needle**, un modelo de 26 millones de parámetros destilado de Gemini 3.1 que está diseñado para una sola cosa: **tool calling**. Y lo hace tan bien que humilla a modelos con 10 veces más parámetros.
+
+Lo que me voló la cabeza no fue solo el rendimiento. Fue la arquitectura: **cero capas feed-forward**. Nada de FFN. Solo atención. Y aun así funciona.
+
+## ¿Qué es exactamente Needle?
+
+Needle es un modelo encoder-decoder entrenado específicamente para entender qué herramienta invocar y con qué argumentos cuando le pasas un prompt y una lista de tools disponibles. No es un modelo conversacional. No te va a dar charla sobre el sentido de la vida. Su único trabajo es decidir qué función llamar.
+
+Las cifras:
+
+- **26M parámetros** — cabe en cualquier lado
+- **Encoder de 12 capas**, decoder de 8 capas
+- **Sin capas feed-forward** en ninguna parte
+- d_model = 512, 8 cabezas de atención (GQA 8H/4KV)
+- Vocabulario de 8192 tokens (SentencePiece BPE)
+- Normalización ZCRMSNorm (zero-centered, inicializada a cero)
+- Precisión bfloat16 con cuantización INT4 QAT durante entrenamiento
+
+El preentrenamiento fueron 200B de tokens en 16 TPU v6e durante **27 horas**. El post-entrenamiento para tool calling añadió 2B tokens más en solo **45 minutos**. En total, menos de 29 horas de cómputo para tener un modelo funcional.
+
+## ¿Por qué eliminar las capas FFN?
+
+Esta es la parte que más me interesa. En un transformer clásico, cada bloque tiene una capa de self-attention seguida de una feed-forward network (FFN). La FFN suele ser donde viven la mayoría de los parámetros del modelo. Eliminarlas es como construir un coche sin motor de combustión y descubrir que va más rápido.
+
+El paper que acompaña a Needle (Simple Attention Networks) propone que para ciertas tareas — especialmente las que requieren emparejamiento de patrones más que razonamiento profundo — las capas FFN son redundantes. La atención por sí sola, con residuals bien diseñados, puede hacer el trabajo.
+
+Y los números les dan la razón. Needle supera a:
+
+- **FunctionGemma-270m** (10× más parámetros)
+- **Qwen-0.6B** (23× más parámetros)
+- **Granite-350m** (13× más parámetros)
+- **LFM2.5-350m** (13× más parámetros)
+
+Todo esto en benchmarks de single-shot function calling. En una sola pasada, sin conversación previa, Needle acierta más veces qué tool llamar y con qué argumentos.
+
+## Cómo se usa Needle
+
+El setup es mínimo. Clonas el repo, ejecutas el script de setup y ya tienes un playground web:
+
+```bash
+git clone https://github.com/cactus-compute/needle.git
+cd needle && source ./setup
+needle playground
+```
+
+Esto abre una interfaz en `http://127.0.0.1:7860` desde la que puedes probar el modelo con tus propias tools e incluso hacer fine-tuning con un solo clic.
+
+Si quieres usarlo desde Python, la API es directa:
+
+```python
+from needle import SimpleAttentionNetwork, load_checkpoint, generate, get_tokenizer
+
+params, config = load_checkpoint("checkpoints/needle.pkl")
+model = SimpleAttentionNetwork(config)
+tokenizer = get_tokenizer()
+
+result = generate(
+    model, params, tokenizer,
+    query="¿Qué tiempo hace en Madrid?",
+    tools='[{"name":"get_weather","description":"Obtener el clima actual de una ciudad.","parameters":{"location":{"type":"string","description":"Nombre de la ciudad.","required":true}}}]',
+    stream=False,
+)
+print(result)
+# [{"name":"get_weather","arguments":{"location":"Madrid"}}]
+```
+
+Tres líneas de código y ya tienes tool calling funcional. Sin APIs externas, sin depender de OpenAI o Anthropic. Todo local.
+
+## Fine-tuning con tus propias tools
+
+Aquí es donde Needle se pone interesante de verdad. Puedes entrenarlo para que entienda las tools específicas de tu aplicación. El formato es un JSONL donde cada línea tiene tres campos: `query`, `tools` y `answers`.
+
+Un ejemplo con dos tools disponibles:
+
+```jsonl
+{"query": "Enciende las luces del salón", "tools": "[{\"name\":\"get_weather\",\"description\":\"Obtener el clima actual.\",\"parameters\":{\"location\":{\"type\":\"string\",\"required\":true}}},{\"name\":\"control_lights\",\"description\":\"Controlar luces inteligentes.\",\"parameters\":{\"room\":{\"type\":\"string\",\"description\":\"Habitación.\",\"required\":true},\"action\":{\"type\":\"string\",\"description\":\"on u off.\",\"required\":true}}}]", "answers": "[{\"name\":\"control_lights\",\"arguments\":{\"room\":\"salón\",\"action\":\"on\"}}]"}
+```
+
+Necesitas al menos **120 ejemplos por tool** (100 train, 10 validación, 10 test) para que el fine-tuning funcione sin overfitting. Es un requisito bastante razonable considerando que hablamos de un modelo de 26M — generar 120 ejemplos variados de "enciende la luz del dormitorio" no es precisamente un suplicio.
+
+El entrenamiento se lanza con:
+
+```bash
+needle finetune data.jsonl
+```
+
+Y para usar el modelo fine-tuneado desde Python:
+
+```python
+params, config = load_checkpoint("checkpoints/needle_finetuned_abc123_best.pkl")
+model = SimpleAttentionNetwork(config)
+result = generate(
+    model, params, get_tokenizer(),
+    query="Apaga las luces de la cocina",
+    tools='[{"name":"control_lights","description":"Controlar luces inteligentes.","parameters":{"room":{"type":"string","required":true},"action":{"type":"string","required":true}}}]',
+    stream=False,
+)
+```
+
+El checkpoint se guarda automáticamente y puedes cargarlo igual que el modelo base.
+
+## Rendimiento en producción
+
+Cactus Compute tiene su propio runtime de inferencia llamado [Cactus](https://github.com/cactus-compute/cactus) y con él Needle alcanza **6000 tokens por segundo en prefill y 1200 tokens por segundo en decodificación**. Para un modelo que cabe en la memoria de un smartwatch, son números excelentes.
+
+El caso de uso que pintan es claro: asistentes personales en dispositivos pequeños. Tu reloj, tus gafas, tu teléfono. Dispositivos donde no puedes ejecutar un LLM de 7B, pero sí un modelo de 26M especializado en entender qué acción ejecutar.
+
+## Lo que Needle NO es
+
+Conviene ser claro: Needle no es un modelo conversacional. Si le preguntas por la filosofía de Kant, no va a responderte. Su scope es limitado a propósito — es un clasificador de intenciones con esteroides.
+
+Los propios autores lo dicen: "Esos modelos tienen más scope y capacidad y destacan en entornos conversacionales. Además, los modelos pequeños pueden ser caprichosos."
+
+Es decir, si necesitas un chatbot completo, Needle no es tu herramienta. Pero si necesitas un componente de tool calling que funcione rápido, barato y en local, la propuesta es sólida.
+
+## Mi veredicto
+
+Me gusta Needle porque es honesto. No intenta ser un modelo generalista. No promete AGI en 26M parámetros. Es una herramienta afilada para un trabajo concreto y lo hace mejor que alternativas mucho más pesadas.
+
+La decisión de eliminar las capas FFN me parece valiente y bien argumentada. En un ecosistema donde todo el mundo añade más capas, más parámetros y más cómputo, alguien se ha parado a preguntar "¿y si quitamos esto?" y ha demostrado que sobraba. Eso es ingeniería de verdad.
+
+El fine-tuning local es otro acierto. Que puedas adaptar el modelo a tus propias tools desde tu portátil, sin depender de APIs de pago, baja la barrera de entrada de forma brutal. No necesitas ser una FAANG para tener tool calling inteligente en tu producto.
+
+¿Lo usaría en producción ya mismo? Depende del caso de uso. Para un asistente personal con un conjunto acotado de herramientas (clima, luces, calendario, recordatorios) me parece perfectamente viable. Para un sistema con cientos de tools y llamadas encadenadas, necesitaría ver más benchmarks.
+
+Lo que está claro es que Needle marca un camino: modelos pequeños, especializados, open-source y ejecutables en local. Ojalá ver más proyectos así.
