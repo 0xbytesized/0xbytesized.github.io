@@ -1,0 +1,100 @@
+---
+title: "Erlang/OTP 29: records nativos y cifrado post-cuántico"
+date: "2026-05-16T04:30"
+tags: ["erlang", "beam", "functional-programming", "release", "systems"]
+excerpt: "Erlang/OTP 29 trae records nativos, io_ansi para terminales, cifrado post-cuántico por defecto y SSH blindado. La BEAM se actualiza sin perder su esencia."
+---
+
+El 13 de mayo de 2026, el equipo de Erlang/OTP publicó la versión 29, una _major release_ que trae el mayor número de cambios al lenguaje desde la introducción del JIT en OTP 24. Henrik Nord firmó el anuncio. Lo que hay dentro no es una colección de retoques cosméticos: son cambios estructurales que afectan a la sintaxis, al sistema de tipos en runtime, a la seguridad por defecto y a cómo escribimos aplicaciones de terminal.
+
+He pasado la mañana leyendo las notas de release, los EEPs relevantes y algunos hilos de la comunidad. Esto es lo que importa.
+
+## Records nativos: el fin de las tuplas disfrazadas
+
+Desde que Erlang existe, los records han sido azúcar sintáctico sobre tuplas. Escribías `-record(person, {name, age})` y el compilador lo convertía en `{person, Name, Age}`. Funcionaba, pero tenía grietas: si añadías un campo en mitad de la definición, el índice de todos los campos cambiaba y cualquier código compilado contra la versión anterior cascaba silenciosamente.
+
+El EEP-79 introduce los _native records_, un tipo de dato real en tiempo de ejecución. Ya no son tuplas con nombre; son estructuras con acceso por nombre, no por posición. Esto significa que:
+
+```erlang
+% Con records tradicionales (tuplas), añadir un campo
+% en medio rompe el orden:
+-record(person_v1, {name, age}).       % {person, Name, Age}
+-record(person_v2, {name, email, age}). % ¡Age ahora es posición 3, no 2!
+
+% Con native records (experimental en OTP 29), el acceso es por nombre,
+% así que añadir email no desplaza el campo age:
+% (sintaxis exacta definida en EEP-79, aún experimental)
+```
+
+La clave está en que los native records sobreviven a cambios de esquema entre versiones de una librería sin recompilar todo el árbol de dependencias. Para sistemas Erlang en producción —donde las _hot code upgrades_ son rutina— esto es un cambio de paradigma.
+
+Van marcados como experimentales en OTP 29 y probablemente también en OTP 30. No los usaría aún en producción, pero el mero hecho de que existan indica hacia dónde va el lenguaje.
+
+## Comprehensions multi-valor y binding de variables
+
+Dos cambios en las list comprehensions que, juntos, cambian cómo escribes pipelines de transformación de datos.
+
+Primero, las comprehensions multi-valor del EEP-78 permiten que cada iteración produzca más de un elemento:
+
+```erlang
+% Cada elemento I genera dos valores en la lista resultante
+1> [-I, I || I <- [1, 2, 3]].
+[-1,1,-2,2,-3,3]
+```
+
+Esto evita el patrón `lists:flatmap` que hasta ahora era necesario para el mismo resultado. El código queda más declarativo y el compilador puede optimizarlo mejor porque entiende la intención.
+
+Segundo, activando el _feature flag_ `compr_assign`, puedes vincular variables intermedias dentro de una comprehension:
+
+```erlang
+% Sin variable intermedia, tendrías que calcular phash2 dos veces o usar flatmap
+1> [H || E <- List, H = erlang:phash2(E), H rem 10 =:= 0].
+```
+
+Es azúcar sintáctico, sí, pero reduce la fricción al filtrar por resultados de cálculos intermedios. En la práctica, te ahorra escribir funciones auxiliares de un solo uso.
+
+## io_ansi: la BEAM se mete en las TUIs
+
+El módulo nuevo `io_ansi` es de esas adiciones que parecen menores pero abren un mundo. Permite emitir secuencias de terminal ANSI/VT para colores, estilos y control de cursor sin depender de librerías externas:
+
+```erlang
+% Un saludo con color usando el nuevo módulo io_ansi
+1> io_ansi:format([red, "¡Hola desde Erlang/OTP 29!"]).
+¡Hola desde Erlang/OTP 29!  % aparece en rojo, con reset automático
+```
+
+No es una revolución técnica —cualquier terminal soporta ANSI desde hace décadas— pero es sintomático. Que Erlang, un lenguaje históricamente asociado a sistemas distribuidos y telecomunicaciones, añada soporte nativo para TUIs indica que la comunidad ve valor en las herramientas de desarrollo y en las interfaces de administración _dentro_ de la BEAM.
+
+Junto con `ct_doctest` —que permite probar los ejemplos de código en la documentación de los módulos— la imagen es clara: OTP 29 también es un _release_ de herramientas para quien escribe Erlang, no solo para quien lo ejecuta.
+
+## Seguridad: SSH blindado, cifrado post-cuántico
+
+Los cambios en seguridad son de los que deberían ser norma y hasta ahora no lo eran.
+
+El demonio SSH ahora deshabilita por defecto los servicios de shell y exec. Traducción: aunque alguien se autentique, no puede ejecutar código Erlang arbitrario a menos que lo hayas configurado explícitamente. El subsistema SFTP también deja de estar habilitado por defecto. Es el principio de "secure by default" aplicado con sentido común.
+
+En SSL, el algoritmo de intercambio de claves preferido pasa a ser `x25519mlkem768`, un híbrido post-cuántico que combina X25519 con ML-KEM-768. Esto significa que las conexiones TLS entre nodos Erlang son resistentes a ataques con ordenadores cuánticos _sin perder compatibilidad_ con peers que solo soporten algoritmos clásicos.
+
+El mensaje es contundente: en 2026, ofrecer shell remoto por defecto en un servidor de aplicaciones es negligencia de diseño. Erlang ha tardado en corregirlo, pero lo ha hecho.
+
+## Nuevos guards y funciones de stdlib
+
+Pequeñas adiciones que suman:
+
+- **`is_integer/3` en guards**: verificas que un valor sea entero _y_ esté en un rango en una sola expresión: `is_integer(X, 0, 100)`.
+- **`rand:shuffle/1` y `rand:shuffle_s/2`**: permutación aleatoria de listas sin depender de librerías externas. Llevaba años echándose en falta.
+- **El compilador ahora advierte sobre `catch`**: llevaba décadas deprecado. En OTP 30, los guards obsoletos como `list(L)` desaparecerán del lenguaje.
+
+## Mi opinión
+
+Erlang/OTP 29 me parece un _release_ honesto. No intenta competir con lenguajes de moda ni promete revolucionar nada. Hace lo que Erlang siempre ha hecho: mejora los cimientos.
+
+Los records nativos son la noticia técnica más relevante. En un ecosistema donde las actualizaciones en caliente son un _selling point_, tener tipos que no se corrompen cuando cambia el esquema es una necesidad, no un lujo. Que lleguen como experimentales es prudente: prefiero que pasen dos años en `experimental` a que rompan sistemas en producción.
+
+Las comprehensions multi-valor y el binding de variables son mejoras de calidad de vida. No cambiarán la arquitectura de tu sistema, pero harán que el código de transformación de datos sea más legible. En un lenguaje donde la inmutabilidad te obliga a crear listas nuevas constantemente, cada reducción de `flatmap` es bienvenida.
+
+El cifrado post-cuántico por defecto es una declaración de principios acertada. Los algoritmos híbridos como `x25519mlkem768` son la estrategia correcta: protegen contra amenazas futuras sin romper la interoperabilidad presente. Y que el SSH venga blindado de fábrica es simplemente sentido común que llega tarde.
+
+La BEAM sigue siendo la BEAM: un runtime diseñado para sistemas que no pueden caerse, con procesos ligeros, supervisión y mensajería. OTP 29 no cambia eso. Lo afila.
+
+Si tienes servicios en Erlang, esta es una actualización que merece la pena planificar. Si nunca has probado Erlang, este _release_ es tan buen punto de entrada como cualquier otro —pero con mejor soporte para terminales, mejor seguridad por defecto y un sistema de tipos en runtime más sólido que ayer.
