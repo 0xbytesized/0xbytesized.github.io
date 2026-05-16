@@ -1,0 +1,114 @@
+---
+title: "WSL9x: Linux moderno dentro de Windows 95"
+date: 2026-05-16T23:00
+tags: ["linux", "windows", "kernel", "retrocomputing", "hack"]
+excerpt: "Un desarrollador ha conseguido arrancar un kernel Linux 6.19 dentro de Windows 95 usando un VxD, page faults y un truco sucio con el GPF handler. Sin IA."
+---
+
+Hay proyectos que te alegran el día. WSL9x es uno de ellos.
+
+[Hailey](https://codeberg.org/hails/wsl9x) ha publicado un subsistema que permite ejecutar un kernel Linux 6.19 — de 2026 — dentro de Windows 9x. Sí, Windows 95 o 98. Con protección de memoria, paginación y planificación preemptiva. El README lo deja claro desde la primera línea: "Proudly written without AI".
+
+La historia ha explotado en Hacker News con más de 200 puntos y 88 comentarios. Y no es para menos: es uno de esos hacks que rozan lo absurdo técnicamente pero que demuestran un conocimiento de sistemas operativos que ya quisieran muchos ingenieros de Big Tech.
+
+## Cómo funciona
+
+WSL9x tiene tres componentes: un kernel Linux parcheado, un driver VxD y un programa cliente llamado `wsl.com`.
+
+El driver VxD es el corazón del sistema. Cuando arranca, asigna las páginas de memoria para el código del kernel y carga `vmlinux.elf` desde disco usando interrupciones de DOS. El kernel se compila con una dirección base fija en `0xd0000000` para evitar colisiones con el espacio de usuario de Windows.
+
+El driver crea un hilo en la System VM, reserva 16 KiB de stack para entrar en Linux y entra en un bucle de eventos que gestiona la entrada al kernel, el despacho de IRQs, la vuelta a espacio de usuario y el idle:
+
+```c
+static void kernel_loop(struct wsl9x_entry* entry)
+{
+    while (kernel_one_loop(entry)) ;
+}
+
+static bool kernel_one_loop(struct wsl9x_entry* entry)
+{
+    VMM_EnterMutex(entry_mutex, MUTEX_MUST_COMPLETE);
+    VMM_Call_On_My_Stack((void*)kernel_entry, (u32)entry,
+                         entry_stack + STACK_SIZE, STACK_SIZE);
+    VMM_LeaveMutex(entry_mutex);
+
+    switch (entry->result) {
+    case WSL9X_IDLE:
+        idle();
+        break;
+    case WSL9X_USER:
+        return false;
+    case WSL9X_PANIC:
+        handle_panic(entry->panic_msg);
+    }
+    // dispatch pending IRQs
+    return true;
+}
+```
+
+Lo interesante aquí es `VMM_Call_On_My_Stack`. El kernel Linux se ejecuta en el mismo stack que el driver VxD, no en un stack separado. Es una solución pragmática: en lugar de implementar un cambio de contexto completo con stacks independientes, reutiliza la infraestructura que ya ofrece el VMM de Windows 9x.
+
+## El truco del GPF handler
+
+Aquí viene mi parte favorita.
+
+Linux en i386 usa `int 0x80` para las syscalls. En un sistema normal, la IDT (Interrupt Descriptor Table) tiene una entrada para ese vector. Pero la IDT de Windows 9x es demasiado corta: no llega a 0x80. Intentar ejecutar `int 0x80` provoca una General Protection Fault.
+
+En lugar de rendirse, Hailey hizo algo brillante: instaló un handler de GPF que inspecciona la instrucción que causó la falta. Si son los bytes `0xcd 0x80` — la codificación de `int 0x80` — avanza EIP dos bytes y despacha la syscall a Linux:
+
+```c
+static bool handle_syscall(VMM_Client_Regs* regs)
+{
+    uint8_t* code = (uint8_t*)regs->EIP;
+
+    // ¿es int 0x80?
+    if (code[0] == 0xcd && code[1] == 0x80) {
+        regs->EIP += 2;  // saltar la instrucción
+        wsl9x__user_syscall();
+        return true;
+    }
+
+    return false;
+}
+```
+
+Esto es kernel hacking del bueno. No hay parcheo de la IDT, no hay modificación de la GDT. Solo leer la memoria en EIP y preguntar "¿ibas a hacer una syscall?". Si la respuesta es sí, se la damos. Si no, dejamos que Windows maneje el GPF como haría normalmente.
+
+## Page faults como mecanismo de entrada
+
+El sistema usa exactamente dos mecanismos para entrar al kernel desde espacio de usuario: syscalls (vía GPF) y page faults. No hay más.
+
+Cuando una aplicación de Linux toca una dirección que no está mapeada, el driver VxD captura el page fault, lee CR2 para obtener la dirección y se la pasa al kernel Linux para que resuelva el mapeo:
+
+```c
+if (TRAP(type) == TRAP_PF) {
+    u32 fault_addr;
+    __asm__ volatile ("movl %%cr2, %0" : "=r"(fault_addr));
+    wsl9x__user_page_fault(fault_addr);
+    return FAULT_HANDLED;
+}
+```
+
+Es elegante en su simplicidad. No hay colas de mensajes, ni shared memory, ni mecanismos complejos de IPC. Solo dos vectores de entrada, ambos basados en excepciones hardware que el kernel Linux ya sabe manejar porque está basado en User-Mode Linux.
+
+## La consola: una ventana de DOS como TTY
+
+El último componente es `wsl.com`, un programa de 16 bits escrito en ensamblador. Su trabajo es actuar como terminal: reclama una consola no usada notificando al driver y entra en un bucle esperando IRQs mientras lee del teclado.
+
+Cuando Linux quiere imprimir algo, el driver de consola programa un evento y ejecuta `int 0x29` en el contexto de la VM de DOS. Si tienes un driver ANSI como NNANSI cargado, intercepta esos caracteres y te da colores.
+
+Ejecutar Linux y ver el prompt de bash en una ventana de MS-DOS es una de esas imágenes que te recuerdan por qué te metiste en esto.
+
+## Mi opinión
+
+WSL9x me parece una declaración de principios.
+
+En 2026, cuando todo el mundo habla de agentes de IA que escriben código por ti, Hailey publica un proyecto deliberadamente artesanal con un "sin IA" en la primera línea del README. No es un gesto vacío: es una demostración de que el conocimiento profundo de sistemas sigue siendo relevante y produce resultados que ninguna IA podría generar por sí sola.
+
+El código fuente es sorprendentemente pequeño. El driver VxD cabe en unos pocos cientos de líneas de C y ensamblador. La magia no está en la cantidad de código sino en entender exactamente qué piezas tocar: la IDT de Windows 9x, el VMM, el manejador de GPF, el User-Mode Linux.
+
+También me gusta que use Linux 6.19, un kernel de 2026. No es una versión antigua parcheada para funcionar en hardware viejo. Es software de vanguardia corriendo en un sistema operativo de 1995 gracias a una capa de compatibilidad de 1.200 líneas. Eso es ingeniería inversa bien hecha.
+
+El proyecto es GPL-3 y el código está disponible en Codeberg. Si tienes una tarde libre y un cross-compiler para i386-linux-musl a mano, puedes construir tu propia imagen de disco y probarlo. O simplemente leer el código fuente, que ya es un máster comprimido en sistemas operativos.
+
+Mi veredicto: WSL9x es el tipo de proyecto que me recuerda por qué sigo escribiendo código. No resuelve ningún problema de negocio. No escala. No tiene monetización. Es puro arte hacker. Y eso es exactamente lo que lo hace valioso.
