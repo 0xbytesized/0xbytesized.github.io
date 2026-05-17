@@ -1,0 +1,131 @@
+---
+title: "El tablet de 80€ que ahora corre Debian Linux"
+date: "2026-05-17T20:00"
+tags: ["linux", "debian", "arm", "reverse-engineering", "rockchip"]
+excerpt: "Un desarrollador ha convertido una tablet Android de 80 euros en una estación Debian funcional, sin documentación del fabricante y con ayuda de IA."
+---
+
+Hace unas semanas me crucé con un proyecto en GitHub que me dejó pegado a la pantalla durante una hora. El título en Hacker News lo decía todo: ["I turned a $80 RK3562 Android tablet into a Debian Linux workstation"](https://github.com/tech4bot/rk3562deb). 217 puntos, 114 comentarios y un README que transpiraba ese tipo de obsesión técnica que tanto me gusta.
+
+El autor, [tech4bot](https://github.com/tech4bot), cogió un Doogee U10 —una tablet Android que cuesta 80 pavos— y la convirtió en una estación de trabajo con Debian 12 Bookworm completamente funcional. Sin bootloader unlocked, sin tocar el almacenamiento interno y con arranque dual desde tarjeta SD. Lo más bestia: lo hizo sin BSP del fabricante, sin documentación oficial y con ayuda de Claude, Codex y Gemini.
+
+## Qué hay dentro de esa carcasa de 80€
+
+El Doogee U10 monta un Rockchip RK3562, un SoC con 4 núcleos Cortex-A53 a 2 GHz, 4 GB de RAM LPDDR4 y 128 GB de almacenamiento eMMC. La pantalla es un panel DSI de 10.1 pulgadas a 1280×800 y el PMIC es un RK817.
+
+No es hardware de gama alta ni mucho menos, pero tiene algo que me llama la atención: una NPU integrada. Sí, un acelerador de inferencia en un cacharro de 80 euros. Rockchip lleva un par de años metiendo NPUs hasta en sus SoC más baratos, y el RK3562 incluye un núcleo NPU funcional.
+
+La tabla de compatibilidad del proyecto impresiona:
+
+- **Pantalla y táctil**: funcionando al 100% (controladora gsl3673, 10 puntos multitouch)
+- **Wi-Fi y Bluetooth**: chip Seekwave EA6621Q, funcionalidad completa
+- **Audio**: altavoz y micrófono OK
+- **Aceleración 3D**: parcial vía Panfrost (OpenGL ES funciona)
+- **NPU**: activa, corriendo modelos con RKLLM
+- **Batería y carga**: 100% funcional con el RK817
+- **Cámaras**: funcionales pero con calibración de color pendiente
+
+## El sistema de build: cross-compilación seria
+
+El proyecto es un sistema de build completo. No es un simple script que flashea una imagen prefabricada; compila U-Boot, el kernel de Linux y genera una rootfs de Debian desde cero usando `debootstrap`. Todo cross-compilado desde un host x86-64.
+
+El build principal se lanza así de simple:
+
+```bash
+./build.sh all
+```
+
+Pero debajo hay una maquinaria considerable. El script `build.sh` descarga U-Boot desde los repos de Firefly (rama `rk356x/firefly-5.10`), el kernel desde `rockchip-linux/kernel` (rama `develop-6.1`) y las herramientas de firmware desde `rockchip-linux/rkbin`. Luego cross-compila todo con la toolchain `aarch64-linux-gnu-`.
+
+Me gusta especialmente un detalle del script: el cálculo de hilos de compilación. No usa simplemente `nproc`, sino que presupuesta ~2 GB por trabajo de compilación para evitar que `cc1` se coma toda la RAM y el kernel panic del host:
+
+```bash
+MEM_THREADS=$((mem_total_kb / 1024 / 1024 / 2))
+[ "${MEM_THREADS}" -lt 1 ] && MEM_THREADS=1
+```
+
+Eso es experiencia real construyendo kernels en máquinas con poca RAM. Me recuerda a mis propias tardes compilando kernels personalizados en un portátil con 4 GB allá por 2016.
+
+El resultado final es un `.img.xz` que escribes a una SD, insertas en la tablet, enciendes y tienes Debian. Sacas la SD y vuelves a Android como si nada. Sin particiones tocadas, sin bootloader modificado, sin riesgo de brick.
+
+## La odisea del kernel: parchear un driver sin docs
+
+Aquí es donde el proyecto se pone realmente interesante. Cuando no tienes documentación del fabricante, cada driver es un juego de ingeniería inversa.
+
+El RK817 es el PMIC (Power Management IC) que gestiona la batería, carga y reguladores de voltaje. El driver en el kernel de Linux (`rk817_battery.c`) tenía un bug sutil pero devastador que el autor documenta en uno de sus parches.
+
+El problema estaba en `MAX_INT`, una constante usada por la función `ab_div_c()` para limitar resultados. En la versión original del driver, `MAX_INT` valía `0x7FFF` (32767). Cuando Rockchip actualizó el driver a la versión 1.10, cambió la precisión del estado de carga (SOC) de porcentajes enteros (0–100) a milésimas de porcentaje (0–100000). Pero `MAX_INT` se quedó en 0x7FFF.
+
+El resultado: cualquier valor de SOC por encima del 32.767% se truncaba silenciosamente. La calibración OCV (Open Circuit Voltage) quedaba rota para voltajes superiores a ~3.85V, que es prácticamente cualquier batería con más de un 40% de carga.
+
+Este es el fragmento del parche que corrige el valor:
+
+```c
+/*
+ * MAX_INT is used by ab_div_c() to clamp results.  The v1.00 driver stored
+ * SOC in whole-percent units (0..100), so 0x7FFF was ample headroom.  The
+ * v1.10 driver switched to 0.001% precision (MAX_PERCENTAGE = 100 * 1000),
+ * which means rk817_bat_vol2soc() can legitimately return up to 100000 —
+ * but the old 0x7FFF cap silently clipped any SOC above 32.767%, breaking
+ * OCV-based SOC calibration for anything above ~3.85V on a typical pack.
+ * Use INT32_MAX so ab_div_c() only clamps on genuine overflow.
+ */
+#define MAX_INT			0x7FFFFFFF
+```
+
+El parche también mejora la lectura inicial de voltaje en el primer arranque: en lugar de usar `pwron_voltage` (muestreado en el instante de encendido, con posible caída por corriente de arranque), usa el registro OCV del PMIC, que se muestrea durante una ventana de relajación y está mucho más cerca del voltaje real de circuito abierto.
+
+Este tipo de bug es veneno puro en producción: la batería parece funcionar, los porcentajes se muestran, pero los valores son basura. Encontrarlo sin documentación requiere leer el código del driver línea a línea y entender qué está haciendo realmente cada macro. Chapó.
+
+## Wi-Fi sin docs: el chip Seekwave EA6621Q
+
+El chip Wi-Fi del Doogee U10 es un Seekwave EA6621Q. No es exactamente un modelo mainstream. En el repositorio, el directorio `wifi/` contiene tres binarios de firmware (`EA6621Q_SEEKWAVE_R00005.bin`, `RAM_RW_KERNEL_DRAM.bin`, `ROM_EXEC_KERNEL_IRAM.bin`), lo que sugiere que el chip requiere una carga de firmware en varias etapas típica de controladoras Wi-Fi modernas.
+
+Conseguir que un chip Wi-Fi oscuro funcione en Linux sin documentación implica identificar el bus (probablemente SDIO en este caso), localizar un driver compatible en el kernel mainline o en repos de Rockchip y rezar para que el firmware binario que viene en la partición de Android sea compatible con la interfaz del driver. No es un trabajo glamuroso, pero es el tipo de cosa que separa un proyecto funcional de uno que se queda en "arranca pero no tiene red".
+
+## NPU: LLMs en un ARM de 80 euros
+
+Esto es lo que más me flipa del proyecto. La NPU del RK3562 es funcional y el autor la ha puesto a correr modelos de lenguaje locally. Usa el stack RKLLM de Rockchip (`airockchip/rknn-llm`), que incluye runtime, toolkit y una demo app.
+
+El proceso de conversión de modelos es así:
+
+```bash
+python3 convert_qwen_rk3562.py \
+  --model-dir ./models/Qwen3-0.6B \
+  --target-platform rk3562 \
+  --quantized-dtype W8A8 \
+  --optimization-level 0 \
+  --num-npu-core 1 \
+  --output ./out/Qwen3-0.6B_W8A8_RK3562_opt0.rkllm
+```
+
+Y los benchmarks, medidos en la propia tablet en abril de 2026, dan estos números:
+
+| Modelo | Inicialización | Prefill (tok/s) | Generación (tok/s) |
+|--------|---------------|-----------------|-------------------|
+| Qwen3-0.6B (W8A8) | 1788 ms | 57.62 | 4.92 |
+| Qwen2.5-1.5B (W8A8) | 4800 ms | 42.78 | 2.18 |
+
+4.92 tokens por segundo en un modelo de 600 millones de parámetros corriendo en una NPU de un SoC de 80 euros. En 2019 eso habría sido ciencia ficción. En 2026 es un proyecto de fin de semana documentado en GitHub.
+
+El modelo de 1.5B parámetros baja a 2.18 tok/s, que es lento para chat en tiempo real pero perfectamente utilizable para tareas asíncronas como summarization, clasificación o extracción de datos.
+
+## Mi opinión
+
+Este proyecto me parece importante por varias razones que van más allá del "mira qué guay, Linux en una tablet barata".
+
+**Primero**, es una demostración de que el código abierto funciona incluso cuando los fabricantes no colaboran. Rockchip no publica BSPs completos para todos sus chips en todos los dispositivos, pero mantiene repositorios públicos de kernel y U-Boot. Partiendo de ahí y del trabajo de la comunidad (Firefly, Panfrost), un desarrollador motivado puede llegar a un sistema funcional.
+
+**Segundo**, la combinación de IA + hardware reversing es potentísima. El autor lo dice explícitamente: usó Claude, Codex y Gemini como asistentes. No para que le escribieran el código mágicamente, sino como compañeros de debugging: "este registro del PMIC no devuelve lo que espero, ¿qué puede estar pasando?", "¿cómo se configura el bus SDIO en este kernel?". La IA no reemplaza al ingeniero, pero acelera brutalmente la fase de investigación.
+
+**Tercero**, el enfoque de arranque dual sin tocar la eMMC es brillante y debería ser el estándar para este tipo de experimentos. Cero riesgo de brick, vuelta a Android en 10 segundos. Me recuerda a la filosofía de los live USB de los 2000 pero aplicada a tablets ARM.
+
+**Cuarto**, el hecho de que una NPU funcional venga en un dispositivo de 80 euros dice mucho de hacia dónde va el hardware. La inferencia local va a ser ubicua. No en el centro de datos, no en tu GPU de 2000 euros, sino en el trasto más barato que puedas comprar. Y eso cambia completamente la ecuación de privacidad y latencia para aplicaciones de IA.
+
+Lo que no me gusta tanto es que esto siga siendo un proyecto de una persona. El README tiene 134 estrellas y solo 3 forks. El autor mantiene él solo el build system, los parches de kernel, el overlay de Debian y las configuraciones de hardware. Es un trabajo titánico que podría beneficiarse muchísimo de más colaboradores. Si te gusta el Linux embebido, ARM, Device Trees y el olor a kernel compilando por la mañana, este es tu proyecto.
+
+## En resumen
+
+Un desarrollador anónimo ha reverse-engineered una tablet Android de 80 euros, ha construido un sistema de cross-compilación completo, ha parcheado bugs críticos en drivers del kernel sin documentación, ha domado un chip Wi-Fi oscuro y ha puesto una NPU a correr LLMs locales. Todo documentado, todo abierto, todo funcional.
+
+Así se hace software, señores.
