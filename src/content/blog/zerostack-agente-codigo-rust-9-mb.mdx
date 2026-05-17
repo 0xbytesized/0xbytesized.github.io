@@ -1,0 +1,147 @@
+---
+title: "Zerostack: un agente de código en Rust de apenas 9 MB"
+date: "2026-05-17T07:00"
+tags: ["rust", "agentes-ia", "herramientas", "open-source", "productividad"]
+excerpt: "Un coding agent de 7000 líneas de Rust que consume 8 MB de RAM frente a los gigabytes de Claude Code. Así funciona Zerostack por dentro."
+---
+
+Claude Code me gusta, pero me come la RAM como si fuera el desayuno. En sesiones largas se va a varios gigabytes. Opencode, la alternativa open source en Node.js, ronda los 300 MB en repositorios grandes y tiene fugas de memoria que lo degradan con el tiempo.
+
+El problema no es solo técnico: es existencial. Si un agente de código necesita más recursos que el proyecto sobre el que trabaja, algo está fundamentalmente roto.
+
+Esta semana apareció en Hacker News [Zerostack](https://github.com/gi-dellav/zerostack), un agente de código escrito en Rust puro por [gi-dellav](https://github.com/gi-dellav). 7000 líneas de código, binario de 8.9 MB y un consumo de RAM que roza lo ofensivo: 8 MB en reposo, 12 MB trabajando.
+
+## La filosofía: menos es más, pero de verdad
+
+Zerostack no es un juguete. Soporta OpenRouter, OpenAI, Anthropic, Gemini y Ollama. Tiene todas las herramientas estándar (lectura, escritura, edición, bash, grep, búsqueda de archivos). Y añade features que ni Claude Code tiene nativas: un sistema de prompts intercambiables, cuatro modos de permisos, integración con git worktrees y soporte para MCP (Model Context Protocol).
+
+Todo esto en un solo binario. Sin dependencias de Node.js, sin Electron, sin contenedores. `cargo install zerostack` y a trabajar.
+
+La clave está en cómo está construido. El autor usa el crate `rig` como abstracción de proveedores LLM y construye el agente con un patrón builder limpio:
+
+```rust
+let mut builder = AgentBuilder::new(model).preamble(&preamble);
+
+let base_tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
+    Box::new(tools::ReadTool::new(permission.clone(), ask_tx.clone())),
+    Box::new(tools::WriteTool::new(permission.clone(), ask_tx.clone())),
+    Box::new(tools::EditTool::new(permission.clone(), ask_tx.clone())),
+    Box::new(tools::BashTool::new(permission.clone(), ask_tx.clone(), sandbox.clone())),
+    Box::new(tools::GrepTool::new(permission.clone(), ask_tx.clone())),
+    Box::new(tools::FindFilesTool::new(permission.clone(), ask_tx.clone())),
+    Box::new(tools::ListDirTool::new(permission.clone(), ask_tx.clone())),
+    Box::new(tools::WriteTodoList::new(permission.clone(), ask_tx.clone())),
+];
+
+builder = builder.tools(base_tools);
+builder.build()
+```
+
+Cada tool recibe una referencia a un `PermCheck` (el sistema de permisos) y un `AskSender` (el canal para pedir confirmación al usuario). No hay magia: herramientas puras con dependencias explícitas.
+
+## El sistema de permisos: lo que Claude Code debería tener
+
+Una de las cosas que más me molestan de Claude Code es que los permisos son binarios: o confías o no confías. Zerostack implementa cuatro modos que cubren todo el espectro:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SecurityMode {
+    Standard,    // auto-aprueba comandos seguros (ls, cargo check, git log)
+    Restrictive, // pregunta por cada acción
+    Accept,      // auto-aprueba todo dentro del directorio de trabajo
+    Yolo,        // aprueba todo sin preguntar
+}
+```
+
+Pero lo realmente interesante son las reglas por defecto para bash. Mira esta lista:
+
+```rust
+pub fn default_bash_rules() -> Vec<(&'static str, Action)> {
+    vec![
+        ("ls **", Action::Allow),
+        ("cargo check", Action::Allow),
+        ("cargo build", Action::Allow),
+        ("cargo test", Action::Allow),
+        ("git status", Action::Allow),
+        ("git log **", Action::Allow),
+        ("npm run **", Action::Allow),
+        // ... y en la otra dirección:
+        ("rm -rf /**", Action::Deny),
+        ("sudo rm -rf /**", Action::Deny),
+        ("dd **", Action::Deny),
+        ("mkfs **", Action::Deny),
+        ("fdisk **", Action::Deny),
+    ]
+}
+```
+
+Es un approach sensato: comandos de lectura e inspección se aprueban, comandos destructivos del sistema se bloquean. Y todo es configurable con patrones glob en `config.json`. Puedes decir "permite `write **.rs` pero pregunta antes de tocar `*.toml`".
+
+Además tiene detección de doom-loops: si el agente repite la misma llamada 3+ veces, salta un aviso. Esto evita que un agente descontrolado haga `rm -rf` en bucle (aunque eso ya está bloqueado de todas formas).
+
+## Los Ralph Wiggum loops
+
+El nombre es un guiño a Ralph Wiggum de Los Simpson, pero la funcionalidad es seria. Zerostack puede ejecutar tareas en bucle para trabajos de larga duración:
+
+```rust
+pub struct LoopState {
+    pub active: bool,
+    pub prompt: String,
+    pub plan_file: PathBuf,
+    pub iteration: u32,
+    pub max_iterations: Option<u32>,
+    pub last_summary: Option<String>,
+    pub run_cmd: Option<String>,
+    pub last_run_output: Option<String>,
+}
+```
+
+Cada iteración recibe el contexto completo: la tarea original, el plan actual (`LOOP_PLAN.md`), un resumen de la iteración anterior y la salida de validación. El agente elige UNA tarea del plan, la implementa, ejecuta tests, actualiza el plan y pasa a la siguiente.
+
+En modo headless:
+
+```bash
+zerostack --loop --loop-prompt "Refactoriza la API" --loop-max 10 --loop-run "cargo test"
+```
+
+Esto es especialmente útil para migraciones grandes o refactorizaciones donde no quieres estar dándole al enter cada dos minutos.
+
+## Prompts intercambiables sin depender de skills
+
+Los skills (archivos de instrucciones que extienden el comportamiento del agente) son el estándar de facto en Claude Code. Zerostack toma un camino diferente: prompts intercambiables en caliente con `/prompt`.
+
+Viene con 10 prompts built-in: `code`, `plan`, `review`, `debug`, `ask`, `brainstorm`, `frontend-design`, `review-security`, `simplify` y `write-prompt`. Cada uno cambia el tono, las herramientas disponibles y el enfoque del agente. Puedes pasar de "escribe código" a "revisa la seguridad" con un slash command.
+
+Y como todo en Zerostack, los prompts son archivos markdown. Los built-in van embebidos en el binario con `include_dir!` y puedes añadir los tuyos en `~/.config/zerostack/prompts/` o en `./prompts/` del proyecto.
+
+```rust
+static EMBEDDED: Dir = include_dir!("$CARGO_MANIFEST_DIR/prompts");
+```
+
+Esto significa que los prompts se compilan dentro del binario. No hay lecturas de disco en runtime para los built-in. Una decisión de diseño que refleja la obsesión por el rendimiento que impregna todo el proyecto.
+
+## Lo que no tiene (y por qué está bien)
+
+Zerostack no tiene:
+- Syntax highlighting en el TUI (usa crossterm básico)
+- Soporte para Windows (no testeado)
+- Un sistema de plugins como tal (MCP es el mecanismo de extensión)
+- Sandboxing automático (necesitas instalar bubblewrap aparte)
+
+Y sin embargo, esto no son carencias: son decisiones. Cada feature que no está es RAM que no se consume, es un bug que no existe, es una superficie de ataque que no se abre.
+
+El autor lo deja claro en el README: el objetivo es ser mínimo. No pretende competir en features con Claude Code. Pretende ser la opción sensata cuando no necesitas un megabyte de JavaScript para pedirle a un LLM que te escriba un test.
+
+## Mi veredicto
+
+Zerostack me parece el tipo de proyecto que necesitábamos. La carrera de los coding agents ha sido hacia arriba: más features, más integraciones, más consumo. Tener a alguien que va en dirección contraria —menos código, menos RAM, menos complejidad— es refrescante y necesario.
+
+Dos cosas me convencen especialmente:
+
+**Primero**, los 7000 líneas de código. Puedes leerte el proyecto entero en una tarde. Entender cómo funciona tu herramienta de trabajo no debería ser un lujo y con Zerostack no lo es. El código es limpio, idiomático y no intenta ser más listo de lo necesario.
+
+**Segundo**, que usa `rig` en vez de implementar su propio cliente HTTP para cada proveedor. Esto es pragmatismo puro: no reinventa la rueda, se apoya en el ecosistema Rust y se centra en lo que realmente aporta valor: el loop agente-herramientas, los permisos y la experiencia de usuario.
+
+¿Lo usaría como mi agente principal? Para el día a día, probablemente no — Claude Code tiene integraciones que valoro (GitHub, slack, hooks). Pero para tareas acotadas en repositorios grandes donde la RAM escasea, para meterlo en un contenedor pequeño, o para entornos donde no puedes permitirte 300 MB de overhead, Zerostack es impecable.
+
+El proyecto acaba de nacer (5 días en GitHub, 164 estrellas) y ya tiene 30 comentarios en HN de gente probándolo y encontrándolo rápido. Si el autor mantiene el foco en la minimalidad y no sucumbe al feature creep, Zerostack puede convertirse en el `curl` de los coding agents: pequeño, ubicuo y confiable.
