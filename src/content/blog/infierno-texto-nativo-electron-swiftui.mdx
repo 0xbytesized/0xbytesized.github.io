@@ -1,0 +1,150 @@
+---
+title: "El drama del texto: por qué SwiftUI no puede con el Markdown"
+date: "2026-05-17T17:30"
+tags: ["swiftui", "electron", "macos", "desarrollo-apps", "renderizado-texto"]
+excerpt: "Un veterano de Apple prueba SwiftUI, AppKit y TextKit 2 para un chat con Markdown. Ninguno funciona. Electron lo resuelve en minutos."
+---
+
+Artem Loenko lleva casi veinte años desarrollando apps nativas para macOS e iOS. No es un junior quejándose de SwiftUI porque no le sale el tutorial de Paul Hudson. Es alguien que conoce AppKit antes de que existiera Swift, que ha visto pasar TextKit 1, TextKit 2 y todas las iteraciones del framework de UI de Apple.
+
+Hace unos días publicó ["Native all the way, until you need text"](https://justsitandgrin.im/posts/native-all-the-way-until-you-need-text/), un post que en 48 horas ha acumulado **272 puntos y 182 comentarios** en Hacker News. El artículo es una crónica de fracaso técnico: intentó construir un chat con soporte Markdown usando solo tecnologías nativas de Apple y cada capa del stack le falló de una forma distinta.
+
+Lo más doloroso es el final: cuando ya había agotado todas las opciones nativas, generó un proyecto de Electron por curiosidad. Y funcionó. A la primera.
+
+## El calvario, capa por capa
+
+El requisito no parece descabellado: un chat donde los mensajes se renderizan en Markdown, con streaming de texto en tiempo real y donde puedas seleccionar un mensaje entero para copiarlo. Algo que cualquier app de Slack, Discord o WhatsApp Web hace sin pestañear.
+
+### Primer intento: SwiftUI puro
+
+Loenko arranca con SwiftUI. Razonable: es 2026, se supone que está maduro. Consigue un scroll razonable tras unos ajustes. Pero cuando intenta seleccionar el texto renderizado desde primitivas SwiftUI... no puede. **Por diseño.** SwiftUI no expone selección de texto entre múltiples `Text` views.
+
+```swift
+// SwiftUI: bonito, pero la selección de texto es un desastre
+struct ChatView: View {
+    let messages: [ChatMessage]
+
+    var body: some View {
+        ScrollView {
+            LazyVStack {
+                ForEach(messages) { message in
+                    MessageBubble(message: message)
+                        .textSelection(.enabled) // Funciona para UN solo Text...
+                }
+            }
+        }
+    }
+}
+
+// El problema: si tu Markdown se descompone en varios Text views
+// (negritas, código inline, enlaces), la selección se rompe.
+// No puedes seleccionar a través de múltiples primitivas Text.
+```
+
+Y aquí llega el primer momento "esto no puede ser verdad": Apple ha diseñado un framework de UI moderno que no permite seleccionar texto si está compuesto por varios fragmentos estilizados. O usas un solo `Text` plano, o la selección no funciona.
+
+### Segundo intento: NSTextView + TextKit 2
+
+Si SwiftUI no puede, te vas a AppKit. `NSTextView` es la clase venerable que lleva dos décadas renderizando texto en macOS. Encima ahora soporta TextKit 2, la nueva versión del motor de texto con renderizado GPU y non-contiguous layout.
+
+El problema es que integrar `NSTextView` dentro de una app SwiftUI es un infierno de `NSViewRepresentable`. Pierdes las ventajas de testing y performance que tenías con SwiftUI. Y cuando empiezas a hacer streaming de texto — porque en 2026 todo el mundo streamea respuestas de modelos — la CPU se dispara:
+
+```swift
+// Representable para incrustar NSTextView en SwiftUI
+// Esto ya es una rendición: estás abandonando SwiftUI para una vista
+struct MarkdownTextView: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeNSView(context: Context) -> NSTextView {
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        return textView
+    }
+
+    func updateNSView(_ nsView: NSTextView, context: Context) {
+        // Cada vez que llega un nuevo token del stream...
+        nsView.string = text
+        // ...TextKit 2 re-layouta todo el documento.
+        // Con streaming rápido, la CPU se va al 80% fácil.
+    }
+}
+```
+
+### Tercer intento: NSCollectionView
+
+"Vale", piensa Loenko. "AppKit puro. NSCollectionView. Maduro, performante, batallado en producción."
+
+Implementa toda la UI con celdas de collection view. Y al segundo día descubre que **las celdas parpadean al actualizarse**. Por diseño. Igual que antes. No importa cómo configures las animaciones ni cómo implementes el diffing: `NSCollectionView` tiene un comportamiento de recarga que produce flickering en ciertos escenarios de actualización incremental.
+
+### Cuarto intento: TextKit 2 a pelo
+
+Si ninguna capa de abstracción funciona, te vas al metal. TextKit 2 directamente, sin SwiftUI, sin AppKit, sin collection views.
+
+Hace un prototipo. El rendimiento base es aceptable. El streaming sigue siendo terrible. Nada encaja con APIs modernas. Y de repente se da cuenta de que para alcanzar la paridad con lo que un usuario de macOS espera — menús contextuales, búsqueda en diccionario, selección, accesibilidad, interacciones de texto — le quedan **meses** de trabajo. Funcionalidades que cualquier `WKWebView` te da gratis.
+
+### El momento oscuro: WebKit
+
+Así que tira la toalla e implementa el renderizado con WebKit. Un `WKWebView` que carga HTML generado a partir del Markdown. Y funciona. Rendimiento decente, tipografía casi perfecta, control razonable. Hay caveats, pero la diferencia con el desastre anterior es abismal.
+
+### La rendición final: Electron
+
+Y aquí viene el párrafo que ha incendiado Hacker News:
+
+> *"En el momento más oscuro posible, piensas: vale, voy a generar un proyecto de Electron. Te pasas al lado oscuro. Y te quedas alucinado."*
+
+Operaciones de texto, renderizado de Markdown, tipografía de calidad: todo funciona *out of the box*. Con un rendimiento que no había conseguido ni con su implementación pura de TextKit 2. Las integraciones con macOS también están ahí.
+
+```javascript
+// Electron: un chat con Markdown en 20 líneas
+// Lo que en AppKit llevaba semanas, aquí sale en minutos
+const { app, BrowserWindow } = require('electron');
+const marked = require('marked');
+
+app.whenReady().then(() => {
+    const win = new BrowserWindow({ width: 800, height: 600 });
+    win.loadURL(`data:text/html,
+        <html><body style="font-family: -apple-system; padding: 2rem;">
+            <div id="chat"></div>
+            <script>
+                const messages = [
+                    "**Hola!** Esto es *Markdown* con \`código\`",
+                    "## Y esto es otro mensaje\\n\\nCon [enlaces](https://example.com)"
+                ];
+                messages.forEach(m => {
+                    const div = document.createElement('div');
+                    div.innerHTML = marked.parse(m);
+                    // Selección de texto: funciona sin hacer NADA
+                    document.getElementById('chat').appendChild(div);
+                });
+            </script>
+        </body></html>
+    `);
+});
+```
+
+## ¿Qué ha pasado aquí?
+
+El problema de fondo es que Apple ha optimizado sus stacks de UI para un tipo de app que ya no domina el panorama: formularios, listas de ajustes, tablas de datos, navegación jerárquica. Eso lo hacen bien. Pero cuando necesitas texto rico, largo, que se actualiza incrementalmente y que se puede seleccionar, copiar y buscar... todo se desmorona.
+
+La web lleva **treinta años** peleándose con el renderizado de texto. CSS ha resuelto problemas que Apple ni siquiera ha abordado en SwiftUI: wrapping de líneas con caracteres de ancho variable, mezcla de fuentes en un mismo párrafo, selección a través de elementos del DOM, accesibilidad con VoiceOver, bidirectional text, contextual alternates. El motor de renderizado de Chromium tiene literalmente décadas de correcciones de bugs tipográficos que TextKit 2 todavía está descubriendo.
+
+Y luego está el tema del streaming. En la web, modificar el `innerHTML` o usar `document.createTextNode()` es barato porque el layout se calcula de forma asíncrona y el motor decide cuándo repintar. En las APIs nativas de Apple, cada modificación del contenido de texto dispara un relayout síncrono que puede ser carísimo.
+
+Un detalle revelador que apareció en los comentarios de HN: **las versiones antiguas de macOS usaban WebKit para renderizar texto rico dentro de NSTextField.** Apple sabía que el texto es difícil. Lo externalizaron a su motor web. Luego intentaron reemplazarlo con TextKit y el resultado es lo que estamos viendo.
+
+## Mi veredicto
+
+Lo de Loenko no es un caso aislado ni una falta de conocimiento de las APIs. Es un síntoma de una decisión estratégica de Apple que lleva años sin corregirse: **el texto rico no es una prioridad para sus SDKs nativos.**
+
+Y tiene lógica desde su perspectiva de negocio. Apple vende hardware, no frameworks de UI. El 90% de las apps de la App Store son formularios glorificados que nunca van a necesitar renderizar Markdown con streaming. Las apps que sí lo necesitan — clientes de chat, editores de texto, visores de documentación — están dominadas por Electron o React Native y a Apple no le quita el sueño.
+
+Pero para los desarrolladores que *quieren* hacer las cosas bien en nativo, la situación es frustrante. No es que Electron sea técnicamente superior. Es que **Apple ha dejado que su gap de funcionalidad con la web crezca hasta volverse insalvable** en ciertos dominios.
+
+Mientras tanto, cada vez que instalo Slack, Discord, VS Code, Figma o Notion en mi Mac, estoy ejecutando Chromium. Y no es porque a los desarrolladores de esas apps les guste JavaScript. Es porque, para todo lo que no sea un formulario de ajustes, el navegador sigue siendo el mejor motor de renderizado de texto que existe.
+
+## El código no miente
+
+Si miras el commit history de TextKit y lo comparas con el de Blink/WebKit, la diferencia es brutal. Mientras el equipo de Chromium arregla bugs de tipografía cada semana, los cambios en TextKit son escasos y muchas veces solo añaden soporte para nuevas APIs de Swift sin tocar el motor de layout.
+
+No tengo una solución mágica. Pero si estás empezando un proyecto que gira alrededor de texto rico — un chat, un editor, un lector de Markdown — hazte un favor: prueba Electron o Tauri antes de tirarte a la piscina nativa. Puede que acabes donde acabó Loenko: agradeciendo que alguien ya resolvió el problema más difícil de la informática mucho antes de que Apple lo intentara.
