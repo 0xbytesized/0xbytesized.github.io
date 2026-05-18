@@ -85,18 +85,21 @@ Conseguir que un chip Wi-Fi oscuro funcione en Linux sin documentación implica 
 
 ## NPU: LLMs en un ARM de 80 euros
 
-Esto es lo que más me flipa del proyecto. La NPU del RK3562 es funcional y el autor la ha puesto a correr modelos de lenguaje locally. Usa el stack RKLLM de Rockchip (`airockchip/rknn-llm`), que incluye runtime, toolkit y una demo app.
+Esto es lo que más me flipa del proyecto. La NPU del RK3562 es funcional y el autor la ha puesto a correr modelos de lenguaje en local. Usa el stack RKLLM de Rockchip (`airockchip/rknn-llm`), que incluye runtime, toolkit y una demo app.
 
-El proceso de conversión de modelos es así:
+El proceso de conversión de modelos usa la API Python de RKLLM. Cargas el modelo desde HuggingFace, configuras la cuantización y exportas el binario para la NPU:
 
-```bash
-python3 convert_qwen_rk3562.py \
-  --model-dir ./models/Qwen3-0.6B \
-  --target-platform rk3562 \
-  --quantized-dtype W8A8 \
-  --optimization-level 0 \
-  --num-npu-core 1 \
-  --output ./out/Qwen3-0.6B_W8A8_RK3562_opt0.rkllm
+```python
+from rkllm.api import RKLLM
+
+llm = RKLLM()
+llm.load_huggingface(model="./models/Qwen3-0.6B", device="cpu", dtype="float32")
+llm.build(do_quantization=True,
+          optimization_level=0,
+          quantized_dtype="W8A8",
+          target_platform="rk3562",
+          num_npu_core=1)
+llm.export_rkllm("./out/Qwen3-0.6B_W8A8_RK3562_opt0.rkllm")
 ```
 
 Y los benchmarks, medidos en la propia tablet en abril de 2026, dan estos números:
@@ -126,6 +129,6 @@ Lo que no me gusta tanto es que esto siga siendo un proyecto de una persona. El 
 
 ## En resumen
 
-Un desarrollador anónimo ha reverse-engineered una tablet Android de 80 euros, ha construido un sistema de cross-compilación completo, ha parcheado bugs críticos en drivers del kernel sin documentación, ha domado un chip Wi-Fi oscuro y ha puesto una NPU a correr LLMs locales. Todo documentado, todo abierto, todo funcional.
+Un desarrollador anónimo ha hecho ingeniería inversa de una tablet Android de 80 euros, ha construido un sistema de cross-compilación completo, ha parcheado bugs críticos en drivers del kernel sin documentación, ha domado un chip Wi-Fi oscuro y ha puesto una NPU a correr LLMs locales. Todo documentado, todo abierto, todo funcional.
 
 Así se hace software, señores.
