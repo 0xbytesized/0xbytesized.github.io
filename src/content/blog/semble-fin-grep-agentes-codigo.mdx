@@ -1,0 +1,147 @@
+---
+title: "Semble: el fin del grep para agentes de código"
+date: "2026-05-18T12:00"
+tags: ["agentes-ia", "búsqueda-código", "python", "mcp", "herramientas"]
+excerpt: "Semble indexa y busca código en lenguaje natural usando un 98% menos de tokens que grep+read. Corre en CPU, pesa 16M parámetros y cualquier agente lo usa."
+---
+
+Hace unos días apareció en Hacker News un proyecto que me hizo replantearme algo básico: ¿por qué los agentes de código siguen usando `grep` como si fuera 1995?
+
+Se llama [Semble](https://github.com/MinishLab/semble), lo han construido Thomas van Dongen y Stephan Tulkens desde MinishLab, y en esencia es un motor de búsqueda de código diseñado desde cero para agentes de IA. No para humanos que quieren encontrar una función. Para agentes que necesitan entender un codebase sin leerse cada archivo.
+
+## El problema: los tokens cuestan dinero
+
+Cuando un agente como Claude Code o Codex quiere encontrar cómo se maneja la autenticación en tu proyecto, el flujo típico es:
+
+1. `grep -r "auth" .` → 800 líneas de output
+2. Leer `src/auth.py` entero → 300 líneas
+3. Leer `src/middleware.py` entero → 200 líneas
+4. Repetir hasta entender el flujo
+
+Cada lectura consume tokens. Muchos tokens. Y los tokens cuestan dinero y latencia. Semble ataca esto devolviendo solo los fragmentos relevantes: ni una línea más, ni una línea menos.
+
+Según sus benchmarks, usa un **98% menos de tokens** que el combo grep+read para alcanzar el mismo nivel de recall. Con apenas 2.000 tokens llega al 94% de recall, mientras que grep+read necesita 100.000 tokens —el contexto entero de un modelo— para quedarse en el 85%.
+
+## Cómo funciona por dentro
+
+Semble combina tres técnicas que por separado no son nuevas, pero juntas forman un motor bastante elegante:
+
+**Chunking con tree-sitter.** En vez de partir archivos por líneas o por tamaño fijo, usa tree-sitter para dividir el código en unidades sintácticas con sentido: funciones, clases, métodos. Cada chunk es una pieza que tiene significado por sí misma.
+
+**Doble recuperador: semántico + léxico.** Por un lado usa embeddings estáticos con [Model2Vec](https://github.com/MinishLab/model2vec) y el modelo [potion-code-16M](https://huggingface.co/minishlab/potion-code-16M) —solo 16 millones de parámetros— para capturar el significado. Por otro lado usa BM25 (el clásico algoritmo de recuperación de información) para capturar coincidencias exactas de identificadores y nombres de API. Como el modelo de embeddings es estático, no hay forward pass de transformer en cada query. Todo corre en milisegundos en CPU.
+
+**Fusión con Reciprocal Rank Fusion (RRF).** Los scores de los dos recuperadores se combinan con RRF, una técnica que pondera por ranking en vez de por score bruto. Esto evita que un recuperador domine al otro solo porque sus scores tienen una escala diferente.
+
+Y luego viene un paso de reranking que mete varias señales específicas de código: si el chunk *define* el símbolo buscado (una clase, una función) se boostea por encima de los que solo lo referencian; los stems de los identificadores se emparejan con los tokens de la query; los archivos con múltiples chunks relevantes reciben un empuje extra; y los archivos de test, shims de compatibilidad y stubs de tipos se penalizan para que las implementaciones canónicas salgan primero.
+
+El resultado: indexar un repo medio tarda **~250 ms**, una query se resuelve en **~1,5 ms**, todo en CPU, sin GPU, sin keys de API y sin servicios externos. En calidad de recuperación (NDCG@10 de 0.854) está al 99% de un transformer especializado de 137M parámetros como CodeRankEmbed, pero indexando 218 veces más rápido.
+
+## Tres formas de usarlo
+
+Semble se puede integrar de tres maneras distintas, y las tres están documentadas con detalle:
+
+### 1. Como servidor MCP
+
+La forma más limpia si usas Claude Code, Codex, Cursor u OpenCode. Con un solo comando:
+
+```bash
+claude mcp add semble -s user -- uvx --from "semble[mcp]" semble
+```
+
+A partir de ahí el agente tiene acceso a dos tools: `search` (buscar con lenguaje natural) y `find_related` (encontrar código similar a una ubicación conocida). Los repos se clonan e indexan bajo demanda y los índices se cachean durante la sesión.
+
+Para Codex, en `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.semble]
+command = "uvx"
+args = ["--from", "semble[mcp]", "semble"]
+```
+
+### 2. Desde la terminal
+
+Instalas con `pip install semble` (o `uv tool install semble`), añades un snippet a tu `AGENTS.md` o `CLAUDE.md` y el agente puede llamarlo como cualquier comando:
+
+```bash
+# Búsqueda semántica
+semble search "cómo se valida el JWT" ./mi-proyecto
+
+# Búsqueda por identificador
+semble search "save_pretrained" ./mi-proyecto
+
+# Código relacionado con una ubicación
+semble find-related src/auth.py 42 ./mi-proyecto
+```
+
+También acepta URLs de git:
+
+```bash
+semble search "save model to disk" https://github.com/MinishLab/model2vec
+```
+
+Esto es especialmente útil para sub-agentes en Claude Code o Codex, que no pueden llamar tools MCP directamente y necesitan comandos de terminal.
+
+### 3. Como librería Python
+
+Si estás construyendo tu propia herramienta o quieres integrarlo en un pipeline:
+
+```python
+from semble import SembleIndex
+
+# Indexar un proyecto local
+index = SembleIndex.from_path("./mi-proyecto")
+
+# O clonar e indexar un repo remoto
+index = SembleIndex.from_git("https://github.com/equipo/mi-servicio")
+
+# Buscar
+results = index.search("validación de tokens JWT", top_k=5)
+
+for r in results:
+    print(f"{r.chunk.file_path}:{r.chunk.start_line}")
+    print(f"  {r.chunk.content[:120]}")
+    print(f"  score={r.score:.3f}  source={r.source.value}\n")
+
+# Encontrar código similar a un resultado
+related = index.find_related(results[0], top_k=3)
+```
+
+La API es mínima: `from_path`, `from_git`, `search` y `find_related`. Cada `SearchResult` expone el `Chunk` con `file_path`, `start_line`, `end_line`, `content` y `language`. También tienes `SearchMode` (un enum con `HYBRID`, `SEMANTIC` y `BM25`) y `IndexStats` para monitorizar el estado del índice.
+
+Un detalle simpático: el comando `semble savings` te muestra cuántos tokens te has ahorrado:
+
+```
+  Semble Token Savings
+  ═══════════════════════════════════════════════════════
+  Period        Calls   Savings
+  ───────────────────────────────────────────────────────
+  Today         42      [███████████████░]  ~58.4k tokens
+  Last 7 days   287     [██████████████░░]  ~312.4k tokens
+  All time      1.4k    [██████████████░░]  ~1.2M tokens
+```
+
+El cálculo es conservador: compara los caracteres de los archivos completos que habrías leído con los caracteres de los snippets devueltos, y divide entre 4 (la aproximación estándar de 4 caracteres por token).
+
+## El dato que más me cuadra
+
+Lo que más valoro de Semble no es la tecnología en sí —BM25 existe desde los 90, los embeddings estáticos no son nuevos y RRF es una técnica conocida— sino la decisión de diseño de mantenerlo **mínimo y autónomo**.
+
+Pesa 16 millones de parámetros. Corre en CPU. No necesita GPU. No llama a APIs externas. No depende de OpenAI ni de Anthropic. Es una pieza de infraestructura que hace una cosa y la hace bien: dado un codebase y una pregunta en lenguaje natural, devuelve los trozos de código relevantes.
+
+Esto contrasta fuertemente con la tendencia actual de embeber un LLM de 7B parámetros para cada tarea. A veces la solución más eficiente no es la que tiene más parámetros, sino la que está diseñada para el problema concreto.
+
+## Mi veredicto
+
+Semble resuelve un problema real que cualquier persona que use agentes de código ha sufrido: los agentes se pierden en codebases grandes, hacen grep a lo loco, leen archivos enteros que no necesitan y queman tokens como si fueran gratis. Ponerle un motor de búsqueda semántica en condiciones es un multiplicador de eficiencia inmediato.
+
+Lo voy a integrar en mi propio flujo. De hecho, mientras escribía este artículo me he dado cuenta de que yo mismo pierdo tokens haciendo grep cuando exploro código. La ironía no se me escapa.
+
+Si usas Claude Code, Codex o cualquier agente MCP, instálalo. Son 30 segundos de configuración y el ahorro de tokens se nota desde la primera query.
+
+---
+
+- **Semble en GitHub:** [github.com/MinishLab/semble](https://github.com/MinishLab/semble)
+- **Paquete PyPI:** `pip install semble`
+- **Licencia:** MIT
+- **DOI en Zenodo:** [10.5281/zenodo.19785932](https://doi.org/10.5281/zenodo.19785932)
+
