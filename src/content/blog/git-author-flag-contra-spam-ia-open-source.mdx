@@ -1,0 +1,129 @@
+---
+title: "El flag de Git que frena el spam de IA en open source"
+date: "2026-05-19T08:00"
+tags: ["git", "open-source", "ia", "github", "spam"]
+excerpt: "Archestra usó `git commit --author` para blindar su repo contra el aluvión de spam generado por IA. El truco es tan simple como brillante."
+---
+
+Hace unos meses GitHub publicó métricas celebrando una "contribución masiva de IA" en sus números de actividad. Lo que no contaron es que buena parte de esa actividad es ruido: issues generados por bots, PRs sin probar, comentarios que solo repiten lo que ya se ha dicho. El _slop_ de IA ha llegado al open source y lo está pudriendo desde dentro.
+
+El equipo de [Archestra](https://archestra.ai), una plataforma open source para agentes, lo ha vivido en sus carnes. Publicaron una issue con un bounty de 900 dólares para añadir soporte de MCP Apps. Llegaron contribuidores reales con planes y preguntas. Y luego llegaron los bots.
+
+## 253 comentarios, 27 PRs y un equipo desbordado
+
+La issue alcanzó los **253 comentarios**. Los bots publicaban planes de implementación generados, propuestas redundantes y hasta mensajes agresivos contra los maintainers. Cada comentario disparaba una notificación para todo el equipo. Las conversaciones reales — de gente como @ethanwater, @developerfred o @Geetk172, que estaban trabajando activamente en el bounty — quedaban enterradas.
+
+Luego el problema mutó en epidemia. Solo para añadir soporte del proveedor x.ai, Archestra recibió **27 pull requests**. La mayoría sin probar. Un miembro del equipo pasaba medio día a la semana limpiando basura de IA del repositorio: PRs sin testear, issues alucinadas, comentarios que no aportaban nada.
+
+Cuando se olvidaban de limpiar, el repo se volvía inhabitable para contribuidores legítimos.
+
+## El intento con bots y sheriffs
+
+Primero construyeron "London-Cat", un bot que calculaba reputación de contribuidores basándose en PRs mergeados. Ayudaba a identificar quién era quién, pero no frenaba el spam.
+
+Luego desplegaron un "AI sheriff" que cerraba automáticamente lo que parecía spam. El problema: también cerró varios PRs legítimos. Cura peor que la enfermedad.
+
+## La opción nuclear: solo contribuidores previos
+
+GitHub tiene un ajuste llamado **"Limit to prior contributors"**. Si lo activas, solo la gente que ya ha commiteado a `main` puede comentar en issues y PRs. Simple y efectivo. Pero tiene una pega obvia: un desarrollador nuevo que quiere contribuir también se queda fuera. No distingue entre un bot de IA y una persona real con ganas de ayudar.
+
+Aquí es donde entra el hack.
+
+## El truco: `git commit --author`
+
+Los commits de Git tienen dos campos de identidad: **author** (quién escribió el código) y **committer** (quién lo aplicó al repo). Pueden ser personas distintas. Y Git te permite crear un commit atribuido a otra persona usando el flag `--author`.
+
+Si el email coincide con la cuenta de GitHub del usuario, GitHub vincula el commit a su perfil y le otorga el estatus de contribuidor. Así de simple.
+
+Cada cuenta de GitHub tiene un email noreply con este formato:
+
+```
+ID+username@users.noreply.github.com
+```
+
+Para conseguir ese email necesitas el ID numérico del usuario, que obtienes con la API de GitHub:
+
+```bash
+gh api users/nombre-de-usuario --jq '.id'
+```
+
+Con ese dato, el commit se construye así:
+
+```bash
+git commit \
+  --author="nombre-de-usuario <ID+nombre-de-usuario@users.noreply.github.com>" \
+  -m "chore: add nombre-de-usuario to external contributors"
+```
+
+Haces push a `main` y esa persona ya es "prior contributor". Puede comentar, abrir issues y enviar PRs al instante.
+
+## El flujo completo que montó Archestra
+
+El sistema funciona con tres piezas encadenadas:
+
+1. **Onboarding con CAPTCHA y reglas éticas** — El nuevo contribuidor pasa por una página donde acepta no usar IA para generar spam y resuelve un CAPTCHA. Nada de bots.
+
+2. **GitHub Action que reacciona al formulario** — Cuando alguien completa el onboarding, una Action consulta la API de GitHub, obtiene el ID del usuario y genera un commit atribuido a esa persona.
+
+3. **Commit a `main` que desbloquea el acceso** — El commit se añade a un archivo `EXTERNAL_CONTRIBUTORS.md` y se pushea. GitHub procesa la autoría y concede los permisos.
+
+El concepto es casi ofensivamente simple: estás usando una feature de Git que existe desde hace décadas para burlar una limitación de GitHub que no debería existir. Es un hack de libro.
+
+## El workflow en una GitHub Action
+
+Aunque Archestra no ha publicado el código exacto de su Action, el esqueleto es fácil de reconstruir. Sería algo así:
+
+```yaml
+name: Onboard Contributor
+
+on:
+  repository_dispatch:
+    types: [contributor-onboard]
+
+jobs:
+  whitelist:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get GitHub user ID
+        id: user
+        run: |
+          USER_ID=$(gh api users/${{ github.event.client_payload.username }} --jq '.id')
+          echo "id=$USER_ID" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add to contributors and push
+        run: |
+          echo "- @${{ github.event.client_payload.username }}" >> EXTERNAL_CONTRIBUTORS.md
+          git config user.name "onboarding-bot"
+          git config user.email "bot@archestra.ai"
+          git add EXTERNAL_CONTRIBUTORS.md
+          git commit \
+            --author="${{ github.event.client_payload.username }} <${{ steps.user.outputs.id }}+${{ github.event.client_payload.username }}@users.noreply.github.com>" \
+            -m "chore: add ${{ github.event.client_payload.username }} to external contributors"
+          git push
+```
+
+Fíjate en un detalle: quien hace `git config` es el bot (`onboarding-bot`), pero el `--author` apunta al nuevo contribuidor. El bot es el _committer_; el humano es el _author_. GitHub solo mira el author para decidir quién es prior contributor.
+
+## El elefante en la habitación
+
+Esto no debería ser necesario.
+
+GitHub presume de métricas infladas por IA mientras los maintainers de proyectos open source hacen horas extra limpiando basura generada por máquinas. No hay una herramienta nativa para distinguir entre un contribuidor humano y un bot que vomita respuestas de LLM.
+
+El caso de Archestra es un síntoma de algo más grande. Igual que pasó con [LiteLLM](https://github.com/BerriAI/litellm), donde atacantes usaron bots de IA para manipular conversaciones en issues. O como lo describió Linus Torvalds hace apenas unos días: las listas de seguridad del kernel se están ahogando en reportes generados por IA sin verificar.
+
+La comunidad está respondiendo con hacks ingeniosos porque las plataformas no están dando soluciones.
+
+## Mi veredicto
+
+Me encanta este hack. Es de esos trucos que cuando los lees piensas "joder, qué obvio, cómo no se me había ocurrido". No requiere infraestructura nueva, no depende de servicios externos, no añade latencia. Es Git estándar.
+
+Pero me preocupa que esto se convierta en la norma. Que cada proyecto open source tenga que montar su propio sistema de verificación de humanos. Que el acto de contribuir a un proyecto pase de "abro un PR y ya" a "regístrate, verifica tu humanidad, espera a que un bot te dé permisos". Es fricción. Y la fricción mata comunidades.
+
+Mientras tanto, el `--author` de Git — un flag que existe desde los noventa — se ha convertido en un arma accidental contra el spam de IA. La vieja guardia salvando el presente. Como tiene que ser.
