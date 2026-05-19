@@ -1,0 +1,138 @@
+---
+title: "Fragnesia: la page cache de Linux vuelve a sangrar"
+date: "2026-05-19T18:00"
+tags:
+  - linux
+  - kernel
+  - seguridad
+  - cve
+  - lpe
+excerpt: "Fragnesia (CVE-2026-46300) es el tercer LPE del kernel en semanas que escribe en páginas de solo lectura. Sin race condition, sin offsets. Gentoo ya parchea."
+---
+
+Si hace tres semanas te contaba lo de Copy Fail — el bug del kernel que daba root con 732 bytes de Python — y pensaste «bueno, ya lo han parcheado, a otra cosa», tengo malas noticias. La page cache de Linux se ha convertido en el vector de ataque de moda y no tiene pinta de acabarse pronto.
+
+El 7 de mayo se publicó **Dirty Frag**, una cadena de dos vulnerabilidades (CVE-2026-43284 y CVE-2026-43500) que consigue lo mismo que Copy Fail pero por una ruta completamente distinta: el subsistema XFRM de IPsec. Y hoy, 19 de mayo, Gentoo ha publicado un aviso urgente porque ha aparecido una tercera: **Fragnesia** (CVE-2026-46300), otro bug en la misma superficie que ni siquiera necesita los dos CVEs de Dirty Frag para funcionar. Basta uno solo.
+
+Tres bugs. Tres técnicas distintas. Todas escribiendo en páginas de solo lectura de la page cache. Y lo más inquietante: el parche de Fragnesia llegó a los kernels de Gentoo **antes que al mainline de Linus**.
+
+## La familia Dirty: de Pipe a Fragnesia
+
+Para entender de dónde viene esto hay que retroceder a 2022. Dirty Pipe (CVE-2022-0847) fue el primer gran exploit de page-cache write: un splice() mal sincronizado permitía sobrescribir páginas cacheadas de archivos read-only. Copy Fail (CVE-2026-31431) fue el siguiente, usando AF_ALG + authencesn para escribir 4 bytes fuera de los límites de un scatterlist. Ambos comparten el mismo _sink_: una escritura no autorizada sobre la page cache del kernel.
+
+Dirty Frag, descubierto por Hyunwoo Kim (@v4bel), extiende la familia con dos variantes:
+
+- **CVE-2026-43284 (xfrm-ESP Page-Cache Write):** un bug en el subsistema ESP de XFRM que lleva en el kernel desde 2017. Requiere poder crear namespaces de red, algo que la mayoría de distribuciones permiten por defecto.
+- **CVE-2026-43500 (RxRPC Page-Cache Write):** un bug en RxRPC desde 2023. No necesita namespaces, pero el módulo `rxrpc.ko` solo se carga por defecto en Ubuntu.
+
+Encadenando los dos, Dirty Frag cubre **todas** las distribuciones principales. Si AppArmor bloquea los namespaces (Ubuntu), RxRPC da el relevo. Si RxRPC no está cargado (RHEL, Fedora, SUSE), el XFRM hace el trabajo.
+
+Y luego llegó Fragnesia.
+
+## Fragnesia: cuando el kernel olvida que un fragmento es compartido
+
+Fragnesia (CVE-2026-46300) la encontró William Bowling con **V12**, una herramienta de seguridad agentiva. Es un bug _separado_ de Dirty Frag, en la misma superficie XFRM ESP-in-TCP, y tiene su propio parche independiente. CVSS de 7.8.
+
+El bug es sutil. Cuando un socket TCP transiciona al modo ULP `espintcp` con datos ya encolados provenientes de un splice(), el kernel intenta descifrar esos datos _in-place_ como si fueran tráfico ESP. El problema está en el coalescing de fragmentos del socket buffer: un `sk_buff` «olvida» que uno de sus fragmentos está compartido con la page cache de un archivo, y la operación de descifrado AES-GCM aplica el XOR del keystream directamente sobre la página cacheada.
+
+Esto es brillante y aterrador a partes iguales. No hay condición de carrera. No necesitas adivinar offsets del kernel. El exploit construye una tabla de 256 entradas que mapea cada posible byte del keystream AES-GCM a su nonce correspondiente, y luego itera byte a byte sobre el payload deseado.
+
+Vamos a verlo conceptualmente:
+
+```c
+// Representación conceptual del ataque Fragnesia
+// (no es código real del kernel, es un esqueleto didáctico)
+
+// 1. Creamos un namespace donde tenemos CAP_NET_ADMIN
+unshare(CLONE_NEWUSER | CLONE_NEWNET);
+
+// 2. Instalamos una Security Association XFRM con AES-128-GCM
+int xfrm_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_XFRM);
+instalar_sa_espintcp(xfrm_fd, clave_aes_128, spi_0x100);
+
+// 3. Construimos la tabla de keystream: qué nonce produce qué byte
+uint8_t tabla[256];
+for (int nonce = 0; nonce < 65536; nonce++) {
+    uint8_t keystream_byte = aes_gcm_encrypt_block(clave, nonce, seq=2);
+    if (tabla[keystream_byte] == 0)
+        tabla[keystream_byte] = nonce;
+}
+
+// 4. Para cada byte del payload que queremos inyectar...
+for (int i = 0; i < len(payload); i++) {
+    uint8_t deseado  = payload[i];
+    uint8_t actual   = leer_byte_pagina_cache("/usr/bin/su", offset + i);
+    uint8_t xor_byte = actual ^ deseado;
+    uint16_t nonce   = tabla[xor_byte];
+
+    // splice() mete la página de /usr/bin/su en el socket
+    splice(target_fd, tcp_tx, 4096, offset_src=offset + i);
+
+    // El receptor activa TCP_ULP espintcp DESPUÉS del splice
+    setsockopt(tcp_rx, SOL_TCP, TCP_ULP, "espintcp", 8);
+
+    // El kernel descifra in-place → XOR en la page cache
+    // La página ya tiene el byte modificado
+}
+
+// 5. Ejecutamos el binario corrupto en page cache
+execve("/usr/bin/su", NULL, NULL);  // → root shell
+```
+
+La genialidad está en el paso 3. AES-GCM genera un bloque de keystream de 16 bytes para cada número de secuencia. El exploit solo necesita el byte 0 de ese bloque. Variando los 32 bits bajos del IV (nonce), los 256 posibles valores aparecen dentro de los primeros 65536 nonces. Construir la tabla cuesta milisegundos. Luego, para cada byte del payload, el exploit calcula `xor_byte = actual ^ deseado`, busca el nonce correspondiente en la tabla y dispara el trigger.
+
+El payload típico es un pequeño stub ELF position-independent que llama a `setresuid(0,0,0)`, `setresgid(0,0,0)` y `execve("/bin/sh")`. Unos 192 bytes. Se inyectan sobre los primeros bytes de `/usr/bin/su` en la page cache. El binario en disco sigue intacto — `sha256sum` devuelve el hash original. Pero al ejecutar `su`, el kernel lee de la page cache y ejecuta el stub.
+
+## El caos limpio del coalescing
+
+La raíz del bug está en cómo el kernel coalesce fragmentos de socket buffers. Cuando TCP recibe datos y los junta para ser más eficiente, puede perder la noción de que un fragmento concreto pertenece a una página compartida (la page cache de un archivo spliceado). El flag `skb_shinfo(skb)->frag_list` y el sistema de referencias compartidas `page->_refcount` deberían prevenir esto, pero la transición a `espintcp` crea un code path donde el chequeo no ocurre.
+
+El resultado: la rutina de descifrado AES-GCM del kernel XORa el keystream directamente sobre la página física que respalda la entrada del VFS page cache para `/usr/bin/su`. Una vez escrito, el cambio es visible para cualquier lectura de ese archivo — incluyendo `execve()`.
+
+Como las páginas no se marcan como sucias (porque el kernel no «sabe» que las ha modificado; la escritura vino del subsistema de red, no de VFS), no hay writeback a disco. El archivo sigue igual. Las herramientas de integridad no ven nada. Pero el binario en ejecución es otro.
+
+## ¿Esto no se parece a Copy Fail?
+
+Sí y no. Copy Fail usa AF_ALG + authencesn para escribir 4 bytes fuera del scatterlist de salida. Fragnesia usa XFRM + espintcp para escribir 1 byte a la vez mediante XOR del keystream AES-GCM. Mismo _sink_ (page cache de archivos read-only), distinto _source_ (subsistema criptográfico vs subsistema de red), distinto mecanismo de escritura (out-of-bounds en C vs descifrado in-place en C).
+
+Pero la implicación es la misma: si tienes Copy Fail mitigado con `rmmod algif_aead`, sigues siendo vulnerable a Dirty Frag y Fragnesia. La superficie de ataque de la page cache es más amplia de lo que nadie pensaba.
+
+## Gentoo se adelanta a upstream
+
+El aviso de Gentoo de hoy es notable por una razón: **los kernels de Gentoo incluyen el parche de Fragnesia desde el día uno, mientras que el mainline aún es vulnerable**. Esto es inusual. Normalmente las distros van por detrás de Linus, no por delante.
+
+El equipo de Gentoo Kernel y Distribution Kernel está haciendo backport agresivo de los fixes de Dirty Frag y Fragnesia a sus kernels estables. Si usas `sys-kernel/gentoo-kernel`, `gentoo-kernel-bin` o `gentoo-sources`, tienes el parche. Si usas los paquetes vanilla (`gentoo-vanilla-kernel` o `gentoo-vanilla-sources`), no — estás vulnerable en el momento de escribir esto.
+
+También recomiendan estar en la última versión estable (~arch o latest stable LTS), porque upstream no está haciendo backport fiable de estos fixes a kernels más antiguos.
+
+## Qué hacer si administras servidores
+
+La mitigación inmediata es la misma que para Dirty Frag:
+
+```bash
+# Descargar los módulos vulnerables y prevenir su recarga
+cat > /etc/modprobe.d/dirtyfrag.conf << 'EOF'
+install esp4 /bin/false
+install esp6 /bin/false
+install rxrpc /bin/false
+EOF
+
+rmmod esp4 esp6 rxrpc 2>/dev/null || true
+echo 3 > /proc/sys/vm/drop_caches
+```
+
+¿Rompe algo? Salvo que estés usando IPsec con ESP (la mayoría de la gente usa WireGuard hoy) o RxRPC (que casi nadie usa directamente), no. El tráfico de red normal, WireGuard, LUKS, TLS — todo sigue funcionando.
+
+Y luego actualiza el kernel en cuanto tu distribución publique el parche.
+
+## Mi veredicto
+
+Hay algo profundamente irónico en todo esto. Copy Fail lo encontró Xint Code, una IA de seguridad ofensiva. Dirty Frag lo encontró un investigador humano (@v4bel) inspirado por Copy Fail. Fragnesia lo encontró V12, otra IA agentiva de seguridad. La herramienta que iba a inundar el kernel de informes de baja calidad — según Linus hace unos días — es la misma que está encontrando vulnerabilidades que llevaban nueve años escondidas.
+
+No es que la IA sea mágica. Es que la IA escala. Un humano puede pasarse semanas auditando un subsistema del kernel. Una IA puede auditar _todos_ los subsistemas en horas. Y cuando encuentra un patrón — «las páginas de la page cache acaban en scatterlists y nadie comprueba su procedencia» — lo persigue sistemáticamente por cada code path.
+
+El resultado es esta cascada de CVEs. Copy Fail en abril. Dirty Frag a principios de mayo. Fragnesia a mediados de mayo. Y según Xint Code, aún hay más vulnerabilidades de alta severidad en divulgación coordinada.
+
+La page cache de Linux es el nuevo memory safety de los 90. Un diseño que funcionaba perfectamente bajo ciertas asunciones implícitas — «nadie va a encadenar splice() con operaciones criptográficas in-place» — hasta que alguien lo hace. Y cuando una asunción se rompe, se rompe en todos los sitios donde se daba por sentada.
+
+Mi predicción: veremos más bugs de esta clase en los próximos meses. La superficie es enorme y las herramientas para explorarla son cada vez más rápidas. Si administras servidores Linux, automatiza las actualizaciones de kernel. De verdad.
