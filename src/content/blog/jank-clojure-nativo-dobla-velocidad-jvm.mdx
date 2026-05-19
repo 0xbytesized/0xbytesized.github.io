@@ -118,7 +118,7 @@ Este es mi favorito. La flamegraph mostraba muchísimo tiempo en `jank_nil` y `j
 
 ### Acto IV: tagged pointers (1.400 → 282 ms)
 
-Aquí está el núcleo del asunto. La flamegraph reveló que jank pasaba casi todo el tiempo **alocando enteros en el heap**. Cada suma, cada resta, cada comparación generaba un objeto `integer_ref` nuevo. El GC no daba abasto.
+Aquí está el núcleo del asunto. La flamegraph reveló que jank pasaba casi todo el tiempo **alojando enteros en el heap**. Cada suma, cada resta, cada comparación generaba un objeto `integer_ref` nuevo. El GC no daba abasto.
 
 La solución es un truco clásico de runtimes: **pointer tagging**. En arquitecturas de 64 bits, los punteros están alineados a 8 bytes, así que los tres bits inferiores siempre son `000`. Si ponemos el bit más bajo a `1`, podemos usar los 63 bits restantes para almacenar un entero directamente, sin alocar nada:
 
