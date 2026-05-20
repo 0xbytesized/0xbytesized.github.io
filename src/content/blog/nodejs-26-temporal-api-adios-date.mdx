@@ -1,0 +1,94 @@
+---
+title: "Node.js 26: la API Temporal llega para jubilar a Date"
+date: "2026-05-20T18:00"
+tags: ["nodejs", "javascript", "temporal", "v8", "backend"]
+excerpt: "Node.js 26 activa Temporal por defecto: la nueva API de fechas que resuelve 30 años de dolores con Date. Zonas horarias, aritmética inmutable y adiós a los bugs."
+---
+
+El 5 de mayo de 2026 el equipo de Node.js lanzó la versión 26.0.0 y, aunque el anuncio puede parecer uno más en el calendario de releases semestrales, esta es de las que marcan un antes y un después. La razón tiene nombre propio: **Temporal**.
+
+Si llevas unos años escribiendo JavaScript, sabes de lo que hablo. El objeto `Date` lleva con nosotros desde 1995 — literalmente es un port directo de `java.util.Date` — y ha acumulado tantas arrugas que da vergüenza ajena:
+
+```javascript
+// El mes 0 es enero. Obvio, ¿no?
+const fecha = new Date(2026, 0, 1);
+// Thu Jan 01 2026 — claro, mes 0 = enero, como todos esperarían
+
+// Sumar un día requiere este baile:
+const manana = new Date(fecha);
+manana.setDate(manana.getDate() + 1);
+
+// Porque esto MUTA el objeto original — Date es mutable:
+fecha.setFullYear(2027);
+console.log(manana.getFullYear()); // ¡2027! Acabas de mutar un objeto que creías independiente
+```
+
+Temporal llega para enterrar todo esto. No es un parche, no es un polyfill, no es una librería de npm con 14 millones de dependencias. Es un estándar TC39 (Stage 3 desde 2021, finalizado en 2025) que ahora Node.js enciende **por defecto** en la versión 26.
+
+## Temporal en la práctica
+
+La API se organiza en dos tipos principales: `PlainDateTime` para fechas sin zona horaria y `ZonedDateTime` cuando necesitas el contexto geográfico completo. Ambos son **inmutables** — cada operación devuelve un objeto nuevo, cero efectos secundarios.
+
+```javascript
+// Temporal.PlainDate: fecha pura, sin hora, sin zona
+const inicio = Temporal.PlainDate.from("2026-05-20");
+const fin = inicio.add({ days: 30 });
+// inicio sigue siendo 2026-05-20, fin es 2026-06-19
+
+// Comparación: funciona como esperas
+const antes = Temporal.PlainDate.from("2026-01-01");
+Temporal.PlainDate.compare(antes, inicio); // -1, como debe ser
+```
+
+Donde Temporal realmente brilla es con las zonas horarias. Cualquiera que haya tenido que mostrar la hora de un evento en Madrid, Buenos Aires y Tokio a la vez sabe el infierno que era con `Date`:
+
+```javascript
+// Con Date necesitabas Intl.DateTimeFormat y rezar
+// Con Temporal es directo:
+const ahora = Temporal.Now.zonedDateTimeISO("Europe/Madrid");
+
+// ¿Qué hora es en Tokyo en este mismo instante?
+const enTokyo = ahora.withTimeZone("Asia/Tokyo");
+console.log(ahora.toString());    // 2026-05-20T20:00:00+02:00[Europe/Madrid]
+console.log(enTokyo.toString());  // 2026-05-21T03:00:00+09:00[Asia/Tokyo]
+
+// Diferencia exacta entre dos instantes
+const duracion = ahora.since(enTokyo, { largestUnit: "hours" });
+```
+
+También resuelve uno de los bugs más clásicos de JavaScript: la diferencia de días entre dos fechas. Con `Date` tenías que restar timestamps, dividir por 86400000 y cruzar los dedos para que el cambio horario no te la jugase. Con Temporal:
+
+```javascript
+const inicio = Temporal.PlainDate.from("2026-03-27");
+const fin = Temporal.PlainDate.from("2026-03-30");
+
+// En la madrugada del 29 de marzo hay cambio de hora en España
+// Con Date: (fin - inicio) / 86400000 = 2.95833... días (MAL)
+// Con Temporal:
+const diff = inicio.until(fin);
+console.log(diff.days); // 3 (BIEN)
+```
+
+## Más allá de Temporal
+
+Node.js 26 no es solo Temporal. Trae V8 14.6, que incluye un par de adiciones a la stdlib que me gustan bastante:
+
+- **`Map.prototype.getOrInsert()`** y **`WeakMap.prototype.getOrInsertComputed()`**: el patrón "si existe lo devuelvo, si no lo creo y lo inserto" deja de necesitar tres líneas. Un caramelito.
+
+- **`Iterator.concat()`**: encadenar iteradores sin desplegarlos en arrays intermedios. Para streams y generadores es oro puro.
+
+También se actualiza **Undici a la versión 8**, el cliente HTTP que usa `fetch()` por debajo en Node.js. Y en el apartado de crypto, se cablean **ML-DSA y ML-KEM** (criptografía post-cuántica) y **ChaCha20-Poly1305** en Web Cryptography cuando usas BoringSSL.
+
+En el capítulo de despedidas, Node.js 26 dice adiós definitivo a `http.Server.prototype.writeHeader()` (usad `writeHead()`), elimina los módulos internos `_stream_*`, retira `--experimental-transform-types` (el soporte de TypeScript ya va por otra vía) y pasa a runtime deprecation `module.register()`.
+
+## Mi veredicto
+
+He escrito JavaScript desde que `callback hell` era el pan de cada día y he visto el ecosistema evolucionar de formas que nadie esperaba. La llegada de Temporal por defecto me parece, sin exagerar, el cambio más importante en el lenguaje estándar desde `async/await`.
+
+No es un syntax sugar bonito. No es una feature que usarás una vez al año. Las fechas están en todas partes: logs, auditorías, calendarios, vencimientos, facturación, autenticación. Y durante tres décadas hemos estado usando una herramienta rota para todo eso.
+
+Lo mejor es que Temporal ya está en los navegadores modernos (Chrome, Firefox, Safari) desde hace meses. Con Node.js 26 encendiéndolo por defecto, el último reducto de resistencia se cae. Podemos empezar a escribir código de fechas que funcione bien en servidor y cliente sin polyfills ni `moment`, `luxon` o `date-fns`.
+
+Mi recomendación: si mantienes un proyecto en Node.js, empieza a migrar tus manipulaciones de fecha a Temporal hoy. No porque Date vaya a desaparecer (no lo hará en mucho tiempo), sino porque la diferencia en legibilidad y corrección es tan grande que volver atrás te va a doler.
+
+Node.js 26 entrará en LTS en octubre de 2026. Hasta entonces es la rama Current, pero no esperaría a octubre para probarlo. `nvm install 26` y a jugar.
