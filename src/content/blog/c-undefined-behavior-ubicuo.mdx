@@ -1,0 +1,139 @@
+---
+title: "C: el lenguaje donde todo es undefined behavior"
+date: "2026-05-20T07:00"
+tags: ["c", "cpp", "undefined-behavior", "seguridad", "lenguajes"]
+excerpt: "Un veterano de 30 años en C++ sostiene que nadie escribe C correcto. El undefined behavior está en todas partes, incluso donde menos lo esperas."
+---
+
+El 19 de mayo de 2026, Thomas Habets —un programador que lleva 30 años escribiendo C y C++ a diario— publicó un artículo demoledor: [Everything in C is undefined behavior](https://blog.habets.se/2026/05/Everything-in-C-is-undefined-behavior.html). Su tesis es tan simple como devastadora: **nadie puede escribir C o C++ correcto**. Todo código no trivial tiene undefined behavior (UB). No es una cuestión de habilidad. Es una propiedad del lenguaje.
+
+La publicación llegó a la portada de Hacker News con 67 puntos y 27 comentarios, y generó un debate intenso entre quienes defienden C como herramienta insustituible y quienes hace tiempo que migraron a Rust, Zig o Go.
+
+## No son solo los sospechosos habituales
+
+Todos conocemos los UB clásicos: double-free, use-after-free, acceso fuera de límites de un array, leer memoria no inicializada. Son los que explotan los fuzzers, los que copan los boletines de seguridad del kernel de Linux y los que los sanitizers detectan con banderas rojas.
+
+Pero Habets va más allá. Su argumento es que hay UB **mucho más sutil**, en operaciones que cualquier programador da por sentadas. Veamos algunos ejemplos.
+
+## Punteros desalineados: el UB que nadie ve
+
+Este código parece inofensivo:
+
+```c
+int foo(const int *p) {
+    return *p;
+}
+```
+
+Si llamas a `foo` con un puntero que no está alineado a `sizeof(int)`, es UB. Punto. C23 §6.3.2.3.
+
+¿Las consecuencias? Dependen de la arquitectura. En Alpha Linux, el kernel emulaba *algunos* accesos desalineados por software y en otros lanzaba SIGBUS. En SPARC, SIGBUS directo. En x86, probablemente funcione — incluso podría ser atómico. En ARM y RISC-V, quién sabe. Y en una arquitectura futura, tal vez los punteros a `int` tengan bits de tagging y el compilador ni siquiera tenga forma de representar un acceso desalineado.
+
+Pero la cosa es peor. Resulta que **el mero hecho de crear el puntero ya es UB**, incluso antes de desreferenciarlo:
+
+```c
+bool parse_packet(const uint8_t *bytes) {
+    const int *magic_intp = (const int *)bytes;  // UB aquí
+    int magic_raw = foo(magic_intp);
+    // ...
+}
+```
+
+Ese cast de `uint8_t*` a `int*` es UB si los bytes no están alineados. El compilador tiene derecho a asumir que ese puntero está alineado y generar código que falle estrepitosamente si no es el caso. No necesitas ni leer el valor.
+
+## `isxdigit()`: el UB escondido en la biblioteca estándar
+
+Este ejemplo es brutal por lo cotidiano que es:
+
+```c
+bool bar(char ch) {
+    return isxdigit(ch);
+}
+```
+
+Parece correcto. `isxdigit` comprueba si un carácter es un dígito hexadecimal. ¿Qué puede salir mal?
+
+Resulta que `isxdigit` recibe un `int`, no un `char`. Si en tu plataforma `char` es `signed` (depende de la implementación, C23 §6.2.5 p20) y le pasas un carácter con el bit alto a 1 (como `ñ`, `á`, o cualquier byte > 127), la promoción a `int` produce un valor **negativo**.
+
+Y esta implementación de `isxdigit` es perfectamente legal:
+
+```c
+int isxdigit(int c) {
+    if (c == EOF) return false;
+    return some_array[c];  // índice negativo = UB
+}
+```
+
+Estás leyendo fuera de los límites de `some_array` y ni te has enterado. En un sistema embebido, ese acceso podría incluso mapear a memoria de E/S y provocar que un motor se encienda sin querer. En userspace, corrupción de memoria silenciosa como mínimo.
+
+## Convertir `float` a `int`: una odisea
+
+¿Cuántas veces has escrito algo así?
+
+```c
+int milliseconds(float seconds) {
+    int tmp = (int)(seconds * 1000.0);
+    return tmp + 1;  // UB si tmp == INT_MAX (signed overflow)
+}
+```
+
+Dos UB en tres líneas. El primero: si el resultado de `seconds * 1000.0` no cabe en un `int`, la conversión es UB (C23 §6.3.1.4). El segundo: si `tmp` es `INT_MAX`, sumarle 1 es signed overflow, que también es UB.
+
+Vale, pensemos en arreglarlo. Habets propone esta versión "segura":
+
+```c
+int milliseconds(float seconds) {
+    const float ftmp = seconds * 1000.0f;
+    if (!isfinite(ftmp)) return 0;
+    if ((float)(INT_MIN + 1000) > ftmp) return 0;
+    if ((float)(INT_MAX - 1000) < ftmp) return 0;
+    const int tmp = (int)ftmp;
+    if (INT_MAX == tmp) return 0;
+    return tmp + 1;
+}
+```
+
+Dieciséis líneas para hacer lo que conceptualmente es "multiplicar por mil y convertir a entero". Y aún así, este código asume que `INT_MAX` cabe exactamente en un `float` (spoiler: en plataformas de 64 bits con `float` de 32 bits, no cabe). Así que incluso la versión "arreglada" tiene edge cases.
+
+## El puntero nulo y la dirección cero
+
+Este es un problema que afecta sobre todo a kernels y sistemas embebidos, pero tiene implicaciones para todos. El estándar C dice que desreferenciar un puntero nulo es UB. Hasta ahí, obvio.
+
+Pero también dice que `NULL` **no tiene por qué ser la dirección de máquina cero**. Puede ser `0xFFFF` o cualquier otra cosa. Es el *null pointer constant*, que se compara igual a cero en el lenguaje, pero su representación binaria es decisión de la plataforma.
+
+Esto tiene una consecuencia práctica brutal:
+
+```c
+struct config {
+    char *path;
+    int mode;
+};
+
+struct config cfg;
+memset(&cfg, 0, sizeof(cfg));  // cfg.path NO es necesariamente NULL
+```
+
+Poner a cero una estructura con `memset` **no garantiza** que los punteros miembro sean `NULL`. Si tu plataforma usa `0xFFFFFFFF` como representación del puntero nulo, `cfg.path` apunta a `0x00000000`, que es una dirección perfectamente válida. Y desreferenciarla no es desreferenciar NULL — pero si hay algo ahí, leerás basura. Si no lo hay, crash.
+
+## Mi opinión
+
+Llevo meses cubriendo vulnerabilidades en este blog: el heap overflow de nginx que estuvo 17 años oculto, las CVEs de dnsmasq encontradas por IA, los bugs en el page cache de Linux, el exploit de Pixel 10 por un `remap_pfn_range` sin límites. Todos tienen un denominador común: **C**.
+
+No estoy diciendo que C sea un mal lenguaje. Es el lenguaje que nos dio UNIX, Linux, Git, nginx, PostgreSQL y prácticamente toda la infraestructura sobre la que corre internet. Pero en 2026, seguir escribiendo software nuevo en C para sistemas expuestos a entradas no confiables es, como mínimo, una decisión que requiere justificación.
+
+Habets menciona de pasada que hace una década alguien argumentó que usar C++ en ciertos contextos podría considerarse una violación de la ley Sarbanes-Oxley. No sé si exagera, pero la dirección del viento es clara: la [NSA recomienda migrar a lenguajes memory-safe](https://www.nsa.gov/Press-Room/Press-Releases-Statements/Press-Release-View/Article/3608324/us-and-international-partners-issue-recommendations-to-secure-software-products/), la Casa Blanca ha publicado directrices al respecto y Linux —el bastión definitivo de C— está integrando Rust en el kernel.
+
+### Mi veredicto
+
+El artículo de Habets no es una llamada al pánico. Es una llamada a la humildad. Aceptar que el lenguaje que usamos tiene fisuras por todas partes no significa abandonarlo mañana. Significa:
+
+1. **Usar las herramientas disponibles**: `-fsanitize=undefined,address`, `-Wconversion`, `-Wall -Wextra`, UBSan en CI.
+2. **No fiarse de "en mi máquina funciona"**: x86 es increíblemente permisivo. ARM y RISC-V no lo son tanto. Si solo testeás en x86, estás viviendo en una burbuja.
+3. **Separar lo crítico de lo accesorio**: el parser de un formato binario expuesto a internet en C es jugar con fuego. Rust o Zig tienen curvas de aprendizaje, pero el coste de un RCE en producción es mayor.
+4. **No reinventar parsers de paquetes con casts de `uint8_t*` a `int*`**: usar `memcpy` y dejar que el compilador optimice. Es la forma estándar de evitar el UB de alineación.
+
+El problema no es que C tenga undefined behavior. El problema es que está en sitios donde ningún programador razonable esperaría encontrarlo.
+
+---
+
+*Fuente: [Everything in C is undefined behavior](https://blog.habets.se/2026/05/Everything-in-C-is-undefined-behavior.html) por Thomas Habets, publicado el 19 de mayo de 2026.*
