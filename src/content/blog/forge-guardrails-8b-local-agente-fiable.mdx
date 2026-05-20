@@ -1,0 +1,184 @@
+---
+title: "Forge: cómo un 8B local aprende a usar herramientas"
+date: "2026-05-20T02:56"
+tags: ["python", "llm", "agentes", "open-source", "tool-calling"]
+excerpt: "Un framework Python de 0.6.0 lleva un modelo local de 8B del 53% al 99% de fiabilidad en tareas agentivas. Sin APIs, sin nube, sin excusas."
+---
+
+Hace unos días apareció en Hacker News un Show HN que me hizo soltar una carcajada de pura admiración. El título era directo: «Guardrails take an 8B model from 53% to 99% on agentic tasks». Lo firmaba Antoine Zambelli y el proyecto se llama [Forge](https://github.com/antoinezambelli/forge).
+
+La premisa es casi ofensiva por lo obvia: los modelos pequeños son malísimos usando herramientas. Un 8B local llama a funciones que no existen, devuelve JSON roto, se olvida de pasos intermedios y decide que ya ha terminado después de la primera llamada… cuando le quedan tres herramientas por ejecutar. Todo el mundo que ha intentando correr agentes con modelos locales lo sabe. Forge lo resuelve con una capa de guardrails que no toca el modelo, solo lo corrige.
+
+## El problema: los modelos pequeños son agentes terribles
+
+Cuando ejecutas un modelo local de 8B (tipo Mistral o Llama) con herramientas, la tasa de éxito en tareas de varios pasos ronda el 50-60%. No es que el modelo sea tonto: es que el formato de tool-calling es frágil y los modelos pequeños no tienen suficiente "ancho de banda" para mantener la disciplina sintáctica mientras razonan sobre qué herramienta usar y con qué argumentos.
+
+El resultado: JSON malformado, nombres de herramienta inventados, parámetros con tipos equivocados y —mi favorito— el modelo responde en texto plano en vez de emitir una llamada a herramienta. Como si pidieras un JSON y te devolviera "pues mira, creo que la función que necesitas es…".
+
+Forge parte de un benchmark propio de 26 escenarios. Con un modelo de 8B sin guardrails y con el backend adecuado, la tasa de acierto ronda el 53%. Con los guardrails de Forge, la misma configuración sube al 99% en el tier básico y al 86.5% global. En los escenarios más difíciles (razonamiento avanzado, recuperación de errores, síntesis con datos incompletos), llega al 76%. Son números que ponen a un modelo local de 8B al nivel de modelos frontera en tareas agentivas.
+
+## Cómo funciona: tres capas que corrigen sin tocar el modelo
+
+Forge no es un framework de agentes al uso. No reinventa LangChain ni compite con CrewAI. Es una capa de fiabilidad que se interpone entre tu código y el modelo, aplicando tres tipos de correcciones:
+
+### 1. Rescue parsing: rescatar tool calls del texto plano
+
+La primera capa es `ResponseValidator`. Cuando el modelo responde en texto en vez de emitir una llamada estructurada, el validador intenta extraer la tool call del texto mediante un parser especializado. Si encuentra algo que parece una llamada válida, la rescata y la inyecta como tool call real. Si no, genera un nudge de reintento.
+
+```python
+from forge.guardrails import ResponseValidator
+
+validator = ResponseValidator(
+    tool_names=["get_weather", "search_docs", "send_email"],
+    rescue_enabled=True,
+)
+
+result = validator.validate(model_response)
+
+if result.needs_retry:
+    # Inyecta el nudge en el historial y reenvía al modelo
+    messages.append({"role": result.nudge.role, "content": result.nudge.content})
+else:
+    # Tool calls válidos, ejecútalos
+    for tc in result.tool_calls:
+        execute(tc)
+```
+
+Esto por sí solo recupera una cantidad sorprendente de fallos. El modelo dice "voy a llamar a get_weather con city='París'" en vez de emitir el JSON, y Forge lo convierte en una llamada real. Magia sin tocar pesos.
+
+### 2. Retry nudges: corregir sin castigar
+
+La segunda capa son los nudges. Cuando el modelo se equivoca (herramienta inexistente, parámetros mal, JSON roto sin rescate posible), Forge no aborta. Inyecta un mensaje en el historial de conversación explicando qué falló y pidiendo un reintento.
+
+```python
+from forge.guardrails.nudge import Nudge
+from forge.prompts import retry_nudge
+
+# Forge genera esto automáticamente, pero puedes personalizarlo
+nudge = Nudge(
+    role="user",
+    content=retry_nudge(raw_response_text),
+    kind="retry",
+    tier=0,
+)
+```
+
+El nudge es sutil: no regaña al modelo, solo le da el contexto que le falta. "La herramienta 'get_wether' no existe. Las herramientas disponibles son: get_weather, search_docs, send_email. Inténtalo de nuevo." Y el modelo, con ese empujón, acierta a la segunda en la gran mayoría de casos.
+
+### 3. Step enforcement: no te saltes pasos
+
+La tercera capa es la más interesante: `StepEnforcer` obliga al modelo a seguir una secuencia de pasos antes de llegar a la herramienta terminal. Si tu workflow requiere buscar, filtrar, procesar y luego enviar, el enforcer se asegura de que el modelo no llame a "enviar" después del primer "buscar".
+
+```python
+from forge.guardrails import StepEnforcer
+
+enforcer = StepEnforcer(
+    required_steps=["search_docs", "analyze_results"],
+    terminal_tools=frozenset(["send_report"]),
+    max_premature_attempts=3,
+)
+
+check = enforcer.check(tool_calls)
+
+if check.needs_nudge:
+    messages.append({"role": check.nudge.role, "content": check.nudge.content})
+```
+
+Los nudges de paso son escalonados: el primero es amable ("recuerda que antes de enviar el informe debes analizar los resultados"), el segundo es firme y el tercero es directo. Tres intentos y el enforcer lanza una excepción. Mejor fallar estrepitosamente que entregar un resultado incompleto.
+
+## Gestión de contexto para no reventar la VRAM
+
+Forge incluye un sistema de compactación de contexto porque los modelos locales tienen ventanas pequeñas y los workflows agentivos generan mucha conversación. La clase `ContextManager` acepta estrategias como `TieredCompact`, que poda el historial por capas de prioridad:
+
+```python
+from forge.context import ContextManager, TieredCompact
+
+ctx = ContextManager(
+    strategy=TieredCompact(keep_recent=2),
+    budget_tokens=8192,
+)
+
+# Forge compacta automáticamente cuando se acerca al límite
+runner = WorkflowRunner(client=client, context_manager=ctx)
+```
+
+La prioridad de poda es quirúrgica: primero elimina nudges antiguos (correcciones efímeras), luego resultados de herramientas (conservando la primera línea), después compacta tool calls a una línea y solo al final toca el razonamiento del modelo. Las iteraciones recientes se preservan intactas. Es un diseño que demuestra que Zambelli ha sufrido en producción.
+
+## Tres formas de usarlo: elige tu veneno
+
+Forge se puede usar de tres maneras, y eso es parte de su genialidad:
+
+**WorkflowRunner**: defines herramientas, eliges backend y Forge gestiona el ciclo completo. Ideal para construir agentes desde cero.
+
+```python
+from forge import WorkflowRunner, Workflow, ToolDef, ToolSpec
+from forge.clients import OllamaClient
+
+workflow = Workflow(
+    name="research",
+    description="Investiga un tema y genera un informe",
+    tools={
+        "search": ToolDef(
+            spec=ToolSpec(
+                name="search",
+                description="Busca información en la base de conocimiento",
+                parameters=SearchParams,
+            ),
+            callable=search_kb,
+        ),
+    },
+    required_steps=["search"],
+    terminal_tool="summarize",
+)
+
+client = OllamaClient(
+    model="ministral-3:8b-instruct-2512-q4_K_M",
+    recommended_sampling=True,
+)
+
+runner = WorkflowRunner(client=client)
+await runner.run(workflow, "¿Qué sabemos sobre el proyecto Nexus?")
+```
+
+**Middleware de guardrails**: integras solo la capa de validación en tu propio bucle de orquestación. Tú controlas el flujo; Forge corrige las respuestas.
+
+**Proxy server**: un `python -m forge.proxy` y tienes un endpoint compatible con OpenAI que aplica guardrails transparentemente. Apuntas OpenCode, Continue o Aider a `http://localhost:8081/v1` y tu cliente cree que habla con un modelo más inteligente.
+
+El proxy es una genialidad adicional: inyecta una herramienta sintética `respond` para mantener al modelo en modo tool-calling incluso cuando debería responder en texto. El modelo llama a `respond(message="...")` y el proxy elimina esa llamada antes de devolver la respuesta. El cliente nunca sabe que existió.
+
+## SlotWorker: múltiples agentes, una GPU
+
+Para arquitecturas multi-agente, Forge incluye `SlotWorker`, un sistema de colas con prioridad y expropiación que permite que varios workflows compartan una GPU sin pisarse:
+
+```python
+from forge.core.slot_worker import SlotWorker
+
+worker = SlotWorker(runner=runner)
+await worker.start()
+
+# Varios agentes especializados comparten el mismo slot de inferencia
+# Prioridad más baja = mayor prioridad de ejecución
+result = await worker.submit(
+    research_workflow,
+    "Analiza los datos de usuarios activos",
+    priority=-10,
+)
+```
+
+El worker con mayor prioridad puede interrumpir a uno de menor prioridad, que se reanuda cuando el slot queda libre. Es un sistema de scheduling cooperativo para inferencia local.
+
+## Mi opinión
+
+Lo que más me gusta de Forge es que resuelve un problema real sin añadir complejidad innecesaria. No es un framework de agentes que te obliga a aprender un DSL nuevo ni una abstracción que oculta el modelo. Es una capa transparente que corrige los fallos más comunes de los modelos pequeños sin tocarlos.
+
+El enfoque de "guardrails en vez de fine-tuning" es pragmático y acertado. Hacer fine-tuning de un modelo para que sea mejor usando herramientas requiere datos curados, GPUs y tiempo. Ponerle una capa de corrección son 200 líneas de Python y un `pip install`. Para el 90% de los casos de uso, la segunda opción es la correcta.
+
+También valoro que Zambelli haya publicado un benchmark reproducible. 26 escenarios, 50 ejecuciones por configuración, ablasiones con y sin cada capa de guardrails. Los números no son humo: el salto de 53% a 99% está documentado y cualquiera puede reproducirlo. En un ecosistema donde cada nuevo framework de agentes promete "razonamiento de nivel humano" sin una sola métrica, esto es aire fresco.
+
+La parte que me genera dudas es la dependencia de modelos con soporte nativo de tool-calling. Forge funciona mejor con Ollama y llama-server porque usan el formato de function calling nativo del modelo. Con Llamafile, que no tiene soporte nativo, Forge inyecta el formato en el prompt y la fiabilidad baja. Es una limitación razonable (no puedes pedir milagros), pero significa que necesitas un backend moderno para sacarle el máximo partido.
+
+En cualquier caso, Forge es de esos proyectos que te hacen pensar "esto debería existir desde hace un año". Si estás construyendo agentes con modelos locales, instálalo. Son 0.6 megabytes de Python que te ahorran horas de depuración de JSON roto y herramientas fantasma.
+
+---
+
+**Forge** está disponible en [PyPI](https://pypi.org/project/forge-guardrails/) (`pip install forge-guardrails`), requiere Python 3.12+ y tiene licencia MIT. El repositorio está en [github.com/antoinezambelli/forge](https://github.com/antoinezambelli/forge).
