@@ -1,0 +1,104 @@
+---
+title: "Google mata Gemini CLI: lo cambian por una app de escritorio"
+date: "2026-05-20T13:00"
+tags: ["google", "cli", "gemini", "antigravity", "open-source"]
+excerpt: "Gemini CLI dejará de funcionar el 18 de junio. Su sustituto, Antigravity CLI, no es open source, requiere una app de escritorio y trae límites semanales."
+---
+
+El 19 de mayo de 2026, Google anunció que Gemini CLI dejará de funcionar para usuarios individuales el 18 de junio. No es un aviso de mantenimiento. Es un cierre definitivo. El producto que acumuló más de 100.000 estrellas en GitHub y 6.000 pull requests mergeados va a la papelera, y su sustituto se llama **Antigravity CLI**.
+
+La justificación oficial es que los flujos de trabajo han evolucionado: ahora necesitas múltiples agentes comunicándose entre sí, y eso requiere una arquitectura unificada con backend compartido. Traducción: Gemini CLI era una herramienta de terminal para una persona; Antigravity es una plataforma de escritorio completa con CLI incluida. Pero hay letra pequeña, mucha.
+
+## Lo que se pierde
+
+Gemini CLI era open source bajo licencia Apache 2.0. Cualquiera podía forkearlo, inspeccionarlo, contribuir. El repositorio en `github.com/google-gemini/gemini-cli` tenía contribuciones de cientos de desarrolladores externos.
+
+Antigravity CLI **no es open source**. El repositorio en `github.com/google-antigravity/antigravity-cli` contiene un README y un GIF animado. Nada de código. Nada de forks. Nada de inspeccionar cómo funciona por dentro.
+
+Simon Willison, uno de los desarrolladores más respetados del ecosistema open source, lo resumió en los comentarios de Hacker News con un enlace a cada repo y cero comentarios adicionales. No hacían falta.
+
+## El nuevo modelo de cuotas
+
+Gemini CLI funcionaba con **límites diarios**. Si llegabas al tope, esperabas a mañana. Antigravity CLI pasa a **límites semanales**. A primera vista parece lo mismo, pero no lo es: si el lunes te quedas sin créditos haciendo un refactor grande, te quedas sin CLI hasta el lunes siguiente.
+
+Un usuario comentaba en HN que quemó el 80% de su ventana de 5 horas de créditos simplemente depurando un problema en el que el agente no podía resolver DNS. El agente tenía acceso a red pero no podía usar `mdnsresponder` en el sandbox. Cinco horas de créditos consumidos en un bug de configuración.
+
+## Arquitectura: del monolito al multi-agente
+
+Gemini CLI era un proceso único que ejecutaba tareas secuencialmente. Le pedías algo, lo hacía, te devolvía el resultado. Simple, predecible, debuggeable.
+
+Antigravity CLI introduce orquestación multi-agente asíncrona. Puedes lanzar varios agentes en paralelo que se comunican entre sí. Suena potente, y lo es, pero tiene implicaciones:
+
+```bash
+# Gemini CLI: un comando, un agente, un resultado
+gemini "Refactoriza este módulo para usar async/await"
+```
+
+```bash
+# Antigravity CLI: múltiples agentes coordinados (conceptual)
+agy run "Refactoriza todo el proyecto con agentes separados
+  para backend, frontend y tests"
+```
+
+El cambio arquitectónico es real y tiene sentido para proyectos grandes. Pero obligar a todos los usuarios a migrar a esta complejidad cuando muchos solo querían hacer preguntas rápidas en la terminal es la parte que escuece.
+
+## El sandbox y las extensiones
+
+Antigravity CLI introduce un sandbox basado en el framework Seatbelt de macOS (con flag `--sandbox`), integración con Chrome DevTools Protocol y Playwright, reporte de crashes vía Sentry, feature flags con Unleash y un sistema de SKILL.md que refleja la convención de Anthropic.
+
+También incluye subagentes, un flujo de revisión de artefactos con slash commands y capacidad de rebobinar conversaciones. Bastante más ambicioso que su predecesor.
+
+Pero también hay pérdidas concretas:
+
+- **ACP (Agent Client Protocol)**: Gemini CLI tenía soporte nativo. Antigravity CLI no. Si habías construido herramientas sobre ACP, mala suerte.
+- **Extensiones de VS Code**: La nueva versión de Antigravity eliminó todas las extensiones. Un usuario comentaba que tenía la extensión de Claude Code funcionando en Antigravity hasta que la actualización la borró sin previo aviso.
+- **Extensiones MCP**: Varios usuarios reportan que Antigravity CLI se confunde sobre qué documentación debe seguir: ¿la de Gemini, la de Gemini CLI, la de Antigravity o la de Antigravity CLI?
+
+## Ejemplo: configurar un MCP server (antes vs ahora)
+
+Con Gemini CLI, registrar un MCP server era directo:
+
+```json
+{
+  "mcpServers": {
+    "mi-api": {
+      "command": "node",
+      "args": ["/ruta/a/mi-servidor-mcp.js"]
+    }
+  }
+}
+```
+
+Con Antigravity CLI, el mismo proceso ha generado confusión porque la herramienta no sabe si debe leer la documentación de Gemini CLI (obsoleta) o la de Antigravity (que cubre la app de escritorio, no la CLI). La configuración es similar en forma pero los detalles de integración han cambiado y la documentación no ayuda a distinguirlos:
+
+La realidad es que los usuarios han tenido que googlear la respuesta porque ni el propio agente sabía explicar su propio sistema de configuración.
+
+## ¿Y los clientes enterprise?
+
+Hay una excepción importante: si tu organización tiene licencia Gemini Code Assist Standard o Enterprise, o usas Gemini Code Assist for GitHub a través de Google Cloud, **tu acceso no cambia**. Gemini CLI seguirá funcionando con acceso a los últimos modelos.
+
+Esto crea una división clara: los que pagan licencias enterprise mantienen la herramienta que conocen. Los usuarios individuales y los que usaban el plan gratuito, a la calle.
+
+Es un patrón reconocible en Google: el producto gratuito atrae usuarios, construye comunidad, acumula estrellas en GitHub, y cuando toca monetizar, se cierra y se reemplaza por algo que no es open source y que empuja hacia la plataforma de pago.
+
+## Mi veredicto
+
+Voy a ser directo: esto es un error estratégico que ya hemos visto docenas de veces.
+
+Google tiene un problema crónico de confianza con los desarrolladores. La gracia de "Google graveyard" no es un meme vacío — es la razón por la que muchos devs que conozco no construyen nada serio sobre herramientas de Google. Cada seis meses algo se renombra, se cierra o se fusiona con otra cosa.
+
+Lo frustrante es que el argumento técnico tiene sentido. Una arquitectura multi-agente con backend unificado es mejor que un CLI monolítico para flujos de trabajo complejos. El problema no es el producto nuevo. El problema es **cómo** lo han hecho:
+
+- Cierran el producto open source y lo reemplazan por uno propietario.
+- Cambian los límites de diarios a semanales sin que quede claro si el total de créditos es mayor o menor.
+- La migración es confusa: la herramienta no sabe qué documentación seguir.
+- Quitan funcionalidades (ACP, extensiones VS Code) que la gente ya usaba.
+- El periodo de transición es de apenas un mes.
+
+Si Google quisiera hacer esto bien, mantendría Gemini CLI como un frontend ligero que hablase con el backend de Antigravity, en lugar de obligar a instalar una app de escritorio completa para acceder a una CLI. Y dejaría el código abierto, porque 100.000 estrellas y 6.000 PRs no se consiguen con un README y un GIF.
+
+Mientras tanto, los que dependían de Gemini CLI tienen tres opciones: migrar a Antigravity y aceptar las nuevas reglas, pasarse a Claude Code o similares, o pagar una licencia enterprise para seguir usando lo que ya tenían. Yo, personalmente, no construiría nada cuyo futuro dependa de que Google no lo cierre.
+
+---
+
+_Consulta el anuncio oficial en [Google Developers Blog](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) y la discusión en [Hacker News](https://news.ycombinator.com/item?id=48196867)._
