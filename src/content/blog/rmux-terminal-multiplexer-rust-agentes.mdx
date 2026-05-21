@@ -1,0 +1,154 @@
+---
+title: "RMUX: el multiplexer en Rust que piensa en agentes"
+date: "2026-05-21T21:50"
+tags: ["rust", "terminal", "tmux", "automatización", "agentes"]
+excerpt: "RMUX reinventa el multiplexer de terminal con un SDK tipado tipo Playwright: panes estables, snapshots y esperas explícitas. Adiós al grep y al sleep."
+---
+
+Hace seis días apareció en Hacker News un proyecto que me hizo levantar una ceja: **RMUX**, un multiplexer de terminal escrito desde cero en Rust que no solo reemplaza a tmux, sino que añade una capa de programabilidad que cambia las reglas del juego.
+
+El autor, [Helvesec](https://github.com/helvesec), lo resume así: *"Me cansé de automatizar tmux con grep y sleeps, así que reconstruí el multiplexer desde cero con una capa programable encima"*. Y vaya si lo ha conseguido. En apenas seis días desde su lanzamiento público (v0.2.0, 18 de mayo de 2026), el proyecto acumula más de 450 estrellas en GitHub y generó un debate intenso en HN con 155 puntos y 73 comentarios.
+
+## El problema de fondo
+
+Si alguna vez has intentado automatizar una sesión de terminal, sabes lo frágil que es. El patrón típico con tmux es algo así:
+
+```bash
+# Enviar un comando a un panel específico
+tmux send-keys -t sesion:0.1 'npm run build' Enter
+
+# Esperar "a ojo" y luego capturar la salida
+sleep 10
+tmux capture-pane -t sesion:0.1 -p | grep "Build complete"
+```
+
+Esto funciona... hasta que no funciona. Si el build tarda 11 segundos en vez de 10, tu script se rompe. Si la salida cambia de formato, el grep no encuentra nada. Es programación a ciegas.
+
+RMUX resuelve esto con dos ideas clave:
+
+1. **IDs de panel estables**: cada panel tiene un identificador que no cambia aunque redimensiones la ventana o agregues más panes.
+2. **Snapshots estructurados**: en vez de capturar texto plano, obtienes una estructura con filas, columnas y contenido tipado.
+
+## El SDK: Playwright para terminales
+
+La joya de RMUX es `rmux-sdk`, una crate de Rust que expone una API async para controlar sesiones de terminal como si fueran páginas web. Mismo concepto que Playwright o Puppeteer, pero para tu terminal:
+
+```rust
+use rmux_sdk::{
+    EnsureSession, EnsureSessionPolicy, Rmux,
+    SessionName, TerminalSizeSpec,
+};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> rmux_sdk::Result<()> {
+    // Conectarse al daemon de RMUX
+    let rmux = Rmux::builder()
+        .default_timeout(Duration::from_secs(5))
+        .connect_or_start()
+        .await?;
+
+    // Crear o reutilizar una sesión
+    let session = rmux
+        .ensure_session(
+            SessionName::new("work").unwrap(),
+            EnsureSessionPolicy::CreateOrReuse,
+        )
+        .size(TerminalSizeSpec::new(120, 32))
+        .detached(true)
+        .await?;
+
+    // Obtener un panel y enviar comandos
+    let pane = session.pane(0, 0);
+    pane.send_text("cargo build --release\n").await?;
+
+    // Esperar a que aparezca un texto concreto — sin sleep ni grep
+    pane.wait_for_text("Compiling").await?;
+    println!("Build iniciado correctamente");
+
+    // Leer el estado del panel como snapshot estructurado
+    let snapshot = pane.snapshot().await?;
+    println!("Panel de {}×{} caracteres", snapshot.cols, snapshot.rows);
+
+    Ok(())
+}
+```
+
+Fíjate en `wait_for_text`. Esto es lo que cambia todo. En lugar de un `sleep` arbitrario, el SDK espera de verdad a que aparezca un patrón en la salida. Si el build tarda 5 segundos o 5 minutos, da igual. El código espera lo necesario y punto.
+
+## Snapshots para inspeccionar el estado
+
+El método `snapshot()` devuelve una estructura con todo el contenido del panel. No es un string plano que tengas que parsear con regex — es un snapshot tipado con dimensiones, contenido y metadatos:
+
+```rust
+let snapshot = pane.snapshot().await?;
+assert_eq!(snapshot.cols, 120);
+assert_eq!(snapshot.rows, 32);
+// snapshot.buffer contiene las celdas con atributos de color,
+// estilo, y contenido carácter por carácter
+```
+
+Esto permite que un agente de código inspeccione el estado real de un terminal sin adivinar. Puedes comprobar colores, cursor, contenido exacto. Adiós a los scripts que rompen porque la salida tenía un espacio de más.
+
+## Integración nativa con Ratatui
+
+RMUX también incluye `ratatui-rmux`, un widget para [Ratatui](https://ratatui.rs/) que te permite renderizar panes de RMUX dentro de tus propias TUI:
+
+```rust
+use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+use ratatui_rmux::{PaneState, PaneWidget};
+use rmux_sdk::PaneSnapshot;
+
+fn render(snapshot: PaneSnapshot, area: Rect, buffer: &mut Buffer) {
+    let state = PaneState::from_snapshot(snapshot);
+    PaneWidget::new(&state).render(area, buffer);
+}
+```
+
+Esto abre la puerta a construir TUIs personalizadas que orquestan múltiples sesiones de terminal. Los demos del proyecto incluyen un orquestador multi-agente (514 líneas), una arena de broadcast (2.171 líneas) y hasta un mini-Zellij funcional (944 líneas).
+
+## Arquitectura: tres superficies, un daemon
+
+RMUX expone tres interfaces públicas que comparten el mismo protocolo:
+
+| Componente | Rol |
+|---|---|
+| `rmux` (CLI) | Compatible con ~90 comandos de tmux, tus keybindings funcionan |
+| `rmux-sdk` | SDK async en Rust para automatización programática |
+| `ratatui-rmux` | Widget para integrar panes en aplicaciones TUI |
+
+Las tres hablan con un daemon local vía IPC. En Linux y macOS usa Unix sockets, en Windows usa Named Pipes (con ConPTY nativo, sin WSL). Cualquier cosa que puedas hacer desde la CLI, la puedes hacer desde el SDK y viceversa.
+
+El workspace está organizado en 12 crates con responsabilidades claras: `rmux-types` para tipos de datos, `rmux-proto` para el protocolo, `rmux-ipc` para transportes, `rmux-pty` para la asignación de PTYs... Es código limpio, bien modularizado, y usa `#![forbid(unsafe_code)]` en las crates de nivel superior.
+
+## Multiplataforma de verdad
+
+A diferencia de tmux — que en Windows necesita WSL o Cygwin — RMUX funciona nativamente en los tres sistemas:
+
+- **Linux**: Unix PTY + Unix sockets
+- **macOS**: Unix PTY + Unix sockets
+- **Windows**: ConPTY + Named Pipes
+
+Esto no es cosmético. Significa que los mismos scripts de automatización funcionan igual en los tres sistemas. Significa que un agente corriendo en Windows puede orquestar terminales sin depender de WSL.
+
+## Los demos hablan solos
+
+El proyecto incluye cinco demos que muestran casos de uso reales:
+
+1. **Multi-agent orchestration**: varios agentes coordinados en panes separados, con el SDK esperando outputs y reenviando inputs
+2. **Agent Broadcast Arena**: un sistema de broadcast donde un agente maestro envía comandos a múltiples sesiones simultáneamente
+3. **Mini-Zellij**: un clon funcional de Zellij en 944 líneas usando el SDK
+4. **Terminal ↔ Browser Mirroring**: sincronización bidireccional entre una terminal y un navegador
+5. **Playwright Testing**: tests automatizados de aplicaciones de terminal
+
+Cada demo está documentada y tiene su propio repositorio en [github.com/Helvesec/rmux-demos](https://github.com/Helvesec/rmux-demos).
+
+## Mi veredicto
+
+RMUX me parece uno de esos proyectos que identifican un punto de fricción real y lo resuelven con una arquitectura limpia en vez de con parches. Llevamos décadas automatizando terminales con expect/send, grep/sleep, y scripts frágiles que dependen de timings. Tener un SDK tipado con waits explícitos y snapshots estructurados es el salto que este espacio necesitaba.
+
+El timing es perfecto. Estamos en plena explosión de agentes de código — Claude Code, Codex CLI, Goose, Zerostack — y todos ellos necesitan interactuar con terminales de forma fiable. RMUX les da una API en vez de un volcado de texto.
+
+Dicho esto, es un proyecto con seis días de vida pública. La v0.2.0 implementa ~90 comandos compatibles con tmux, pero el propio autor avisa de que es una preview y que hay bugs. Si tu flujo de trabajo depende críticamente de tmux, yo no migraría mañana. Pero si estás construyendo herramientas de automatización o agentes que necesitan interactuar con terminales, RMUX merece una mirada seria ahora mismo.
+
+El ecosistema de herramientas de terminal lleva demasiado tiempo estancado. tmux es de 2007. screen es de 1987. Que alguien se haya sentado a repensar el multiplexer desde cero para la era de los agentes es exactamente el tipo de iniciativa que necesitamos.
