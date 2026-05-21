@@ -1,0 +1,280 @@
+---
+title: "Python 3.15: las joyas ocultas que no salen en los titulares"
+date: "2026-05-21T13:40"
+tags: ["python", "python315", "asyncio", "threading", "programacion"]
+excerpt: "TaskGroup.cancel, serialize_iterator y frozendict: las pequeñas mejoras de Python 3.15 que más vas a usar sin que nadie te las haya contado."
+---
+
+Python 3.15 está a la vuelta de la esquina. Con la feature freeze de la beta 1 ya publicada [en la documentación oficial](https://docs.python.org/3.15/whatsnew/3.15.html), sabemos exactamente qué trae esta versión. Los titulares hablan de **lazy imports** y del **Tachyon profiler**, dos cambios enormes que van a redefinir cómo escribimos y depuramos Python.
+
+Pero yo quiero hablar de lo otro. De esas mejoras pequeñas que no protagonizan portadas pero que, cuando las descubres, te hacen pensar «¡cuánto tiempo llevaba necesitando esto!». Son los cambios que te encuentras leyendo el changelog con un café un domingo por la mañana y que el lunes ya estás usando en producción.
+
+Vamos al grano.
+
+## Cancelar un TaskGroup sin hacer malabares
+
+Las `TaskGroup` de asyncio llegaron en Python 3.11 como la respuesta del lenguaje a la concurrencia estructurada. La premisa es simple: lanzas varias tareas, esperas a que todas terminen y si una casca, las demás se cancelan automáticamente:
+
+```python
+import asyncio
+
+async def worker(n: int):
+    await asyncio.sleep(n)
+    return f"Tarea {n} completada"
+
+async def main():
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(worker(1))
+        tg.create_task(worker(2))
+        tg.create_task(worker(3))
+    print("Todas las tareas han terminado")
+
+asyncio.run(main())
+```
+
+Hasta aquí todo bien. Pero, ¿qué pasa si necesitas cancelar el grupo desde dentro porque alguna condición externa lo exige? Hasta ahora tenías que usar un truco feo: lanzar una excepción personalizada, atraparla con `contextlib.suppress` y rezar para que las demás tareas se cancelaran limpiamente:
+
+```python
+from contextlib import suppress
+
+class CancelarGrupo(Exception):
+    pass
+
+async def main_con_cancelacion():
+    with suppress(CancelarGrupo):
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(worker(10))  # tarea lenta
+            tg.create_task(worker(0.5))  # tarea rápida
+            # Imagina que aquí chequeas algo externo
+            if await chequear_condicion():
+                raise CancelarGrupo()
+
+asyncio.run(main_con_cancelacion())
+```
+
+Funciona, pero es un parche. Estás usando excepciones para flujo de control y aunque Python no es tan dogmático con eso como otros lenguajes, el código resultante no es precisamente elegante.
+
+Python 3.15 añade `TaskGroup.cancel()` y la diferencia es abismal:
+
+```python
+async def main_limpia():
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(worker(10))
+        tg.create_task(worker(0.5))
+        if await chequear_condicion():
+            tg.cancel()  # Así de simple
+    print("El grupo se canceló limpiamente")
+
+asyncio.run(main_limpia())
+```
+
+`tg.cancel()` cancela todas las tareas del grupo sin lanzar excepciones hacia fuera. El bloque `async with` termina sin drama. Es el tipo de cambio que no ocupa ni tres líneas en el changelog pero que elimina una fricción real del día a día con asyncio.
+
+## ContextDecorator ahora entiende async y generators
+
+Los context managers con `@contextmanager` son una de esas features de Python que uso a diario sin pensar. Mides tiempos, abres y cierras conexiones, gestionas locks:
+
+```python
+from contextlib import contextmanager
+import time
+
+@contextmanager
+def cronometrar(etiqueta: str):
+    inicio = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - inicio
+        print(f"[{etiqueta}] {elapsed:.3f}s")
+
+# Como context manager
+with cronometrar("cálculo"):
+    sum(range(10_000_000))
+```
+
+Lo que menos gente sabe es que los context managers también funcionan como decoradores desde Python 3.3:
+
+```python
+@cronometrar("fibonacci")
+def fib(n: int) -> int:
+    if n <= 1:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fib(30)
+# [fibonacci] 0.247s
+```
+
+Útil, ¿verdad? Pero aquí viene el problema: esto **no funciona** con funciones asíncronas ni con generadores. ¿Por qué? Porque cuando llamas a una función `async def`, no ejecuta nada — devuelve una corrutina. El decorador envuelve la llamada y termina antes de que el código real se ejecute:
+
+```python
+# ESTO NO FUNCIONA CORRECTAMENTE — el decorador termina
+# antes de que la corrutina se complete
+@cronometrar("descarga")
+async def descargar_datos(url: str):
+    # ... fetch async ...
+    return datos
+```
+
+En Python 3.15, `ContextDecorator` y `AsyncContextDecorator` detectan automáticamente el tipo de función que envuelven. Si decoras un generador, el contexto abarca toda la iteración. Si decoras una función async, el contexto espera a que la corrutina termine. El mismo decorador funciona en los tres casos sin que tengas que pensar en ello:
+
+```python
+# En Python 3.15, esto ya funciona correctamente:
+@cronometrar("descarga-async")
+async def descargar_datos(url: str):
+    await asyncio.sleep(0.5)
+    return {"status": "ok"}
+
+# Y esto también:
+@cronometrar("generador")
+def generar_datos(n: int):
+    for i in range(n):
+        time.sleep(0.1)
+        yield i * 2
+
+# Consumir el generador activa el contexto:
+list(generar_datos(5))
+# [generador] 0.513s
+```
+
+Para mí, esto convierte a los context managers en la mejor forma de escribir decoradores en Python, punto. Adiós a las closures anidadas con `functools.wraps` para casos sencillos.
+
+## Iteradores thread-safe sin Queue
+
+Los iteradores son una de las abstracciones más potentes de Python: separan la fuente de datos de quien los consume. El problema llega cuando introduces multithreading:
+
+```python
+def eventos():
+    for i in range(100):
+        yield f"evento-{i}"
+
+# En single-thread, perfecto:
+for evento in eventos():
+    procesar(evento)
+```
+
+Pero si intentas compartir ese iterador entre hilos con un `ThreadPoolExecutor`, tienes un problema serio. Los iteradores normales no son thread-safe: dos hilos llamando a `next()` sobre el mismo iterador pueden saltarse valores, devolver duplicados o directamente corromper el estado interno.
+
+La solución clásica ha sido meter una `queue.Queue` por medio — funciona, pero te obliga a reescribir la lógica, añadir señales de fin y perder la elegancia del iterador como abstracción.
+
+Python 3.15 añade `threading.serialize_iterator`, que envuelve un iterador cualquiera y lo hace seguro entre hilos:
+
+```python
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+def generar_tareas():
+    for i in range(20):
+        yield i
+
+# Envolvemos una sola vez:
+tareas = threading.serialize_iterator(generar_tareas())
+
+def procesar(tareas_iter):
+    for tarea in tareas_iter:
+        print(f"Hilo procesando: {tarea}")
+
+with ThreadPoolExecutor(max_workers=4) as pool:
+    for _ in range(4):
+        pool.submit(procesar, tareas)
+```
+
+Cada elemento se entrega a un único hilo. Sin duplicados, sin condiciones de carrera, sin queues manuales.
+
+Y hay más: `threading.concurrent_tee` duplica un iterador en N copias independientes para que cada hilo reciba **todos** los valores:
+
+```python
+original = generar_tareas()
+copia_a, copia_b = threading.concurrent_tee(original, n=2)
+
+# Ambos hilos procesan los 20 elementos completos
+with ThreadPoolExecutor(max_workers=2) as pool:
+    pool.submit(procesar, copia_a)
+    pool.submit(procesar, copia_b)
+```
+
+Esto me parece genuinamente útil. La alternativa con queues requería un hilo productor, señales `SENTINEL` y bastante boilerplate. Con esto, tu código multithreaded se parece mucho más a tu código secuencial.
+
+## Counter gana el operador XOR
+
+`collections.Counter` es una de esas clases que usas poco pero que cuando la necesitas te salva la vida. Cuenta frecuencias y además soporta operaciones de conjuntos:
+
+```python
+from collections import Counter
+
+a = Counter("abracadabra")
+b = Counter("alakazam")
+
+print(a)  # Counter({'a': 5, 'b': 2, 'r': 2, 'c': 1, 'd': 1})
+print(b)  # Counter({'a': 4, 'l': 1, 'k': 1, 'z': 1, 'm': 1})
+
+# Suma: suma frecuencias
+print(a + b)  # Counter({'a': 9, 'b': 2, 'r': 2, ...})
+
+# Intersección: mínimo de cada frecuencia
+print(a & b)  # Counter({'a': 4})
+```
+
+Puedes pensar en un `Counter` como una bolsa — un multiconjunto donde cada elemento aparece N veces. La intersección (`&`) se queda con la cantidad mínima, la unión (`|`) con la máxima.
+
+Python 3.15 añade el operador `^` (XOR), que calcula la **diferencia simétrica**: se queda con la diferencia entre las frecuencias de cada clave:
+
+```python
+votos_maria = Counter({"propuesta_a": 5, "propuesta_b": 3, "propuesta_c": 1})
+votos_juan  = Counter({"propuesta_a": 3, "propuesta_b": 4, "propuesta_c": 1})
+
+# ¿En qué discrepan?
+discrepancias = votos_maria ^ votos_juan
+print(discrepancias)
+# Counter({'propuesta_a': 2, 'propuesta_b': 1})
+```
+
+María dio 2 votos más a la propuesta A de lo que dio Juan y Juan dio 1 voto más a la propuesta B. Las coincidencias (propuesta C con 1 voto cada uno) desaparecen.
+
+Siendo sincero, no me he encontrado muchas situaciones donde necesitara XOR en un Counter. Las operaciones de unión e intersección cubren la mayoría de casos prácticos. Pero celebro que el equipo de desarrollo lo haya añadido por completitud — es justo el tipo de detalle que demuestra que Python se toma en serio sus tipos de datos.
+
+## frozendict y JSON inmutable
+
+Este es el cambio que más ilusión me hace y mira que es sutil. Python 3.15 introduce `frozendict` como tipo built-in (PEP 814). Es un diccionario inmutable y hashable, como una tupla pero con claves nombradas:
+
+```python
+config = frozendict(host="localhost", port=5432, debug=False)
+
+# No puedes modificarlo:
+# config["host"] = "prod"  # TypeError
+
+# Pero puedes usarlo como clave de otro dict:
+cache = {}
+cache[config] = "conexión local"
+```
+
+La guinda del pastel es que `json.load` y `json.loads` ahora aceptan `array_hook` junto con `object_hook`. Combinados, puedes parsear JSON directamente a estructuras inmutables:
+
+```python
+import json
+
+datos = json.loads(
+    '{"usuario": "david", "roles": ["admin", "editor"], "activo": true}',
+    object_hook=frozendict,
+    array_hook=tuple,
+)
+
+print(datos)
+# frozendict({'usuario': 'david', 'roles': ('admin', 'editor'), 'activo': True})
+print(hash(datos))  # 8472394723847 — es hashable
+
+# Puedes usarlo como clave de caché sin miedo:
+cache[datos] = "perfil cacheado"
+```
+
+Esto es enorme para aplicaciones que trabajan con configuraciones, respuestas de API que necesitas cachear, o cualquier situación donde parseas JSON y no quieres que el objeto mute por accidente en otra parte del código.
+
+## Mi veredicto
+
+Las versiones de Python llevan años entregando grandes PEPs que acaparan los titulares — pattern matching en 3.10, `except*` en 3.11, el GIL opcional en 3.13. Pero mi experiencia es que los cambios que más impacto tienen en el código del día a día son precisamente estos: pequeñas adiciones a la stdlib que eliminan fricción.
+
+`TaskGroup.cancel()` me va a ahorrar bloques `try/except` innecesarios. `serialize_iterator` me va a evitar montar queues para casos sencillos. `frozendict` + `array_hook` es un combo que voy a usar cada vez que parseo JSON y lo meto en una caché.
+
+Si tuviera que elegir uno solo de esta lista como mi favorito, sería `frozendict`. Llevamos años con `tuple` como única estructura inmutable built-in y tener un dict inmutable sin depender de `types.MappingProxyType` o librerías externas es un alivio.
+
+Python 3.15 va a ser de esas versiones que, cuando mires atrás dentro de dos años, te preguntarás cómo vivías sin estas cosas.
