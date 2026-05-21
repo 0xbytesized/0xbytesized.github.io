@@ -1,0 +1,129 @@
+---
+title: "3.800 repos de GitHub, comprometidos por una extensión de VS Code"
+date: "2026-05-21T01:30"
+tags: ["seguridad", "vscode", "github", "supply-chain", "extensiones"]
+excerpt: "GitHub confirma que un empleado instaló una extensión maliciosa de VS Code y los atacantes exfiltraron ~3.800 repositorios internos. TeamPCP pide 50.000$ por los datos."
+---
+
+El 20 de mayo de 2026 GitHub confirmó lo que muchos temían: una extensión maliciosa de VS Code instalada por un empleado provocó la exfiltración de aproximadamente 3.800 repositorios internos. El grupo TeamPCP —los mismos de la campaña Mini Shai-Hulud— puso los datos a la venta en el foro Breached por un mínimo de 50.000 dólares. Sin ransom, sin chantaje: «un comprador y destruimos los datos».
+
+No es la primera vez que una extensión de VS Code se usa como vector de ataque. Pero que el objetivo sea el propio GitHub, la empresa que aloja el código de 180 millones de desarrolladores, lo convierte en un antes y un después.
+
+## Qué pasó exactamente
+
+La secuencia es demoledoramente simple:
+
+1. Un empleado de GitHub instala una extensión de VS Code desde el Marketplace oficial.
+2. La extensión contiene código malicioso que aprovecha los permisos que VS Code otorga por defecto.
+3. El atacante accede al sistema de archivos del empleado, que incluye clones locales de repositorios internos de GitHub.
+4. Se exfiltran ~3.800 repositorios. GitHub confirma que «la actividad involucró únicamente exfiltración de repositorios internos».
+
+GitHub retiró la extensión del Marketplace, aisló el endpoint comprometido y arrancó la respuesta a incidentes de inmediato. También aseguró que no hay evidencia de que datos de clientes fuera de esos repos se hayan visto afectados. Pero el daño reputacional ya está hecho.
+
+## Por qué las extensiones de VS Code dan miedo
+
+VS Code es una aplicación Electron. Las extensiones se ejecutan en el mismo proceso que el editor, con acceso completo al sistema de archivos, al portapapeles, a las variables de entorno, a las claves SSH del usuario y a cualquier archivo que el editor tenga abierto. No hay sandbox. No hay un modelo de permisos granular. No hay nada que le pregunte al usuario «esta extensión quiere leer tus claves SSH, ¿se lo permites?».
+
+El modelo de seguridad actual es binario: o instalas la extensión y confías plenamente, o no la instalas. Y cuando el Marketplace te sugiere una extensión porque has abierto un `.env` o un `Dockerfile`, el 99% de los desarrolladores hace clic en instalar sin pensarlo dos veces.
+
+Mientras tanto, Microsoft es dueño de las tres piezas del puzle: GitHub (donde está el código), npm (de donde vienen las dependencias) y VS Code (donde se ejecuta todo con acceso total). Es un monopolio vertical del ecosistema de desarrollo que, cuando falla, falla en los tres niveles a la vez.
+
+## Cómo funciona un keylogger de extensiones
+
+El ataque no requiere nada sofisticado. Aquí un esqueleto conceptual de lo que una extensión maliciosa puede hacer en 30 líneas:
+
+```typescript
+// extension.ts — ESQUELETO CONCEPTUAL de una extensión maliciosa
+import * as vscode from "vscode";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import * as cp from "child_process";
+
+export function activate(context: vscode.ExtensionContext) {
+  // Leer el historial de bash/zsh
+  const home = os.homedir();
+  const shellHistory = [
+    path.join(home, ".bash_history"),
+    path.join(home, ".zsh_history"),
+  ];
+
+  for (const histFile of shellHistory) {
+    if (fs.existsSync(histFile)) {
+      const content = fs.readFileSync(histFile, "utf-8");
+      exfiltrate("shell_history", content);
+    }
+  }
+
+  // Buscar claves SSH
+  const sshDir = path.join(home, ".ssh");
+  if (fs.existsSync(sshDir)) {
+    for (const file of fs.readdirSync(sshDir)) {
+      exfiltrate(`ssh_key_${file}`, fs.readFileSync(path.join(sshDir, file), "utf-8"));
+    }
+  }
+
+  // Leer todos los archivos del workspace abierto
+  const workspaceFolders = vscode.workspace.workspaceFolders || [];
+  for (const folder of workspaceFolders) {
+    walkAndExfiltrate(folder.uri.fsPath);
+  }
+}
+```
+
+No hay nada inventado aquí. `vscode.workspace.workspaceFolders`, `fs.readFileSync`, `os.homedir()`, `child_process` — todo son APIs reales y documentadas de VS Code y Node.js. La extensión no necesita permisos especiales porque VS Code no tiene un modelo de permisos. El `exfiltrate()` puede ser un simple `fetch()` a un servidor C2, un webhook de Discord, o incluso un commit a un repo privado de GitHub.
+
+El hecho de que el equipo de seguridad de GitHub —probablemente uno de los mejores del mundo— no detectase esto antes de que un empleado lo instalase debería preocuparnos a todos.
+
+## El ecosistema está podrido
+
+El problema no es solo técnico, es estructural. El VS Code Marketplace tiene miles de extensiones con millones de instalaciones cada una. Muchas son mantenidas por un solo desarrollador que podría vender su cuenta a un atacante por cuatro cifras. Otras directamente son malware desde el día uno, como las 24 extensiones que el actor WhiteCobra coló en 2025 para robar criptomonedas, o las dos extensiones de «asistentes de código con IA» que en enero de 2026 exfiltraron datos a servidores en China con 1.5 millones de instalaciones.
+
+El año pasado se retiraron extensiones legítimas con 9 millones de instalaciones por «riesgos de seguridad» y otras 10 que se hacían pasar por herramientas de desarrollo instalaron el minero XMRig en los equipos de los usuarios.
+
+Y ahora TeamPCP, un grupo que ya ha atacado GitHub, PyPI, npm y Docker, demuestra que con una sola extensión pueden comprometer los repositorios internos de la plataforma de código más grande del mundo.
+
+La ironía es brutal: los atacantes no necesitaron un 0-day en el kernel, ni explotar una vulnerabilidad de red, ni hacer phishing sofisticado. Solo necesitaron que un desarrollador —un empleado de GitHub, nada menos— instalase una extensión del marketplace oficial.
+
+## ¿Hay algo que podamos hacer?
+
+Mientras Microsoft no implemente un modelo de permisos granular para las extensiones de VS Code, la defensa es manual y frágil:
+
+```json
+// .vscode/extensions.json — controla qué extensiones se recomiendan
+{
+  "recommendations": [
+    "ms-python.python",
+    "golang.go"
+  ],
+  "unwantedRecommendations": []
+}
+```
+
+```bash
+# Auditar extensiones instaladas (VS Code CLI)
+code --list-extensions --show-versions
+
+# Buscar extensiones que no sean de publishers verificados
+code --list-extensions | while read ext; do
+  publisher=$(echo "$ext" | cut -d. -f1)
+  if [[ ! "$publisher" =~ ^(ms-|vscode-|github|redhat|golang|google|microsoft)$ ]]; then
+    echo "REVISAR: $ext (publisher: $publisher)"
+  fi
+done
+```
+
+Algunas prácticas que cualquier equipo debería implementar ya mismo:
+
+- **Allowlist de extensiones**: definir qué extensiones están permitidas en los equipos de desarrollo y bloquear todas las demás.
+- **Git remotes readonly**: los clones locales en máquinas de desarrollo no deberían tener acceso de escritura a los repositorios de producción.
+- **Credential isolation**: las claves SSH y tokens de acceso no deberían estar accesibles desde el mismo filesystem donde corre el editor.
+- **Dev containers**: usar entornos de desarrollo containerizados que limiten el acceso al filesystem del host.
+
+## Mi veredicto
+
+Llevo meses escribiendo sobre ataques a la cadena de suministro en este blog. Shai-Hulud con 317 paquetes npm, dnsmasq con 6 CVEs generados por fuzzing automatizado, Fragnesia explotando la page cache de Linux... Pero este caso me parece especialmente grave por la intersección de tres factores: un vector de ataque trivial, un modelo de seguridad inexistente y un objetivo que es el propio guardián del ecosistema.
+
+GitHub no puede pedirnos que confiemos en su plataforma cuando un empleado suyo instala una extensión y se llevan 3.800 repos internos en cuestión de horas. La cadena de suministro del desarrollo moderno tiene tres eslabones —GitHub, npm, VS Code— y Microsoft controla los tres. Eso significa que también es responsable de los tres.
+
+Si esto no empuja a Microsoft a implementar un sandbox y un modelo de permisos para las extensiones de VS Code, no sé qué lo hará. Quizás cuando el próximo objetivo no sea GitHub, sino una empresa de la lista Fortune 100 cuyo código fuente acabe a la venta en un foro de cibercrimen. Y creedme, ese día está más cerca de lo que parece.
