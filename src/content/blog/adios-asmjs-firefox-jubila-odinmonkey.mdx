@@ -1,0 +1,137 @@
+---
+title: "Adiós a asm.js: Firefox jubila el motor que cambió la web"
+date: "2026-05-21T07:30"
+tags: ["asm.js", "WebAssembly", "SpiderMonkey", "Firefox", "JavaScript"]
+excerpt: "SpiderMonkey desactiva OdinMonkey en Firefox 148. El subconjunto de JS que demostró que la web podía correr código a velocidad nativa se retira tras 13 años de servicio."
+---
+
+El 20 de mayo de 2026, el equipo de SpiderMonkey publicó un post titulado ["Saying goodbye to asm.js"](https://spidermonkey.dev/blog/2026/05/20/saying-goodbye-to-asmjs.html). Así, con poesía nórdica y una despedida digna de un dios, el motor de JavaScript de Firefox apaga las optimizaciones de asm.js a partir de la versión 148. OdinMonkey —el compilador que durante 13 años convirtió un subconjunto de JavaScript en código casi nativo— ha caído.
+
+Si mantienes una web que usa asm.js: no se va a romper nada. asm.js es JavaScript válido, así que el JIT normal de SpiderMonkey lo ejecutará sin problemas. Pero si recompilas a WebAssembly, obtendrás mejor rendimiento y binarios más pequeños.
+
+## El contexto: cómo ejecutar C++ en el navegador en 2013
+
+En 2013, Google estaba empujando NaCl (Native Client) y PNaCl (Portable Native Client) para ejecutar código nativo en el navegador. La idea era técnicamente sólida, pero tenía un problema existencial: requería un sandbox separado, IPC propio, APIs alternativas… en resumen, no era "web".
+
+Mozilla respondió con una idea brillante: en lugar de inventar un nuevo runtime, ¿y si cogemos un subconjunto estricto de JavaScript y hacemos que el motor lo reconozca y lo compile a código nativo?
+
+Así nació asm.js.
+
+El programa se escribía en C o C++, se compilaba con Emscripten y el resultado era un fichero JavaScript perfectamente válido que cualquier navegador podía ejecutar. Pero si el motor detectaba el directive `"use asm"`, activaba un camino de compilación optimizado que generaba código máquina directamente.
+
+```javascript
+// Así empezaba un módulo asm.js típico
+function MyModule(stdlib, foreign, heap) {
+  "use asm";
+
+  // La pila se gestionaba manualmente
+  var HEAP8 = new stdlib.Int8Array(heap);
+  var HEAP32 = new stdlib.Int32Array(heap);
+
+  // Las funciones exportadas con anotaciones de tipo
+  function add(a, b) {
+    a = a | 0;  // coerción a entero
+    b = b | 0;
+    return (a + b) | 0;
+  }
+
+  function multiply(a, b) {
+    a = +a;     // coerción a double
+    b = +b;
+    return +(a * b);
+  }
+
+  return {
+    add: add,
+    multiply: multiply
+  };
+}
+```
+
+Esas anotaciones —el `|0` para forzar enteros, el `+` unario para forzar doubles— eran la salsa secreta. Le decían al compilador "esto es un int32, trátalo como tal". Sin garbage collector, sin type coercion dinámica en caliente: el motor podía generar código máquina directamente, sin las indirecciones que hacen lento al JavaScript normal.
+
+El resultado fue el [Epic Citadel](https://www.unrealengine.com/en-US/blog/epic-citadel-ported-to-javascript) corriendo en el navegador. Unreal Engine 3, portado en **cuatro días**. Eran otros tiempos.
+
+## La transición a WebAssembly
+
+asm.js demostró algo que no era obvio en 2013: **la web podía ejecutar código a velocidad nativa sin romper su modelo de seguridad**. Una vez probado eso, el siguiente paso lógico fue estandarizar un formato binario diseñado específicamente para ese propósito.
+
+En 2017, WebAssembly aterrizó en Firefox 52. Y con él llegó BaldrMonkey, el compilador optimizador de Wasm y RabaldrMonkey, el compilador baseline. La nomenclatura mitológica no es casual: el bug que trackea la eliminación de asm.js se llama [Ragnarök](https://bugzilla.mozilla.org/show_bug.cgi?id=ragnarok), el "ocaso de OdinMonkey".
+
+```javascript
+// El equivalente en WebAssembly es mucho más directo:
+// compilas tu .c a .wasm y lo cargas así:
+
+const response = await fetch('module.wasm');
+const bytes = await response.arrayBuffer();
+const { instance } = await WebAssembly.instantiate(bytes, {
+  env: {
+    memory: new WebAssembly.Memory({ initial: 256 }),
+  }
+});
+
+// Las funciones exportadas se llaman directamente
+console.log(instance.exports.add(3, 4)); // 7
+```
+
+Comparado con asm.js, WebAssembly tiene ventajas claras:
+
+- **Parseo instantáneo**: un binario Wasm se decodifica mucho más rápido que un fichero JavaScript de varios megabytes.
+- **Binarios más pequeños**: el formato binario es más compacto que el JavaScript generado por Emscripten.
+- **Mejor rendimiento**: el pipeline de compilación de Wasm ha recibido años de optimizaciones que el camino de asm.js nunca tuvo.
+- **Modelo de memoria más limpio**: Wasm tiene un espacio de memoria lineal, sin necesidad de simular la pila con `Int32Array`.
+
+## ¿Por qué ahora?
+
+Si asm.js es JavaScript válido y no va a romper nada, ¿por qué quitar el camino optimizado? El equipo de SpiderMonkey es claro:
+
+1. **WebAssembly ya ha ganado**. La migración de asm.js a Wasm está prácticamente completada. Los proyectos que antes usaban asm.js (Unity, Unreal, motores de juegos) hace años que compilan a Wasm.
+
+2. **Superficie de ataque**: Mantener OdinMonkey implica mantener un compilador entero con su propio pipeline de optimización. Cada línea de código en un motor de JavaScript es un posible vector de ataque.
+
+3. **Mantenimiento**: El camino de asm.js tiene bugs. Arreglarlos cuesta tiempo de ingeniería que podría dedicarse a mejorar el pipeline de Wasm, que es el futuro.
+
+## Cómo comprobar si tu web aún usa asm.js
+
+Si tienes curiosidad por saber si algo que mantienes todavía tira de asm.js, aquí tienes una comprobación rápida:
+
+```javascript
+// Busca ficheros JavaScript grandes con el patrón "use asm"
+// Puedes hacerlo desde las DevTools o con un script:
+
+async function checkForAsmJS(urls) {
+  for (const url of urls) {
+    try {
+      const response = await fetch(url);
+      const text = await response.text();
+
+      if (text.includes('"use asm"') || text.includes("'use asm'")) {
+        console.warn(`⚠️  asm.js detectado en: ${url}`);
+        console.warn(`   Tamaño: ${(text.length / 1024).toFixed(1)} KB`);
+      }
+    } catch (e) {
+      console.error(`Error cargando ${url}:`, e.message);
+    }
+  }
+}
+
+// Uso: pega esto en la consola y pasa las URLs de tus scripts
+// checkForAsmJS(['/build.js', '/vendor/engine.js']);
+```
+
+Si encuentras algo, la migración suele ser sencilla: recompilar con Emscripten apuntando a Wasm (`-s WASM=1` en lugar de `-s WASM=0`). En la mayoría de los casos es un cambio de flag y poco más.
+
+## Mi opinión
+
+asm.js es de esas piezas de ingeniería que, vistas con perspectiva, parecen un truco absurdo que no debería funcionar. Pero funcionó y funcionó tan bien que convenció a todo el ecosistema de que el navegador podía ser una plataforma de ejecución seria.
+
+Hay algo poético en la despedida que ha escrito el equipo de SpiderMonkey. En lugar del típico anuncio corporativo, han recurrido a la Völuspá —el poema del Edda poético que narra el Ragnarök— para contar que OdinMonkey cae y BaldrMonkey renace. Han hecho un bug llamado Ragnarök. Han publicado la noticia un miércoles (Odinsday). Esto es amor por el oficio.
+
+Creo que asm.js merece un reconocimiento más amplio del que suele recibir. Sin él, probablemente no tendríamos WebAssembly tal como lo conocemos. Fue la prueba de concepto que movió a los comités de estándares, a Google, a Microsoft y a Apple a ponerse de acuerdo en algo tan difícil como un formato binario para la web.
+
+Skål, OdinMonkey. 13 años después, el fruto de tu trabajo —BaldrMonkey— gobierna sobre un mundo renacido.
+
+## Referencias
+
+- [Saying goodbye to asm.js — SpiderMonkey Blog](https://spidermonkey.dev/blog/2026/05/20/saying-goodbye-to-asmjs.html)
+- [Hacker News discussion (365pts, 140 comments)](https://news.ycombinator.com/item?id=48206340)
