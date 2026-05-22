@@ -1,0 +1,85 @@
+---
+title: "Cleve Moler (1939-2026): adiós al creador de MATLAB"
+date: "2026-05-22T16:00"
+tags: ["matlab", "historia", "computacion-numerica", "open-source", "python"]
+excerpt: "Ha muerto Cleve Moler, creador de MATLAB y coautor de LINPACK y EISPACK. Así cambió un profesor de Nuevo México la forma en que el mundo hace computación numérica."
+---
+
+El 20 de mayo de 2026 murió Cleve Moler a los 86 años. Si has hecho una carrera técnica en los últimos 40 años, tu vida ha sido tocada por su trabajo, lo sepas o no. Moler creó MATLAB, coescribió las bibliotecas LINPACK y EISPACK y acuñó el término _embarrassingly parallel_. Pero su legado va mucho más allá de los productos: cambió para siempre la relación entre los científicos, los ingenieros y las matemáticas computacionales.
+
+## El profesor que solo quería que sus alumnos no sufrieran con Fortran
+
+La historia empieza a finales de los 70 en la Universidad de Nuevo México. Moler daba clases de álgebra lineal numérica y sus alumnos tenían que programar en Fortran para usar LINPACK y EISPACK, dos bibliotecas de las que él mismo era coautor. El proceso era tedioso: escribir el programa en tarjetas perforadas, enviarlo al mainframe, esperar horas y rezar para que no hubiera un error de sintaxis.
+
+Su solución fue radical para la época: crear una capa interactiva por encima de Fortran que permitiera escribir operaciones matriciales directamente, sin compilar, sin tarjetas, sin mainframe. La llamó MATLAB: MATrix LABoratory.
+
+```matlab
+% Lo que antes requería 50 líneas de Fortran...
+A = [1 2; 3 4];
+b = [5; 6];
+x = A \ b;  % Resuelve Ax = b con una barra invertida
+
+% ...y obtener autovalores era igual de directo
+eig(A)
+```
+
+Esa barra invertida (`\`) se convirtió en uno de los símbolos más reconocibles de la computación científica. Detrás había algoritmos sofisticados de factorización LU y QR, pero el usuario no necesitaba saberlo. Por primera vez, las matemáticas computacionales se parecían a las matemáticas de pizarra.
+
+## De proyecto académico a estándar industrial
+
+En 1984, Moler cofundó MathWorks junto a Jack Little y Steve Bangert. Little reescribió MATLAB en C, añadió toolboxes y lo convirtió en un producto comercial. En 1985, Nick Trefethen compró la primera licencia comercial en el MIT — y Alan Edelman, futuro co-creador de Julia, fue su primer usuario.
+
+Lo que vino después fue una explosión: toolboxes para procesamiento de señales, sistemas de control, redes neuronales, optimización. Durante décadas, si entrabas a cualquier departamento de ingeniería del mundo, encontrabas MATLAB. Se convirtió en la lingua franca de la simulación y el diseño de sistemas.
+
+```matlab
+% Diseñar un filtro pasabajos en MATLAB era cosa de tres líneas
+fs = 1000;
+fc = 100;
+[b, a] = butter(4, fc/(fs/2));
+filtered = filter(b, a, signal);
+```
+
+Esto que hoy parece trivial era magia en los 80. Los ingenieros pasaron de implementar transformadas Z a mano a prototipar filtros en segundos.
+
+## La paradoja Moler: el creador que abrió el camino a sus competidores
+
+Aquí está la ironía más profunda de esta historia. MATLAB se volvió un producto caro — las licencias y toolboxes pueden costar miles de euros al año. Pero el espíritu original de Moler — hacer la computación numérica accesible — floreció precisamente en las alternativas que nacieron para escapar de MathWorks.
+
+Cuando Python aún era un lenguaje de scripting poco serio, Travis Oliphant creó NumPy inspirándose explícitamente en la sintaxis de MATLAB. SciPy replicó las toolboxes. Matplotlib copió el sistema de gráficos. Hoy, el ecosistema científico de Python es el heredero directo de la visión de Moler:
+
+```python
+import numpy as np
+from scipy import signal
+
+# El mismo filtro pasabajos, 30 años después, en código abierto
+fs = 1000
+fc = 100
+b, a = signal.butter(4, fc, fs=fs)
+filtered = signal.lfilter(b, a, signal_data)
+```
+
+Y luego está Julia, el lenguaje que Alan Edelman — sí, el primer usuario comercial de MATLAB — ayudó a crear. Diseñado para resolver el "problema de los dos lenguajes" (prototipar en MATLAB, reimplementar en C++ para producción), Julia es quizás el homenaje más honesto a Moler: la misma fluidez matemática, pero sin licencias y con rendimiento nativo.
+
+## El legado silencioso de LINPACK y EISPACK
+
+Antes de MATLAB, Moler ya había cambiado el mundo sin que nadie se diera cuenta. Junto a Jack Dongarra, Jim Bunch y Pete Stewart, escribió LINPACK, la biblioteca de referencia para álgebra lineal en Fortran. El benchmark LINPACK se convirtió en el estándar para medir supercomputadores — la lista TOP500 lo usó durante décadas.
+
+Con EISPACK, junto a Brian Smith y otros, dio a los científicos una herramienta fiable para calcular autovalores y autovectores. Estas bibliotecas eran código Fortran de dominio público, meticulosamente documentado y probado. Muchas de sus rutinas sobreviven dentro de LAPACK, y LAPACK está dentro de NumPy, y NumPy está dentro de prácticamente todo lo que haces en Python científico hoy.
+
+```python
+# Cuando llamas a np.linalg.eig(), estás invocando a los tataranietos
+# de EISPACK, que a su vez ejecutan variantes de los algoritmos QR
+# que Moler ayudó a popularizar
+import numpy as np
+valores, vectores = np.linalg.eig(np.array([[1, 2], [3, 4]]))
+```
+
+Cada vez que un científico entrena una red neuronal, procesa una señal de radio o simula el flujo de aire sobre un ala de avión, el fantasma de Moler está en la pila de software. No como código obsoleto, sino como algoritmos vivos que han sido reimplementados, optimizados y vueltos a empaquetar durante cinco décadas.
+
+## Mi veredicto
+
+Conocía la historia de MATLAB como producto, pero hasta hoy no había conectado los puntos entre LINPACK, EISPACK, MATLAB, NumPy y Julia como una sola línea evolutiva. Es impresionante ver cómo el trabajo de una persona puede ramificarse tanto y en direcciones tan distintas, desde el software propietario hasta el corazón del stack científico open source.
+
+Hay una lección aquí que los que construimos herramientas para desarrolladores deberíamos grabarnos: Moler no creó MATLAB pensando en facturar. Lo creó para que sus alumnos no sufrieran. Esa motivación — eliminar fricción, hacer accesible lo complejo — es la que produce software que dura 50 años. Las cosas que construimos para resolver un problema concreto de personas concretas son las que acaban cambiando el mundo.
+
+Cleve Moler demostró que enseñar bien y programar bien son la misma cosa. Descansa en paz.
