@@ -1,0 +1,146 @@
+---
+title: "Deno 2.8: cuando Deno aprendió a hablar npm sin acento"
+date: "2026-05-22T20:00"
+tags: ["deno", "javascript", "typescript", "npm", "nodejs"]
+excerpt: "Deno 2.8 borra el prefijo npm: de la CLI, alcanza el 76% de compatibilidad con Node.js y acelera los cold installs 3.66x."
+---
+
+Si llevas siguiendo Deno desde que Ryan Dahl presentó aquel prototipo en 2018, sabes que la historia ha dado más vueltas que un `setTimeout` sin cancelar. Primero fue "el runtime que corrige los errores de Node.js". Luego "vale, también soportamos npm". Y ahora, con Deno 2.8, el mensaje es otro: **"úsame como drop-in de npm y además te llevas todo lo bueno de Deno"**.
+
+Esta semana se ha publicado Deno 2.8, la minor release más grande en la historia del proyecto, y la comunidad lo ha subido a 224 puntos en Hacker News. No es para menos. Voy a contarte por qué esta versión marca un antes y un después.
+
+## `deno add express` — sin prefijo, sin excusas
+
+Hasta ahora, si querías instalar un paquete npm desde la CLI de Deno, tenías que escribir `npm:` delante. Siempre. El equipo de Deno quería mantener la distinción entre JSR (su registro propio) y npm. Pero el resultado era una fricción constante:
+
+```bash
+# Antes de 2.8
+$ deno add express
+error: express is missing a prefix. Did you mean `deno install npm:express`?
+
+# Deno 2.8
+$ deno add express
+Add npm:express@5.2.1
+```
+
+El prefijo `npm:` sigue funcionando (y es obligatorio en los `import` dentro del código), pero en la CLI ya no hace falta. Deno asume que quieres npm por defecto, que es lo que cualquier desarrollador con memoria muscular de Node espera.
+
+Esto parece un detalle cosmético, pero es enorme. Significa que puedes coger un proyecto Node existente, ejecutar `deno install` y que funcione sin tocar nada. Deno lee `package.json`, escribe un `node_modules` compatible y tira.
+
+Hablando de `deno install`: ahora es **3.66 veces más rápido en cold install** que la versión 2.7 — de 3.3 segundos a 906 milisegundos para un proyecto con React, Vite, Babel y ESLint. No está nada mal para un gestor de paquetes que no es npm, ni pnpm, ni yarn.
+
+## El salto de compatibilidad con Node.js: del 42% al 76.4%
+
+Aquí está la cifra que más me ha impresionado. Deno mide su compatibilidad con Node.js ejecutando el test suite oficial de Node. En la versión 2.7 pasaban el 42% de los tests. En la 2.8 pasan **3.405 de 4.457 tests — un 76.4%**.
+
+Para ponerlo en perspectiva, Bun 1.3.14 pasa un 40.6% en el mismo suite.
+
+¿Qué significa esto en la práctica? Que cada vez más paquetes npm que antes fallaban en Deno ahora funcionan sin modificaciones. `node:http` duplica su throughput (2.21x), `node:buffer` acelera base64 3.07x gracias a simdutf, y `node:crypto` con scrypt va 2.12x más rápido.
+
+No solo han añadido compatibilidad: han optimizado los hot paths. Los módulos `node:*` que no usas ahora se cargan de forma lazy, así que los programas que no tocan Node APIs arrancan más rápido.
+
+## `import defer`: módulos que esperan su momento
+
+Deno 2.8 implementa la propuesta TC39 `import defer`, que permite cargar y parsear un módulo **sin ejecutar su código de nivel superior**. El módulo solo se evalúa la primera vez que accedes a una de sus exportaciones:
+
+```typescript
+// decoder.ts — este módulo es caro de inicializar
+console.log("Decoder inicializado");
+export function decode(data: Uint8Array): ImageData {
+  // ...
+}
+
+// main.ts — lo importamos pero no lo evaluamos hasta usarlo
+import defer * as decoder from "./decoder.ts";
+
+const args = Deno.args;
+if (args[0] === "png") {
+  // Solo ahora se ejecuta el código de decoder.ts
+  const result = decoder.decode(imageBytes);
+  console.log("Listo");
+}
+```
+
+Esto es oro para proyectos con dependencias pesadas que solo necesitas en ciertos flujos. Imagina una CLI que tiene modos `serve`, `build` y `lint`: con `import defer` puedes pre-cargar los tres módulos pero solo evaluar el que el usuario elige. Menos memoria, arranque más rápido.
+
+También funciona con imports dinámicos mediante `import.defer()`:
+
+```typescript
+const png = await import.defer("./png-decoder.js");
+const jpeg = await import.defer("./jpeg-decoder.js");
+
+const format = Deno.args[0]; // "png" o "jpeg"
+const decoder = format === "png" ? png : jpeg;
+// Solo se evalúa el decoder elegido
+```
+
+## Seis subcomandos nuevos que cubren huecos reales
+
+Deno 2.8 añade seis subcomandos que, sinceramente, deberían haber existido desde hace tiempo:
+
+**`deno audit fix`**: escanea vulnerabilidades en tus dependencias npm y las actualiza automáticamente a la versión parcheada más cercana que cumpla tus constraints. Las que requieren un major bump las lista aparte para que decidas tú.
+
+```bash
+$ deno audit fix
+╭ body-parser vulnerable to denial of service
+│ Severity:   high
+│ Package:    body-parser
+│ Vulnerable: <1.20.3
+╰ Info:       https://github.com/advisories/GHSA-qwcr-r2fm-qrc7
+
+Found 2 vulnerabilities
+Fixed 1 vulnerability:
+  body-parser 1.19.0 -> 1.20.3
+1 vulnerability could not be fixed automatically:
+  express (major upgrade to 5.0.0)
+```
+
+**`deno ci`**: hace exactamente lo que esperas. Instala desde el lockfile en modo `--frozen` y falla si algo no cuadra. Mételo en tu Dockerfile o pipeline de CI y olvídate de flags.
+
+```bash
+$ deno ci
+# Error si deno.lock no existe
+# Error si el lockfile no coincide con la config
+# Instala exactamente lo que dice el lockfile
+```
+
+**`deno transpile`**: pela los tipos de TypeScript y escribe JS plano. Sin bundling, sin reescritura de módulos. Solo el emit. Perfecto cuando necesitas publicar JS puro o pre-compilar para un runtime que no habla TS.
+
+**`deno pack`**: construye un tarball publicable en npm a partir de un proyecto Deno/JSR en un solo paso. Genera `package.json`, transpila TS a JS, extrae `.d.ts` y reescribe los specifiers para que funcionen en el ecosistema npm.
+
+**`deno bump-version`**: incrementa la versión en `deno.json` o `package.json`. En workspaces aplica el mismo incremento a todos los miembros y reescribe las referencias cruzadas. También soporta Conventional Commits para derivar el bump automáticamente.
+
+**`deno why`**: el equivalente a `npm explain` / `pnpm why`. Te dice por qué un paquete está instalado trazando el árbol desde tus dependencias directas.
+
+```bash
+$ deno why qs
+qs@6.14.2
+  npm:express@4 > qs@6.14.2
+qs@6.15.1
+  npm:express@4 > body-parser@1.20.5 > qs@6.15.1
+```
+
+## `deno compile` ahora detecta tu framework
+
+Otra mejora que me parece infravalorada: `deno compile .` ahora detecta automáticamente el framework web que estás usando — Next.js, Astro, Fresh, Remix, SvelteKit, Nuxt, SolidStart, TanStack Start o Vite SSR — ejecuta `deno task build` y genera el entrypoint correcto.
+
+```bash
+$ deno compile .
+Compile file:///project/main.ts to file:///project/myapp
+Detected Vite SSR project
+Running deno task build...
+```
+
+El binario resultante funciona sin wrapper adicional porque los entrypoints usan `import.meta.dirname` para resolver paths dentro del sistema de archivos virtual del ejecutable. Un binario único con tu app Next.js dentro. Brutal.
+
+## Mi opinión
+
+Deno 2.8 es la versión que llevaba años esperando. No por `import defer` —que es una feature de lenguaje interesante pero niche— sino por la combinación de tres cosas: la eliminación del prefijo `npm:` en la CLI, el salto al 76% de compatibilidad con Node.js y la velocidad de instalación.
+
+El runtime que nació diciendo "Node está roto, voy a arreglarlo" ha madurado hasta decir "Node está bien, pero yo te ofrezco lo mismo más rápido, con TypeScript nativo, sin configurar ESLint/Prettier y con herramientas de calidad integradas". Es un argumento mucho más convincente.
+
+¿Va a migrar alguien su monolito Express de 2018 a Deno por esto? Probablemente no. Pero quien empiece un proyecto nuevo hoy y elija Deno se lleva un gestor de paquetes rapidísimo, TypeScript out of the box, un linter, un formateador, un test runner, cobertura de código, compilación a binario y ahora una CLI que no te obliga a recordar prefijos. Todo en un solo binario de 50 MB.
+
+Aún quedan cosas por pulir. La compatibilidad con Node no es perfecta y algunos paquetes del ecosistema npm seguirán dando guerra. Pero la dirección es la correcta, y el ritmo de desarrollo es bestial.
+
+Si no le has dado una oportunidad a Deno desde la 1.x, la 2.8 es el momento.
