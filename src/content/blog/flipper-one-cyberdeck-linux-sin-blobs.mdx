@@ -1,0 +1,139 @@
+---
+title: "Flipper One: el cyberdeck Linux que planta cara a los binary blobs"
+date: "2026-05-22T02:00"
+tags: ["flipper-one", "linux", "open-source", "arm", "cyberdeck"]
+excerpt: "Flipper One es un ordenador ARM completamente abierto, con soporte mainline en el kernel Linux y cero blobs binarios. Y necesitan tu ayuda."
+---
+
+El 21 de mayo de 2026, el equipo de Flipper Devices —los creadores del celebérrimo Flipper Zero— publicó algo que no era un anuncio de producto al uso. Pavel Zhovner escribió un post de 18 minutos de lectura titulado "Flipper One — we need your help". Las primeras palabras ya marcan el tono: "Estamos genuinamente aterrados y necesitamos vuestra ayuda".
+
+No es postureo. Flipper One es un proyecto tan ambicioso que ni ellos mismos saben si van a poder con todo. Llevan años reconstruyéndolo desde cero varias veces. Y ahora lo abren al público no con un vídeo de marketing impoluto, sino con la trastienda: trackers de tareas públicos, discusiones internas de arquitectura, documentación a medio hacer. Todo.
+
+## Qué es exactamente Flipper One
+
+Si tienes un Flipper Zero, olvida la idea de que esto es una "versión 2". No lo es. Son dispositivos de categorías distintas.
+
+Flipper Zero opera en la **capa 0**: protocolos offline punto a punto como NFC, RFID de baja frecuencia, radio Sub-1 GHz, infrarrojos, iButton, UART, SPI, I²C. Todo sobre un microcontrolador de bajo consumo.
+
+Flipper One opera en la **capa 1**: todo lo que va por IP. Wi-Fi, Ethernet, 5G, satélite. Es networking, transferencia de datos y computación de alto rendimiento sobre un SoC ARM de 8 núcleos con 8 GB de RAM.
+
+Es, en esencia, un cyberdeck Linux. Pero no uno cualquiera.
+
+## Las tripas: dos procesadores, dos mundos
+
+Flipper One monta una arquitectura de co-procesador que es, francamente, de las decisiones de diseño más inteligentes que he visto en hardware abierto:
+
+- **CPU principal**: Rockchip RK3576, 8 núcleos, con GPU Mali-G52 y una NPU para correr modelos locales. Aquí vive Linux.
+- **MCU de bajo consumo**: Raspberry Pi RP2350, 2 núcleos. Controla la pantalla, los botones, el touchpad, los LEDs y el subsistema de alimentación.
+
+La genialidad está en que el dispositivo puede funcionar **solo con el MCU**. Aunque Linux esté apagado, puedes navegar por menús, configurar el arranque, ver el estado del sistema. Como dice Zhovner: "esto es lo que falta en la mayoría de SBCs: cuando Linux se apaga, el dispositivo está muerto".
+
+Los dos procesadores se comunican por un conjunto de interfaces que llaman **Interconnect**: SPI para el framebuffer hacia la pantalla, I²C para comandos y eventos de entrada, y UART más GPIOs para el control de arranque del CPU. Van a intentar meter los drivers de pantalla y entrada directamente en el kernel Linux, sin parches out-of-tree. Y están pidiendo a la comunidad del kernel que revise el diseño y les dé caña.
+
+## La guerra contra los binary blobs
+
+Aquí es donde Flipper One se la juega de verdad.
+
+El estado actual del ecosistema ARM Linux es deprimente. Cada fabricante suelta su propio BSP (Board Support Package) con blobs de boot cerrados, parches específicos del vendor y drivers propietarios. No puedes coger las especificaciones y entender cómo funciona el ordenador. Solo aprendes los workarounds para ese chip concreto con ese BSP concreto.
+
+Flipper Devices se ha asociado con **Collabora** —sí, los mismos que mantienen gráficos en el kernel y contribuyen a Mesa, Wayland y PipeWire— para meter el soporte completo del RK3576 en el kernel Linux mainline. El objetivo es que puedas bajar el kernel de kernel.org, compilarlo y arrancarlo en tu Flipper One sin un solo parche del vendor.
+
+El soporte mainline del RK3576 ya está en buena forma: los componentes principales funcionan. Pero queda **un último blob binario en la cadena de arranque**: el DDR trainer, que inicializa la RAM durante el early boot. Están pidiendo ayuda a la comunidad para convencer a Rockchip de que lo abra.
+
+También faltan por upstreamizar la NPU, la decodificación de vídeo por hardware y otros aceleradores. Collabora mantiene una lista pública con lo que funciona y lo que no.
+
+## Flipper OS: adiós al infierno de reflashear SDs
+
+Cualquiera que haya usado una Raspberry Pi como "navaja suiza digital" conoce el problema: hoy es un router, mañana un analizador lógico, pasado una caja de TV. Instalas docenas de paquetes, compilas desde fuente, editas configs del sistema, toqueteas el device tree... y el sistema se convierte en un desastre. No hay manera limpia de deshacerlo. Cada nuevo proyecto empieza reflasheando la SD.
+
+Flipper OS es una capa sobre Debian que introduce **perfiles**: snapshots completos del sistema operativo con distintos paquetes y configuraciones predefinidas. Arrancas un perfil, lo clonas, lo rompes, instalas lo que quieras y vuelves a una copia limpia. O cambias a un perfil completamente distinto para otro caso de uso.
+
+```bash
+# Así funcionaría el cambio entre perfiles en Flipper OS
+flipctl profile list
+# Router doméstico (activo)
+# Analizador de redes
+# SDR station
+# Desarrollo ARM bare-metal
+
+flipctl profile clone "Router doméstico" "Router experimental"
+# Clonado: "Router experimental"
+
+# Instalas, rompes, experimentas...
+# Cuando quieras volver atrás:
+flipctl profile switch "Router doméstico"
+```
+
+No es un concepto trivial. De hecho, ellos mismos admiten que Flipper OS es un proyecto extremadamente complejo y no están seguros al 100% de cómo arquitecturarlo. Están prototipando y quieren que la solución funcione más allá de Flipper One: para cualquier cyberdeck basado en Raspberry Pi o caja Linux táctil portátil.
+
+## FlipCTL: UIs de menú para pantallas diminutas
+
+El segundo pilar de Flipper OS es FlipCTL, un framework para construir interfaces basadas en menús para pantallas LCD pequeñas, controladas con D-pad y unos pocos botones.
+
+El problema que ataca es real: la mayoría de cyberdecks Linux acaban ejecutando KDE o GNOME aplastados en una pantalla táctil de 7 pulgadas. Es miserable. Lo que hizo grande al Flipper Zero fue su interfaz de usuario, diseñada específicamente para un LCD pequeño. Quieren llevar ese enfoque al mundo Linux.
+
+La idea es envolver utilidades Linux existentes —`ping`, `nmap`, `traceroute`, `iperf3`— en menús navegables que tengan sentido en una pantalla minúscula:
+
+```bash
+# Concepto de cómo FlipCTL envolvería nmap
+flipctl menu add "Network Scanner" \
+  --command "nmap -sn 192.168.1.0/24" \
+  --parser "flipctl-parse-nmap" \
+  --icon wifi
+
+# El resultado: un menú en la pantalla LCD con:
+# [Start Scan] [Subnet: 192.168.1.0/24] [Back]
+```
+
+El objetivo a largo plazo es ambicioso: que añadir una HMI a cualquier dispositivo Linux empotrado sea tan simple como `apt install flipctl`. Routers, NAS, servidores, placas headless — cualquier cosa a la que puedas atornillar una pantalla pequeña debería poder usar FlipCTL sin arrastrar Qt, GNOME o X11.
+
+Van a lanzar también un "FlipCTL Control Board" como periférico independiente: una pantalla y una placa de botones que podrás conectar a cualquier dispositivo Linux para obtener instantáneamente una interfaz por menús.
+
+## Expansión modular de verdad
+
+El M.2 de Flipper One es una bestia. Han metido todo lo que cabía en un Key-B:
+
+- PCI Express 2.1 ×1
+- USB 3.1 y USB 2.0
+- SATA 3
+- Audio serie, UART, I²C
+- Interfaz de tarjeta SIM
+
+Soporta módulos de tamaño 2242, 3042 y 3052. Básicamente puedes enchufar un módem 5G, una SDR, un SSD NVMe, un acelerador de IA o una tarjeta Wi-Fi.
+
+Y para proyectos DIY más sencillos, un conector GPIO con headers estándar de 2.54 mm. La placa trasera tiene insertos roscados con la misma separación que una perfboard estándar. Cortas un trozo de perfboard, sueldas tu módulo y lo atornillas.
+
+## El portal de desarrollo abierto
+
+Esto es casi tan interesante como el hardware: Flipper Devices ha publicado un portal de desarrollo donde cualquiera puede ver los trackers de tareas, las discusiones internas, la documentación a medio escribir y los debates de arquitectura.
+
+El proyecto está dividido en sub-proyectos:
+- **Hardware**: PCBs, antenas, conexiones eléctricas
+- **Mecánica**: diseño industrial, carcasas, botones
+- **Linux**: kernel, módulos, drivers, userspace, bootloader
+- **Firmware MCU**: firmware del RP2350
+- **Interfaz de usuario**: UI/UX, lenguaje visual
+- **Documentación**: wiki del portal, guías, datasheets
+- **Testing**: herramientas de validación de hardware
+
+Están contratando un Developer Portal Manager para hacer de enlace entre el equipo interno y la comunidad.
+
+## Mi opinión
+
+Llevo meses escribiendo sobre herramientas, exploits y lanzamientos de software. Flipper One me parece el anuncio más refrescante en mucho tiempo, y no por el dispositivo en sí —que también—, sino por cómo lo están contando.
+
+En una industria donde los anuncios de hardware son PowerPoints llenos de humo y promesas que nunca se cumplen, que una empresa publique sus trackers de bugs, sus discusiones de diseño a medio cocinar y sus "no sabemos cómo resolver esto todavía" es un soplo de aire fresco.
+
+El enfoque "sin blobs binarios" no es marketing vacío. Han puesto dinero donde está su boca: pagan a Collabora —una de las consultoras de código abierto más respetadas del kernel— para upstreamizar el soporte del SoC. Y están pidiendo ayuda para el último blob que no depende de ellos.
+
+Dicho esto, el proyecto tiene riesgos evidentes. Flipper OS y FlipCTL están en fase conceptual. Las arquitecturas de perfiles de sistema operativo no son triviales —pregúntale a NixOS o a los contenedores LXC lo que cuesta aislar estados correctamente—. Y el éxito depende de que la comunidad se involucre en un proyecto que todavía no tiene hardware físico que comprar.
+
+Pero si algo ha demostrado el equipo de Flipper es que saben construir comunidad. El Flipper Zero no triunfó por sus especificaciones técnicas, sino porque era divertido, hackeable y tenía una comunidad brutal detrás. Flipper One está jugando la misma carta, pero a una escala mucho mayor.
+
+Si sale bien, podría ser el ordenador ARM abierto de referencia. Si sale regular, al menos habrán empujado el soporte mainline del RK3576 y nos habrán dejado un montón de discusiones técnicas públicas de las que aprender.
+
+Yo estoy dentro. ¿Tú?
+
+---
+
+**Fuente**: [Flipper Blog — "Flipper One — we need your help"](https://blog.flipper.net/flipper-one-we-need-your-help/), Pavel Zhovner, 21 de mayo de 2026. Discusión en [Hacker News](https://news.ycombinator.com/item?id=48220647) (1046 puntos, 417 comentarios).
