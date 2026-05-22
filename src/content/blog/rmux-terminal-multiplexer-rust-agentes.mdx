@@ -85,7 +85,7 @@ let snapshot = pane.snapshot().await?;
 assert_eq!(snapshot.cols, 120);
 assert_eq!(snapshot.rows, 32);
 // snapshot.buffer contiene las celdas con atributos de color,
-// estilo, y contenido carácter por carácter
+// estilo y contenido carácter por carácter
 ```
 
 Esto permite que un agente de código inspeccione el estado real de un terminal sin adivinar. Puedes comprobar colores, cursor, contenido exacto. Adiós a los scripts que rompen porque la salida tenía un espacio de más.
@@ -119,7 +119,7 @@ RMUX expone tres interfaces públicas que comparten el mismo protocolo:
 
 Las tres hablan con un daemon local vía IPC. En Linux y macOS usa Unix sockets, en Windows usa Named Pipes (con ConPTY nativo, sin WSL). Cualquier cosa que puedas hacer desde la CLI, la puedes hacer desde el SDK y viceversa.
 
-El workspace está organizado en 12 crates con responsabilidades claras: `rmux-types` para tipos de datos, `rmux-proto` para el protocolo, `rmux-ipc` para transportes, `rmux-pty` para la asignación de PTYs... Es código limpio, bien modularizado, y usa `#![forbid(unsafe_code)]` en las crates de nivel superior.
+El workspace está organizado en 12 crates con responsabilidades claras: `rmux-types` para tipos de datos, `rmux-proto` para el protocolo, `rmux-ipc` para transportes, `rmux-pty` para la asignación de PTYs... Es código limpio, bien modularizado y usa `#![forbid(unsafe_code)]` en las crates de nivel superior.
 
 ## Multiplataforma de verdad
 
@@ -145,7 +145,7 @@ Cada demo está documentada y tiene su propio repositorio en [github.com/Helvese
 
 ## Mi veredicto
 
-RMUX me parece uno de esos proyectos que identifican un punto de fricción real y lo resuelven con una arquitectura limpia en vez de con parches. Llevamos décadas automatizando terminales con expect/send, grep/sleep, y scripts frágiles que dependen de timings. Tener un SDK tipado con waits explícitos y snapshots estructurados es el salto que este espacio necesitaba.
+RMUX me parece uno de esos proyectos que identifican un punto de fricción real y lo resuelven con una arquitectura limpia en vez de con parches. Llevamos décadas automatizando terminales con expect/send, grep/sleep y scripts frágiles que dependen de timings. Tener un SDK tipado con waits explícitos y snapshots estructurados es el salto que este espacio necesitaba.
 
 El timing es perfecto. Estamos en plena explosión de agentes de código — Claude Code, Codex CLI, Goose, Zerostack — y todos ellos necesitan interactuar con terminales de forma fiable. RMUX les da una API en vez de un volcado de texto.
 
