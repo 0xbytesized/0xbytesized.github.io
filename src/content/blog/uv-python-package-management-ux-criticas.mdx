@@ -1,0 +1,121 @@
+---
+title: "UV: el rayo que tropieza con su propia interfaz"
+date: "2026-05-22T08:00"
+tags: ["python", "uv", "herramientas", "productividad", "open-source"]
+excerpt: "UV ha conquistado el ecosistema Python con su velocidad brutal, pero su UX para el mantenimiento de dependencias deja a media comunidad rascándose la cabeza."
+---
+
+UV es uno de esos proyectos que aparecen una vez cada década. En apenas dos años, Astral ha conseguido lo que parecía imposible: unificar la gestión de versiones de Python, entornos virtuales, instalación de paquetes y resolución de dependencias en un solo binario escrito en Rust. Y además, que vuele.
+
+Me declaro fan. He migrado todos mis proyectos a UV y no pienso volver atrás. `uv sync` tarda menos de lo que pip tarda en resolver la primera dependencia. Eso no se discute.
+
+Pero hay un elefante en la habitación, y esta semana Kevin Renskers —desarrollador freelance con 25 años a sus espaldas— lo ha señalado con un artículo que ha acumulado más de 180 puntos en Hacker News y ha provocado que varios ingenieros del equipo de UV salieran a responder. El titular lo dice claro: **"UV es fantástico, pero su UX de gestión de paquetes es un desastre"**.
+
+Como alguien que usa UV a diario, voy a desgranar los tres puntos que Renskers pone sobre la mesa, añadir contexto con las respuestas del equipo de UV y dar mi opinión sincera.
+
+## 1. ¿Dónde está `uv outdated`?
+
+La primera crítica es tan simple que duele: no hay un comando `uv outdated`. Si quieres saber qué paquetes tienen actualizaciones disponibles, esto es lo que UV te ofrece:
+
+```bash
+# Lo que quieres escribir:
+uv outdated
+
+# Lo que tienes que escribir:
+uv tree --outdated --depth 1
+```
+
+El problema no es solo tener que recordar una invocación contraintuitiva. La salida de `uv tree --outdated` te muestra el árbol completo de dependencias con pequeñas anotaciones al lado de las que tienen actualización. Si tienes 50 dependencias y solo 2 están desactualizadas, tienes que escanear 50 líneas para encontrar esas 2.
+
+Compáralo con lo que hace pnpm en el ecosistema JavaScript:
+
+```bash
+pnpm outdated
+# ┌──────────────────────┬─────────┬────────┐
+# │ Package              │ Current │ Latest │
+# ├──────────────────────┼─────────┼────────┤
+# │ fastapi              │ 0.115.0 │ 0.121.0│
+# │ pydantic             │ 2.9.0   │ 2.12.0 │
+# └──────────────────────┴─────────┴────────┘
+```
+
+Limpio, conciso, directo al grano.
+
+En el hilo de HN, un usuario señaló que `uv pip list --outdated` existe y hace algo similar. Es verdad. Pero el hecho de que el comando recomendado oficialmente sea pasar por `uv tree` y que tengas que descubrir el atajo de `uv pip list` por tu cuenta ya es sintomático del problema.
+
+William Woodruff, ingeniero de UV, reconoció en los comentarios que la carencia de `uv outdated` es una petición razonable, pero que simplemente no había surgido mucho porque en el ecosistema Python la cultura de actualizar dependencias "por si acaso" no está tan extendida como en JavaScript.
+
+## 2. Sin límite superior por defecto: la bomba de relojería silenciosa
+
+Este es el punto más controvertido y, en mi opinión, el más importante.
+
+Cuando añades una dependencia con pnpm:
+
+```bash
+pnpm add pydantic
+# En package.json queda: "pydantic": "^2.9.0"
+```
+
+El caret (`^`) significa: "acepto cualquier versión 2.x.x, pero no saltes a 3.0.0". Es seguro por defecto. Si ejecutas `pnpm update`, no te va a romper el proyecto con un cambio de API mayor.
+
+Cuando añades una dependencia con UV:
+
+```bash
+uv add pydantic
+# En pyproject.toml queda: "pydantic>=2.9.0"
+```
+
+Sin límite superior. Para UV, pydantic 2, 3 y 100 son perfectamente aceptables. Esto significa que `uv lock --upgrade-package pydantic` es una operación potencialmente destructiva: te puede traer una versión major nueva sin avisar.
+
+El equipo de UV tiene buenos argumentos para esta decisión. Armin Ronacher (creador de Flask y Rye) explicó en el hilo que en Python, a diferencia de npm, necesitas una resolución singular de dependencias. No puedes tener dos versiones distintas de la misma librería en diferentes partes del árbol. Si pones límites superiores por defecto, acabas con árboles que no pueden resolverse. Hay paquetes en PyPI que tuvieron que publicar overrides porque sus _upper bounds_ resultaron ser incorrectos.
+
+La solución existe: UV ofrece el flag `--bounds`:
+
+```bash
+uv add pydantic --bounds
+# En pyproject.toml queda: "pydantic>=2.9.0,<3"
+```
+
+Pero es un flag _opt-in_ y actualmente considerado _preview_. Tienes que acordarte de usarlo cada vez. La buena noticia es que puedes configurarlo de forma persistente en `pyproject.toml`:
+
+```toml
+[tool.uv]
+add-bounds = true
+```
+
+Zanie, otro ingeniero del equipo, lo mencionó en su respuesta. Aun así, que la configuración segura no sea la predeterminada es una decisión de diseño discutible.
+
+## 3. El comando `upgrade` que no existe
+
+Actualizar paquetes en UV es un ejercicio de paciencia sintáctica:
+
+```bash
+# pnpm: limpio y directo
+pnpm update
+pnpm update pydantic fastapi
+
+# UV: repetitivo y verboso
+uv lock --upgrade-package pydantic --upgrade-package fastapi
+```
+
+Tienes que repetir `--upgrade-package` por cada paquete que quieras actualizar. Y como no hay límites superiores por defecto, `uv lock --upgrade-package` a secas (sin especificar paquetes) es un botón nuclear: actualiza absolutamente todo a la última versión disponible, incluyendo dependencias transitivas que ni sabías que existían.
+
+Renskers lo resume bien: "parece diseñado para máquinas, no para humanos".
+
+## La respuesta del equipo de UV
+
+Algo que me gusta de esta historia es cómo respondió el equipo. No se pusieron a la defensiva. Zanie, Woodruff y Ronacher participaron en el hilo de HN reconociendo puntos válidos, explicando el razonamiento detrás de sus decisiones y señalando features que ya existen pero no son obvias.
+
+Woodruff admitió que `uv outdated` es una petición razonable y que probablemente acabe existiendo. Zanie explicó lo de `add-bounds` persistente. Ronacher dio contexto técnico sobre por qué los límites superiores por defecto son problemáticos en el ecosistema Python.
+
+Es el tipo de interacción comunidad-mantenedores que quieres ver en un proyecto open source.
+
+## Mi veredicto
+
+Voy a ser claro: **UV sigue siendo la mejor herramienta de gestión de paquetes para Python, y por mucho**. Su velocidad no es un lujo, es un cambio cualitativo. Cuando `uv sync` tarda 200ms, tu forma de trabajar cambia. Ya no piensas dos veces antes de recrear un entorno. Ya no vas a por un café mientras se resuelven las dependencias.
+
+Pero Renskers tiene razón en lo fundamental: la UX de mantenimiento es peor que la de pnpm o Poetry. No es un desastre —el titular es clickbait, como señalaron varios comentaristas—, pero sí es un paso atrás en ergonomía comparado con las herramientas que UV pretende reemplazar.
+
+Mi predicción: en menos de seis meses tendremos `uv outdated` y probablemente un `uv upgrade` como alias. Son _quality of life improvements_ demasiado obvios como para ignorarlos. La cuestión de los _bounds_ es más peliaguda porque tiene implicaciones técnicas reales, pero confiar en que la comunidad configure `add-bounds = true` no es una solución satisfactoria a largo plazo.
+
+Mientras tanto, mi `pyproject.toml` ya lleva `add-bounds = true` y un alias en la shell para no teclear `uv tree --outdated --depth 1` cada vez. UV es demasiado bueno como para no usarlo, pero no está de más señalarlo cuando tropieza.
