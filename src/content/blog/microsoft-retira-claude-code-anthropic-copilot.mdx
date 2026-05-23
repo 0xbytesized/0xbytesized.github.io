@@ -1,0 +1,134 @@
+---
+title: "Microsoft retira Claude Code tras perder contra Anthropic"
+date: "2026-05-23T08:00"
+tags: ["microsoft", "claude-code", "anthropic", "github-copilot", "ai-coding"]
+excerpt: "Microsoft cancela las licencias de Claude Code para miles de ingenieros. Sus devs prefirieron Anthropic y ahora toca volver a Copilot CLI."
+---
+
+Microsoft acaba de confirmar lo que muchos sospechaban: **sus propios ingenieros prefieren Claude Code a GitHub Copilot CLI**. Y la respuesta de la compañía no ha sido mejorar su producto para competir, sino **retirar las licencias de la competencia**.
+
+Según ha revelado Tom Warren en The Verge, Microsoft empezó en diciembre de 2025 a ofrecer Claude Code a miles de sus desarrolladores. La idea era que project managers, diseñadores y otros perfiles no técnicos experimentaran con la programación por primera vez. También querían que los ingenieros compararan ambas herramientas y dieran feedback.
+
+El problema es que el experimento salió demasiado bien para Anthropic.
+
+## El piloto que se comió el presupuesto anual
+
+Los números internos son demoledores. Fuentes cercanas a la compañía filtraron que el gasto en tokens de Claude Code **consumió el presupuesto previsto para todo el año fiscal en apenas unos meses**. Un comentario en Hacker News lo resume con precisión: "fue un piloto lanzado en diciembre que accidentalmente se comió el objetivo de gasto anual en IA para 2026".
+
+El equipo de Experiences + Devices —los responsables de Windows, Microsoft 365, Outlook, Teams y Surface— tiene de plazo hasta el **30 de junio de 2026** para abandonar Claude Code. Esa fecha no es casual: es el último día del año fiscal de Microsoft.
+
+Rajesh Jha, vicepresidente ejecutivo del grupo, lo explicó en un memo interno:
+
+> "Cuando empezamos a ofrecer tanto Copilot CLI como Claude Code, nuestro objetivo era aprender rápido, comparar las herramientas en flujos de trabajo reales y entender qué ayudaba más a nuestros equipos. Claude Code fue una parte importante de ese aprendizaje."
+
+La segunda parte del mensaje es la que importa: "Copilot CLI nos ha dado algo especialmente valioso: un producto que podemos **moldear directamente con GitHub** para nuestros repos, flujos de trabajo, expectativas de seguridad y necesidades de ingeniería."
+
+Traducción: podemos controlar Copilot CLI. Claude Code, no.
+
+## El coste real de la calidad
+
+Uno de los hallazgos más interesantes del piloto es la relación calidad-consumo de tokens. Claude Code **quema muchos más tokens** que otros agentes. Bastante más. En Hacker News, varios usuarios lo confirman con datos propios:
+
+> "Lancé una demo interna de Claude Code y DeepSeek el mismo día. Quemamos la asignación mensual de Claude en poco más de una semana, con más de la mitad del presupuesto gastado en un solo día. Con DeepSeek la gente no puede llegar a ese nivel de consumo ni queriendo."
+
+Esto no es necesariamente malo. Claude Code gasta más tokens porque hace más cosas: lee más contexto, verifica más hipótesis, itera más veces antes de darte una respuesta. El resultado es una **mayor calidad percibida**, pero a un coste que hace inviable escalarlo a 200.000 empleados.
+
+Aquí tienes una simulación conceptual de lo que significa esa diferencia de consumo en costes reales:
+
+```bash
+# Simulación de costes diarios por desarrollador
+# Claude Code (modo agente completo)
+TOKENS_CLAUDE=500000       # tokens/día con uso intensivo
+COSTE_CLAUDE=15            # $15 por millón de tokens (aprox.)
+
+# GitHub Copilot CLI (modo integrado)
+TOKENS_COPILOT=120000      # tokens/día
+COSTE_COPILOT=0             # coste interno para Microsoft
+
+coste_diario_claude=$(echo "scale=2; $TOKENS_CLAUDE * $COSTE_CLAUDE / 1000000" | bc)
+coste_mensual_claude=$(echo "scale=2; $coste_diario_claude * 22" | bc)
+
+echo "Claude Code: \$${coste_diario_claude}/día · \$${coste_mensual_claude}/mes por dev"
+echo "Copilot CLI: \$0 marginal (infraestructura propia)"
+
+# Con 10.000 desarrolladores usando Claude Code:
+echo "Coste anual estimado para 10k devs: \$$(echo "scale=0; $coste_mensual_claude * 10000 * 12" | bc)"
+```
+
+Esto son números orientativos, pero el orden de magnitud es correcto: **decenas de millones de dólares al año** en tokens para una sola división. Para Microsoft, que ya invierte miles de millones en infraestructura propia de inferencia, externalizar ese gasto a un competidor directo en IA es difícil de justificar ante el consejo.
+
+## Copilot CLI: el sustituto forzoso
+
+¿Qué es exactamente Copilot CLI? Es la versión de GitHub Copilot que **funciona directamente en la terminal**, fuera del editor. A diferencia de Claude Code, está profundamente integrado con el ecosistema de GitHub: conoce tus repositorios, tus PRs, tus workflows de CI/CD y tu configuración de seguridad.
+
+La gran ventaja que Microsoft está vendiendo internamente es esa: **integración nativa**. Mientras Claude Code es un agente genérico que funciona en cualquier entorno, Copilot CLI puede aprovechar todo el contexto que GitHub ya tiene sobre tu código.
+
+El problema, según las fuentes de The Verge, es que los ingenieros **no están comprando el argumento**. Prefieren la calidad de Claude Code aunque no esté integrado con GitHub. Es el clásico dilema del mejor producto vs. el producto de la casa.
+
+Aquí se ve la diferencia de enfoque entre ambas herramientas en una tarea típica:
+
+```bash
+# Con Claude Code: agente autónomo que explora y propone
+$ claude "refactoriza el módulo de autenticación para 
+          soportar OAuth2 con PKCE, mantén compatibilidad 
+          con el flujo actual de JWT"
+
+# Claude Code:
+# 1. Lee la estructura del proyecto (package.json, tsconfig)
+# 2. Encuentra el módulo de auth actual
+# 3. Analiza imports, tests existentes, dependencias
+# 4. Propone un plan de refactor paso a paso
+# 5. Escribe el código preguntando antes de modificar
+# 6. Actualiza los tests
+# 7. Sugiere cambios en la documentación
+
+# Con Copilot CLI: asistente integrado con GitHub
+$ copilot "refactoriza el módulo de autenticación para 
+           soportar OAuth2 con PKCE, mantén compatibilidad 
+           con el flujo actual de JWT"
+
+# Copilot CLI:
+# 1. Consulta el grafo de dependencias del repo en GitHub
+# 2. Identifica PRs anteriores relacionadas con auth
+# 3. Verifica la configuración de seguridad del repo
+# 4. Genera el código aprovechando el contexto de CI/CD
+# 5. Crea una branch y PR directamente
+```
+
+Ambos enfoques son válidos. Pero los ingenieros de Microsoft **votaron con los dedos**: más uso, más sesiones, más proyectos arrancados con Claude Code. Copilot CLI, siendo la herramienta de casa, perdió la comparativa interna.
+
+## No todo es guerra de agentes
+
+Conviene aclarar algo importante: **Microsoft no está rompiendo con Anthropic**. Al contrario.
+
+La compañía sigue siendo uno de los mayores clientes de Anthropic. Los modelos Claude (Sonnet 4.5, Opus 4.1, Haiku 4.5) están disponibles en Microsoft Foundry. La tecnología detrás de Claude Cowork se integró en Microsoft 365 Copilot. Y Anthropic sigue siendo el proveedor preferido para ciertas tareas dentro de Copilot donde sus modelos superan a los de OpenAI.
+
+La cancelación afecta **solo a Claude Code como herramienta CLI**, no a los modelos ni a la relación comercial. Es un movimiento quirúrgico para proteger Copilot CLI, no una declaración de guerra.
+
+De hecho, los modelos de Anthropic **seguirán disponibles dentro de Copilot CLI**. Lo que Microsoft quiere es que sus ingenieros interactúen con esos modelos a través de su propia interfaz, donde pueden controlar la experiencia, la telemetría y, sobre todo, el roadmap.
+
+## Cursor estuvo en la mesa
+
+Un detalle revelador que aparece en el artículo de The Verge: Microsoft "supuestamente consideró adquirir Cursor en meses recientes para ayudar a cerrar la brecha de GitHub Copilot".
+
+Cursor, el editor basado en VS Code que se ha convertido en el favorito de muchos desarrolladores para programar con IA, era visto como una forma de **inyectar talento y tecnología externa** al ecosistema Copilot. Al final no prosperó —The Verge menciona "escrutinio regulatorio" como posible razón— y Microsoft ha empezado a mirar otras startups de IA.
+
+El mensaje es claro: GitHub Copilot no está donde Microsoft quiere que esté, y la comparativa interna con Claude Code lo ha dejado en evidencia.
+
+## Mi opinión
+
+Microsoft ha hecho lo lógico para cualquier empresa con un producto propio que compite con uno externo: **retirar el externo y forzar el interno**. Pero hay algo inquietante en la forma en que lo han hecho.
+
+No han dicho "vamos a mejorar Copilot CLI hasta que nuestros ingenieros lo prefieran". Han dicho "vamos a quitar Claude Code y que se adapten". Es la diferencia entre competir en calidad y competir por decreto.
+
+El patrón no es nuevo. Microsoft lleva décadas haciendo esto mismo con otras herramientas internas. Pero en el contexto actual, donde los agentes de código están redefiniendo cómo se escribe software, **obligar a tus ingenieros a usar una herramienta inferior** tiene consecuencias reales en productividad.
+
+Hay quien argumenta que el gasto en tokens de Claude Code era insostenible. Y es verdad: los números que se filtran son una barbaridad. Pero si tus ingenieros gastan tantos tokens es porque **la herramienta les está siendo útil**. El problema no es el gasto, es que el valor generado no se está midiendo correctamente.
+
+Si un ingeniero con Claude Code produce un 40% más, ¿importa que gaste 150$ al mes en tokens? Su salario cuesta bastante más que eso. El verdadero problema de Microsoft es que **no puede medir ese 40%** porque la productividad en software es notoriamente difícil de cuantificar. Así que van a lo fácil: cortar el gasto visible y esperar que la productividad no se resienta demasiado.
+
+La gran pregunta es si Copilot CLI alcanzará a Claude Code antes de que los ingenieros de Microsoft encuentren formas creativas de seguir usando lo que prefieren. Porque si hay algo que sabemos los que escribimos código es que **los desarrolladores siempre encuentran la manera de usar las herramientas que funcionan**.
+
+---
+
+**Fuentes**: [The Verge](https://www.theverge.com/tech/930447/microsoft-claude-code-discontinued-notepad) · [Hacker News](https://news.ycombinator.com/item?id=48238896)
