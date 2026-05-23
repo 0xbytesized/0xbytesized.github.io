@@ -1,0 +1,99 @@
+---
+title: "yt-dlp jubila Bun: el código de IA rompe la confianza"
+date: "2026-05-23T04:22"
+tags: ["bun", "yt-dlp", "open-source", "ia", "javascript"]
+excerpt: "yt-dlp depreca el soporte de Bun tras su rewrite en Rust generado con Claude. Las consecuencias del vibe-coding llegan a la infraestructura crítica."
+---
+
+El 20 de mayo de 2026, los maintainers de yt-dlp —el descargador de YouTube más utilizado del ecosistema open source, con más de 100 millones de descargas— publicaron un anuncio que ha sacudido a la comunidad de JavaScript: **el soporte de Bun queda limitado y deprecado**. No es una queja sobre rendimiento ni sobre compatibilidad técnica. Es una declaración de desconfianza.
+
+## El anuncio
+
+En el issue [#16766](https://github.com/yt-dlp/yt-dlp/issues/16766) del repositorio, el equipo de yt-dlp comunica que, a partir de la próxima release, solo se soportarán las versiones de Bun entre la **1.2.11** y la **1.3.14**. Cualquier versión anterior o posterior queda fuera. La razón, en sus propias palabras:
+
+> "Bun fue reescrito recientemente en Rust usando Claude, y su desarrollo parece haber tomado un giro hacia ser completamente *vibe-coded*. Esto es alarmante y decepcionante por varias razones, y francamente parece un dolor de cabeza futuro que preferimos evitar."
+
+La versión 1.3.14 es simbólica: fue la última release construida desde el codebase original en Zig. Todo lo que vino después —el rewrite de un millón de líneas mergeado en el PR #30412— ya no les inspira la misma confianza.
+
+## Por qué importa
+
+yt-dlp no es un proyecto cualquiera. Es una herramienta de infraestructura que procesa JavaScript arbitrario desde internet —los extractores de sitios como YouTube ejecutan código en un runtime de JS para descifrar las firmas y acceder a los streams. Si ese runtime tiene un bug introducido por una generación de código sin suficiente revisión humana, el vector de ataque es real.
+
+El equipo de yt-dlp usa `ejs`, un paquete que aísla la ejecución de los extractores, y necesita garantías de que el runtime subyacente no va a ignorar el lockfile o a comportarse de forma impredecible. Con el Bun post-Zig, esas garantías desaparecen.
+
+```bash
+# Lo que hacías antes: instalar Bun y ejecutar yt-dlp sin preocupaciones
+curl -fsSL https://bun.sh/install | bash
+pip install yt-dlp
+yt-dlp "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+# Lo que va a pasar a partir de ahora:
+# Si tienes Bun > 1.3.14, yt-dlp te advertirá o directamente fallará
+```
+
+## El contexto: qué pasó con Bun
+
+Para quien no haya seguido la historia: Bun nació como un runtime de JavaScript escrito en Zig, con el objetivo de ser más rápido que Node.js y Deno. Su autor, Jarred Sumner, construyó un ecosistema completo —runtime, bundler, test runner, package manager— desde cero.
+
+En mayo de 2026, el proyecto mergeó un rewrite completo de aproximadamente un millón de líneas de código, pasando de Zig a Rust. El proceso se apoyó intensamente en Claude, el modelo de Anthropic, para generar y migrar grandes bloques de código. La comunidad lo llamó *vibe-coding*: generar código con IA y aceptarlo si pasa los tests, sin una revisión línea a línea.
+
+El resultado técnico es impresionante: Bun en Rust arranca más rápido, consume menos memoria y mantiene compatibilidad con Node.js. Pero la forma de llegar ahí ha generado desconfianza.
+
+## El problema no es Rust, es la revisión
+
+Que Bun esté escrito en Rust no es el problema. El problema es que un millón de líneas generadas con asistencia intensiva de IA son, por definición, más difíciles de auditar que un millón de líneas escritas y revisadas por humanos.
+
+```javascript
+// Un extractor típico de yt-dlp ejecuta código así en el runtime JS
+// Si el runtime tiene un bug sutil, esto es un vector de ataque
+const decipher = (signature) => {
+    // Transformaciones que revierten el ofuscamiento de YouTube
+    const a = signature.substring(3);
+    const b = a.split("").reverse().join("");
+    return b.substring(0, b.length - 2);
+};
+
+// Con un runtime inestable, este código podría:
+// - Leer memoria fuera de los límites del string
+// - Corromper el stack en casos borde
+// - Ignorar el sandboxing de ejs
+```
+
+Los maintainers de yt-dlp no están diciendo que Bun tenga bugs conocidos explotables. Están diciendo que el riesgo percibido ha subido lo suficiente como para que mantener el soporte no compense. Es una decisión pragmática de gestión de riesgos en un proyecto con recursos limitados.
+
+## No es solo Bun
+
+El issue de yt-dlp ha abierto un debate más amplio. En los comentarios, un usuario señaló que Deno también está usando Claude en su desarrollo. La respuesta de los maintainers fue reveladora:
+
+> "Hay una diferencia enorme entre *usar* Claude y *depender completamente* de Claude."
+
+Esa es la línea. Usar IA como asistente para generar tests, documentación o boilerplate es una cosa. Usarla para reescribir el core del runtime de arriba a abajo es otra muy distinta. La diferencia está en la densidad de revisión humana por línea de código generado.
+
+```bash
+# La postura de yt-dlp en la práctica:
+# Solo se fían de Bun 1.2.11 a 1.3.14 (el último en Zig puro)
+bun --version
+# Si devuelve 1.3.14 o anterior → OK
+# Si es una versión posterior (post-Zig/Rust) → yt-dlp te dirá que no
+
+# Mientras tanto, Node.js sigue siendo el runtime recomendado
+node --version  # Cualquier versión LTS reciente funciona
+```
+
+## Mi opinión
+
+Creo que los maintainers de yt-dlp han tomado la decisión correcta y la han comunicado con una honestidad poco común en el open source. No han dicho "Bun es malo" ni han atacado a sus desarrolladores. Han dicho: "no podemos garantizar la seguridad de nuestro software si el runtime subyacente se ha generado con un nivel de revisión que no nos da confianza".
+
+Esto no es un veredicto sobre la IA en el desarrollo de software. Es un veredicto sobre los procesos. Si Bun hubiera migrado a Rust con el mismo nivel de revisión humana que tenía en Zig, yt-dlp probablemente no habría movido un dedo. El problema no es la herramienta, es la gobernanza.
+
+Lo que me preocupa es el precedente. Si un proyecto del tamaño de yt-dlp toma esta decisión públicamente, otros proyectos pueden seguir el mismo camino. Y si Bun pierde el soporte de suficientes proyectos clave del ecosistema, su adopción se resentirá independientemente de si el código generado por IA tiene bugs o no.
+
+La confianza en el open source siempre ha sido el factor determinante. Más que el rendimiento, más que las features. Y la confianza se construye con revisión, no con benchmarks.
+
+## El futuro inmediato
+
+Para los usuarios de yt-dlp, el cambio es transparente si usan Node.js como runtime. Si estaban usando Bun por su velocidad, tendrán que decidir entre quedarse en la versión 1.3.14 (congelada, sin actualizaciones de seguridad) o volver a Node.
+
+Para Bun, esto es una señal de alarma. No basta con que el código funcione. La comunidad necesita poder auditarlo, entenderlo y confiar en que cada línea tiene una intención clara. Un millón de líneas generadas con asistencia de IA necesitan un millón de líneas de revisión humana. Y eso lleva tiempo.
+
+Mientras tanto, la frase "vibe-coding" ha pasado de ser una broma en Twitter a aparecer en un anuncio oficial de deprecación de uno de los proyectos más usados del ecosistema. Algo se está moviendo.
