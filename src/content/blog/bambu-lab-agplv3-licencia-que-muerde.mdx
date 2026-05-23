@@ -1,0 +1,151 @@
+---
+title: "Bambu Lab vs AGPLv3: la licencia que sí muerde"
+date: "2026-05-23T20:00"
+tags: ["open-source", "agpl", "licencias", "3d-printing", "copyleft"]
+excerpt: "Bambu Lab lleva años enlazando código AGPL con una librería propietaria. La SFC contraataca con ingeniería inversa, forks comunitarios y un fundraiser de 250K."
+---
+
+El mundo del open source tiene un problema crónico: mucha gente asume que las licencias copyleft son papel mojado. Que no pasa nada si copias, modificas y redistribuyes sin cumplir las condiciones. Total, ¿quién va a ponerse a litigar?
+
+Esta semana hemos visto la respuesta a esa pregunta y viene con ingeniería inversa, forks comunitarios y un fundraiser de un cuarto de millón de dólares.
+
+## El contexto: PrusaSlicer, Slic3r y la familia AGPL
+
+Para entender lo que ha pasado necesitas saber que el mundo del slicing 3D tiene un pedigrí open source que se remonta a 2011. Alessandro Ranellucci creó **Slic3r**, el primer slicer open source serio. En 2016, Prusa Research —el fabricante checo de impresoras 3D— hizo un fork llamado **PrusaSlicer**. Ambos proyectos están bajo **AGPLv3**, la versión más fuerte de la GPL.
+
+¿Qué hace especial a la AGPLv3? Que cierra el vacío legal del "SaaS loophole". Si modificas código AGPL y lo ejecutas en tu servidor, estás obligado a publicar el código fuente. No hay escapatoria. La licencia está diseñada para morder.
+
+Bambu Lab, el fabricante chino que ha revolucionado el mercado con sus impresoras rápidas y asequibles, creó **Bambu Studio** como fork de PrusaSlicer. Hasta aquí todo legal. El problema es lo que hicieron después.
+
+## La trampa: una librería propietaria en medio del código AGPL
+
+Bambu Studio se distribuye con tres bibliotecas: `libbambu_networking.so` (Linux), `bambu_networking.dll` (Windows) y `libbambu_networking.dylib` (macOS). Son las responsables de la comunicación con los servidores de Bambu Lab y —esto es clave— **su código fuente nunca se ha publicado**.
+
+Según la AGPLv3, si enlazas dinámicamente una librería con código AGPL, esa librería también debe estar bajo AGPLv3. Es el principio de "obra combinada" (*combined work*). La cláusula relevante es brutalmente clara:
+
+> *"Corresponding Source includes interface definition files associated with source files for the work, and the Source Code for shared libraries and dynamically linked subprograms that the work is specifically designed to require, such as by intimate data communication or control flow between those subprograms and other parts of the work."*
+> — AGPLv3 §1
+
+Bambu Lab ha mantenido `libbambu_networking` como código cerrado durante **cuatro años**. No es un despiste. Es una decisión de negocio.
+
+## Paweł Jarczak: el desarrollador que señaló al elefante
+
+Aquí entra el héroe de esta historia. Paweł Jarczak, un desarrollador polaco y usuario de Bambu Lab, decidió hacer algo perfectamente legal bajo la AGPLv3: examinar el código fuente disponible de Bambu Studio y crear modificaciones en **Orca Slicer** (otro fork de la familia Slic3r, también AGPLv3) que permitían hablar con los servidores de Bambu sin necesidad de la librería propietaria.
+
+No hizo ingeniería inversa del binario. No rompió ningún DRM. Simplemente leyó el código que Bambu ya había publicado y dedujo cómo funcionaba el protocolo de red. Esto es exactamente el tipo de interoperabilidad que las licencias de software libre están diseñadas para proteger.
+
+La respuesta de Bambu Lab fue enviarle un email exigiendo que retirara el fork de GitHub, alegando que violaba sus términos de servicio. Paweł, comprensiblemente asustado por las amenazas legales de una empresa con recursos, retiró el repositorio "bajo protesta".
+
+Este movimiento por parte de Bambu constituye una **segunda violación de la AGPLv3**, específicamente de la cláusula §10¶3:
+
+> *"You may not impose any further restrictions on the exercise of the rights granted or affirmed under this License."*
+
+No puedes usar tus términos de servicio para anular los derechos que la AGPLv3 otorga a los usuarios. Es así de simple.
+
+## La Software Freedom Conservancy entra en escena
+
+La [Software Freedom Conservancy](https://sfconservancy.org) (SFC) —la misma organización que lleva el caso contra Vizio por violaciones de la GPL— ha decidido que Bambu Lab ha cruzado una línea roja. Su respuesta no es una carta de cease and desist. Es mucho más interesante.
+
+Han lanzado el proyecto **[baltobu](https://sfconservancy.org/news/2026/may/18/bambu-studio-3d-printer-agpl-violation-response/)**, con tres repositorios:
+
+1. **reverse-networking**: ingeniería inversa de `libbambu_networking` para crear un reemplazo open source compatible. Como la librería está enlazada con código AGPL, es legal hacer ingeniería inversa con el propósito de crear una implementación interoperable.
+
+2. **orca-slicer-for-bambu**: mantenimiento del fork de Orca Slicer que Paweł tuvo que retirar. La SFC ofrece protección legal a los contribuidores, algo que un desarrollador individual no puede permitirse.
+
+3. **viscose**: un fork completo de Bambu Studio mantenido por la comunidad, sin dependencias propietarias.
+
+Además han lanzado un **fundraiser de 250.007 dólares** para financiar estas iniciativas y posiblemente contratar personal dedicado al *software right to repair* para impresoras 3D.
+
+## Cómo detectar violaciones de licencia en tu proyecto
+
+Este caso es un recordatorio brutal de que las licencias copyleft no son decorativas. Si mantienes un proyecto open source, aquí tienes algunas herramientas conceptuales para auditar dependencias y detectar posibles infracciones.
+
+El primer paso es saber qué licencias tienen tus dependencias y si son compatibles entre sí:
+
+```bash
+# Encontrar licencias de dependencias (conceptual, adaptado a npm/pip/cargo)
+# La idea es verificar que ninguna dependencia copyleft fuerte (AGPL/GPL)
+# esté siendo enlazada con código propietario sin liberar el fuente
+
+find . -name "*.so" -o -name "*.dll" -o -name "*.dylib" | while read lib; do
+  echo "Binary: $lib"
+  # Verificar si hay código AGPL en el proyecto que enlace esta librería
+  strings "$lib" 2>/dev/null | head -20
+  echo "---"
+done
+```
+
+El caso de Bambu Lab es especialmente flagrante porque la interfaz entre el código AGPL y la librería propietaria es un enlace dinámico directo. En términos de la AGPLv3, esto es "intimate data communication" — el estándar más estricto para determinar si dos componentes forman una obra combinada.
+
+Si quieres evitar meterte en un lío similar, la regla de oro es simple:
+
+```python
+# Regla conceptual de compatibilidad de licencias
+# Esto NO es código de producción, es una ilustración del razonamiento
+
+LICENSE_RULES = {
+    "AGPLv3": {
+        "can_link_with": ["AGPLv3", "GPLv3", "MIT", "Apache-2.0", "BSD"],
+        "must_disclose_source": True,
+        "network_use_triggers_disclosure": True,
+    },
+    "GPLv3": {
+        "can_link_with": ["GPLv3", "MIT", "Apache-2.0", "BSD"],
+        "must_disclose_source": True,
+        "network_use_triggers_disclosure": False,
+    },
+    "proprietary": {
+        "can_link_with": ["MIT", "Apache-2.0", "BSD"],
+        "must_disclose_source": False,
+        "network_use_triggers_disclosure": False,
+    },
+}
+
+def check_compatibility(my_license, dependency_license):
+    """Si tu código es AGPLv3 y enlazas código propietario, tienes que liberar este último."""
+    rules = LICENSE_RULES.get(my_license, {})
+    allowed = rules.get("can_link_with", [])
+    if dependency_license not in allowed:
+        return (
+            f"⚠️  INCOMPATIBLE: {my_license} no permite enlazar con {dependency_license}. "
+            f"La dependencia debe tener una licencia compatible o debes liberar su código fuente."
+        )
+    return f"✓  Compatible: {my_license} + {dependency_license}"
+
+# Ejemplo: el caso Bambu
+print(check_compatibility("AGPLv3", "proprietary"))
+# ⚠️  INCOMPATIBLE: AGPLv3 no permite enlazar con proprietary.
+# La dependencia debe tener una licencia compatible o debes liberar su código fuente.
+```
+
+Si eres una empresa que quiere construir sobre código AGPL, tienes tres opciones legales:
+
+1. **Libera todo bajo AGPLv3**: conviertes tu código en open source. Es lo que hace Prusa Research.
+2. **Negocia una licencia comercial**: muchos proyectos ofrecen licencias duales. Pagas por el derecho a mantener tu código cerrado.
+3. **No uses código AGPL**: si tu modelo de negocio depende de mantener secretos comerciales en el software, simplemente no toques código con licencias copyleft fuertes.
+
+Lo que NO es legal es coger código AGPL, mezclarlo con tu código propietario y fingir que la licencia no existe.
+
+## Por qué este caso importa más allá de la impresión 3D
+
+El caso Bambu Lab es relevante aunque nunca hayas tocado una impresora 3D en tu vida. El patrón es universal: una empresa coge un proyecto open source maduro, lo modifica para añadir valor propietario y oculta los cambios tras un binario sin fuente.
+
+Esto es exactamente lo que la AGPLv3 fue diseñada para prevenir, pero la realidad es que pocas organizaciones tienen los recursos para hacer cumplir licencias copyleft. La SFC es una de las pocas entidades que puede plantarle cara a una empresa con abogados, y aun así necesitan un fundraiser para financiar el esfuerzo.
+
+La pregunta incómoda es: ¿cuántos Bambu Lab hay ahí fuera que nunca serán descubiertos? Pequeñas violaciones de licencia en proyectos con poco mantenimiento, empresas que enlazan una `.so` propietaria aquí y allá confiando en que nadie se dará cuenta. La respuesta probablemente es "muchos".
+
+Lo que cambia con este caso es el precedente. La SFC no está demandando —está construyendo alternativas open source. Está demostrando que la comunidad puede defenderse con código en vez de con demandas. Es un enfoque profundamente alineado con el espíritu del software libre: si alguien esconde código, lo replicamos. Si amenazan a un desarrollador, le damos cobertura legal.
+
+## Mi veredicto
+
+Hay algo profundamente satisfactorio en ver a la SFC usar las mismas herramientas que la AGPLv3 pone a disposición de los desarrolladores: en vez de demandar directamente, están haciendo **ingeniería inversa legal**, creando **forks comunitarios** con protección legal para los contribuidores y organizando un **fundraiser** para sostener el esfuerzo a largo plazo.
+
+Bambu Lab fabrica buenas impresoras. Sus productos son objetivamente excelentes y han democratizado la impresión 3D de alta velocidad. Pero su actitud hacia el open source es la clásica de una empresa que ve el código libre como un recurso gratuito a explotar, no como un ecosistema del que formar parte.
+
+La AGPLv3 fue diseñada exactamente para este escenario. Es la licencia que Richard Stallman y Eben Moglen imaginaron para un mundo donde el software se ejecuta en servidores y las empresas creen que pueden esconder sus modificaciones tras una API REST. Cuatro años después de que Bambu empezara a violarla, la licencia está demostrando que —con una organización dispuesta a hacerla cumplir— **sí muerde**.
+
+La ironía final es que Prusa Research, el competidor directo de Bambu, también usa AGPLv3 para PrusaSlicer y nunca ha tenido problema con ello. Simplemente publican su código. No es tan difícil.
+
+---
+
+*Fuentes: [Software Freedom Conservancy](https://sfconservancy.org/news/2026/may/18/bambu-studio-3d-printer-agpl-violation-response/), [HN discussion](https://news.ycombinator.com/item?id=48245862), [Paweł Jarczak's documentation](https://github.com/jarczakpawel/OrcaSlicer-bambulab/)*
