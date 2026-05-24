@@ -1,0 +1,114 @@
+---
+title: "Vivado 2026.1 dice adiós a Linux en el tier gratuito"
+date: "2026-05-24T09:04"
+tags: ["fpga", "vivado", "amd", "linux", "open-source"]
+excerpt: "AMD elimina el soporte Linux del tier gratuito de Vivado 2026.1 mientras mantiene Windows. La comunidad de FPGA responde con indignación y busca alternativas."
+---
+
+Hace unos días apareció en el [foro de soporte de AMD](https://adaptivesupport.amd.com/s/question/0D5Pd00001YQLdMKAX/why-is-vivado-20261-dropping-linux-support-for-free-tier-?language=en_US) una pregunta que incendió Hacker News: ¿por qué Vivado 2026.1 elimina el soporte Linux del tier gratuito?
+
+La decisión es llamativa por lo que **no** hace: no elimina el tier gratuito, solo lo limita a Windows. Si usas Linux y quieres Vivado, toca pagar.
+
+El hilo de HN acumuló [129 puntos y 39 comentarios](https://news.ycombinator.com/item?id=48254309) en pocas horas, con un tono que va de la incredulidad a la furia contenida. Vamos a ver qué está pasando y por qué esto importa más de lo que parece.
+
+## El contexto: FPGA y el software que las domina
+
+Para quien no haya tocado una FPGA, un poco de contexto. Las FPGAs son chips reprogramables a nivel hardware. En lugar de ejecutar instrucciones como una CPU, tú describes circuitos digitales con un lenguaje como Verilog o VHDL. Luego una herramienta de síntesis convierte esa descripción en un bitstream que configura las puertas lógicas del chip.
+
+El problema es que ese flujo —síntesis, place & route, generación del bitstream— es absurdamente complejo y está controlado por los fabricantes. No hay estándares abiertos para los bitstreams: cada familia de chips tiene su formato propietario, a menudo encriptado o indocumentado.
+
+El mercado lo dominan dos jugadores: AMD (que compró Xilinx en 2022) e Intel (que compró Altera). La herramienta de AMD se llama **Vivado** y es, digámoslo claro, una bestia: cientos de gigabytes de instalación, dependencias antiguas, tiempos de compilación que pueden durar horas. Pero es la única forma de programar las FPGAs modernas de Xilinx, desde las Spartan hasta las Versal.
+
+## El cambio: Linux se vuelve de pago
+
+El sistema de licencias de Vivado ha tenido históricamente varios tiers. El **Standard Edition** era gratuito y funcionaba en Windows y Linux, con limitaciones en los dispositivos soportados (básicamente, las familias más pequeñas: Spartan-7, Artix-7, Zynq-7000). Si querías chips más grandes como Kintex o Virtex, necesitabas una licencia de pago.
+
+Con Vivado 2026.1, el tier gratuito pasa a llamarse **Basic Edition** y la novedad es esta: **solo funciona en Windows**. Si quieres Vivado en Linux, necesitas al menos una licencia **Standard Edition** de pago. El precio exacto no está claro —las licencias de Vivado siempre han sido opacas, con precios que dependen del volumen y la relación con el vendedor—, pero estamos hablando de miles de dólares al año.
+
+Según AMD, el cambio es parte de una "reestructuración de las opciones de licencia" y está reflejado en su [página oficial de licensing](https://www.amd.com/en/products/software/adaptive-socs-and-fpgas/vivado/vivado-licensing-options.html). Las respuestas oficiales en el foro, sin embargo, no han convencido a nadie.
+
+## ¿Por qué duele tanto?
+
+Para un desarrollador de software, "no soportamos Linux" puede sonar a decisión corporativa molesta pero manejable. Para el mundo FPGA, es devastador.
+
+### 1. Linux es el estándar de facto en hardware
+
+El desarrollo de FPGA rara vez ocurre en aislamiento. Normalmente estás construyendo un sistema embebido que incluye CPUs soft (MicroBlaze), buses AXI, controladores DDR, interfaces PCIe y todo eso se integra con firmware en C, kernels Linux embebidos, toolchains cruzadas... Herramientas que viven en Linux.
+
+Windows simplemente no puede ofrecer paridad de funcionalidades para workloads que requieren compilación cruzada. Como comentaba un usuario del foro: "AMD could at least support RHEL like the old days."
+
+### 2. Rompe los pipelines de CI/CD
+
+Cuando trabajas con FPGAs en serio, la síntesis es parte de tu pipeline de integración continua. Commiteas código Verilog, el CI lo sintetiza en un servidor Linux headless, y recibes feedback sobre timing closure, utilización de recursos y warnings. Esto es imposible con Vivado 2026.1 gratuito.
+
+Un usuario lo resumió así: "This is terrible news for university users trying to professionalize their FPGA development with CI/CD. Which is probably the point of the change."
+
+### 3. Las universidades se van a otras alternativas
+
+El golpe más estratégico para AMD es el educativo. Las universidades enseñan FPGA en Linux porque es donde vive el resto del ecosistema de hardware. Un profesor comentaba que abandonará Xilinx y se llevará a todos sus estudiantes con él. Esos estudiantes serán los ingenieros que dentro de cinco años elijan componentes para productos reales.
+
+### 4. El open source ya está llamando a la puerta
+
+Este es el punto que más me interesa. Herramientas como [SymbiFlow](https://github.com/SymbiFlow), [IceStorm](https://github.com/YosysHQ/icestorm) (para Lattice iCE40) y el proyecto [F4PGA](https://f4pga.org/) llevan años haciendo ingeniería inversa de bitstreams y construyendo flujos de síntesis abiertos. Son proyectos heroicos que funcionan sorprendentemente bien para chips pequeños y medianos.
+
+Con cada movimiento hostil de AMD, más gente mira hacia estas alternativas.
+
+## Las alternativas: ¿hay vida más allá de Vivado?
+
+La buena noticia es que sí, aunque con matices. Vamos a ver qué opciones reales tiene alguien que quiera trabajar con FPGAs en Linux sin pagar.
+
+### Lattice: el camino intermedio
+
+Lattice Semiconductor es el tercer fabricante de FPGAs y ha tenido una relación ambivalente con el open source. Sus herramientas (Lattice Diamond, Radiant) son gratuitas para los chips básicos (ECP5, Certus) y solo requieren licencia de pago para los chips con SerDes de alta velocidad (ECP5-5G, CertusPro).
+
+La comunidad open source ha hecho un trabajo increíble con Lattice. El proyecto IceStorm documentó completamente el bitstream del iCE40, y ahora tienes un flujo 100% abierto desde Verilog hasta el chip con Yosys + nextpnr. Para el ECP5, nextpnr también tiene soporte sólido.
+
+El problema: Lattice no termina de abrazar el open source como estrategia. Sigue manteniendo partes cerradas donde no sería necesario. Pero al menos no te echa de Linux.
+
+### Gowin: el aspirante chino
+
+Gowin Semiconductor ofrece FPGAs con buena relación calidad-precio y herramientas que funcionan en Linux. Su software Gowin EDA es gratuito y, aunque no es open source, al menos no te castiga por sistema operativo.
+
+### F4PGA y Yosys: el futuro abierto
+
+El ecosistema FOSS para FPGA ha madurado una barbaridad. Yosys es un sintetizador Verilog que ya usan incluso empresas serias. nextpnr hace place & route para varias familias. Project Trellis documenta el bitstream de ECP5. Y F4PGA (antes SymbiFlow) está atacando los chips Xilinx Serie-7.
+
+El flujo se ve así:
+
+```bash
+# Flujo FOSS completo para Lattice iCE40
+yosys -p "synth_ice40 -top blinky -json blinky.json" blinky.v
+nextpnr-ice40 --hx8k --package ct256 --json blinky.json --asc blinky.asc
+icepack blinky.asc blinky.bin
+```
+
+```bash
+# Para ECP5 (Lattice) — flujo similar
+yosys -p "synth_ecp5 -top top -json top.json" top.v
+nextpnr-ecp5 --85k --package CABGA381 --json top.json --textcfg top.config
+ecppack --svf top.svf top.config top.bit
+```
+
+Esto no es un juguete. Es software real que genera bitstreams funcionales. La limitación está en el soporte de chips: las FPGAs más modernas de Xilinx (UltraScale, UltraScale+, Versal) no tienen herramientas abiertas porque los bitstreams están fuertemente encriptados. Pero para chips Serie-7, Lattice iCE40/ECP5 y Gowin, el flujo FOSS es perfectamente usable.
+
+## La ironía del momento
+
+AMD compró Xilinx en 2022 por 49 mil millones de dólares. La justificación oficial era sinergia entre CPUs y FPGAs, computación heterogénea, centros de datos... Pero lo que vemos en la práctica son movimientos que alejan a la comunidad de desarrolladores.
+
+Un usuario con más de cien mil dólares gastados en FPGAs de Xilinx lo expresó así:
+
+> "No es el coste lo que molesta, es la fricción de crear una orden de compra cada vez que configuro un equipo nuevo, añado alguien al equipo, preparo un CI o doy de alta a un becario."
+
+Cuando incluso tus clientes de pago se quejan de la fricción, estás haciendo algo mal.
+
+## Mi opinión
+
+Cada vez que un fabricante de hardware pone barreras artificiales a sus herramientas de desarrollo, acelera su propia irrelevancia. Pasó con las toolchains propietarias de microcontroladores (¿alguien se acuerda de cuando tenías que pagar por Keil o IAR?), y está pasando con las FPGAs.
+
+La diferencia es que el ecosistema FPGA es más pequeño y el coste de ingeniería inversa de los bitstreams es altísimo. Por eso el progreso de las herramientas abiertas es lento. Pero cada decisión como esta de AMD añade leña al fuego.
+
+Si yo estuviera empezando hoy con FPGAs, miraría a Lattice. Sus chips son más que suficientes para aprender, prototipar y construir productos reales. Las herramientas funcionan en Linux. Y el ecosistema open source te cubre las espaldas si algún día deciden seguir los pasos de AMD.
+
+AMD parece estar diciendo: "si quieres desarrollar en Linux, paga". La comunidad está respondiendo: "no, gracias, me voy a otro sitio". Es una apuesta arriesgada para una empresa que necesita desesperadamente expandir el ecosistema de desarrolladores de hardware adaptable.
+
+Veremos cómo acaba esto. Pero si la historia del software nos ha enseñado algo, es que las herramientas abiertas ganan a largo plazo. Siempre.
