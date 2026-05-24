@@ -1,0 +1,100 @@
+---
+title: "16 bytes: el demo que dibuja Sierpinski y además suena"
+date: "2026-05-24T03:00"
+tags: ["demoscene", "assembly", "x86", "sizecoding", "fractales"]
+excerpt: "Un programa de 16 bytes en ensamblador x86 genera un triángulo de Sierpinski y lo convierte en sonido por el altavoz del PC. Una obra maestra de la demoscene."
+---
+
+En mayo de 2026, en la Outline Demoparty de Ommen (Países Bajos), HellMood presentó un programa de exactamente 16 bytes. No kilobytes, no megabytes: 16 bytes. Para que te hagas una idea, esta frase que acabas de leer ocupa más del doble.
+
+El programa se llama _wake up! 16b_ y hace tres cosas simultáneamente: calcula un triángulo de Sierpinski, lo dibuja en pantalla como lluvia estilo Matrix y emite el sonido correspondiente por el altavoz interno del PC. Todo desde un segmento de DOS en modo real. Todo en 16 bytes.
+
+Cuando lo vi en Hacker News no podía creerlo. He pasado años programando y la idea de que algo tan pequeño pueda hacer tanto me recuerda por qué me dedico a esto.
+
+## El código completo
+
+Estos son los 16 bytes. No falta nada:
+
+```asm
+int 10h          ; 2 bytes — modo texto 40×25
+mov bh, 0xb8     ; 2 bytes — segmento de vídeo VGA
+mov ds, bx       ; 2 bytes — DS = 0xb800
+L:
+lodsb            ; 1 byte  — AL = [DS:SI], SI++
+sub si, byte 57  ; 3 bytes — retrocede 56 posiciones netas
+xor [si], al     ; 2 bytes — XOR en la posición de memoria
+out 61h, al      ; 2 bytes — altavoz del PC
+jmp short L      ; 2 bytes — bucle infinito
+```
+
+Eso es todo. No hay inicialización de variables, no hay gestión de errores, no hay nada más. Dieciséis bytes que se ejecutan en un bucle infinito y generan un espectáculo audiovisual autónomo.
+
+## Cómo funciona: la memoria como lienzo
+
+El truco está en usar la memoria de vídeo como espacio de cálculo. `int 10h` configura el modo texto 40×25, y el segmento `0xb800` es donde la VGA mapea su _framebuffer_ de texto. Cada carácter son dos bytes: el código ASCII y el atributo de color.
+
+Cuando la BIOS limpia la pantalla, no escribe ceros. Escribe `0x20` (espacio) y `0x07` (gris claro sobre negro) en cada una de las 2000 posiciones del buffer. La memoria _parece_ vacía, pero está llena de un patrón uniforme. El programa usa esos valores como semilla.
+
+El `lodsb` carga un byte de `[DS:SI]` en el registro `AL` y avanza `SI`. Luego `sub si, 57` lo retrocede. El efecto neto: `SI` avanza 1 por `lodsb` y retrocede 57, es decir, se mueve **56 bytes hacia atrás** en cada iteración. Como la pantalla tiene 80 bytes por línea (40 columnas × 2 bytes por carácter), moverse -56 equivale a avanzar 24 bytes, o 12 columnas hacia adelante. El resultado visual es que los caracteres "llueven" en diagonal.
+
+## El fractal: XOR como cellular automaton
+
+La magia matemática está en `xor [si], al`. Esta instrucción aplica un XOR entre el valor actual de la celda de memoria y `AL` (que contiene el valor de la celda anterior). Esto es exactamente la **regla 60** de los autómatas celulares elementales:
+
+```
+Cell[p][k] = Cell[p-1][k] ⊕ Cell[p][k-1]
+```
+
+Donde `⊕` es XOR. Si empiezas con un solo bit encendido (el valor inicial es 2, que es `00000010` en binario), esta regla genera **el triángulo de Sierpinski** módulo 2.
+
+De hecho, por el teorema de Lucas, el triángulo de Sierpinski es exactamente el triángulo de Pascal módulo 2. Lo que hace este programa es una suma acumulativa con acarreo por todo el segmento de 64 KB, pero como usa XOR en lugar de ADD, el acarreo desaparece y solo se conserva el bit 1.
+
+Puedes simularlo en Python para ver el fractal:
+
+```python
+# Simulación conceptual de la regla 60
+# No es el código exacto del demo, pero ilustra el mecanismo
+
+cells = [0] * 16
+carry = 2  # bit 1 encendido
+
+for p in range(16):
+    row = []
+    for k in range(16):
+        cells[k] = cells[k] ^ carry
+        carry = cells[k]
+        row.append('█' if cells[k] & 2 else ' ')
+    print(''.join(row))
+```
+
+La salida es inconfundible: un triángulo de Sierpinski que emerge iteración tras iteración.
+
+## El sonido: el altavoz del PC como oscilador
+
+`out 61h, al` escribe el valor de `AL` en el puerto 0x61 del PC. El bit 1 de este puerto controla físicamente el cono del altavoz interno: un 1 lo empuja hacia fuera, un 0 lo retrae hacia dentro.
+
+Como `AL` contiene el resultado del XOR (que es 0 o 2, es decir, bit 1 apagado o encendido), el programa está literalmente **convirtiendo el fractal en sonido** en tiempo real. Cada paso de la iteración escribe un 0 o un 1 en el altavoz, creando ondas cuadradas cuya frecuencia y anchura de pulso cambian según la estructura del triángulo de Sierpinski.
+
+Pero hay más. El segmento de DOS tiene 65536 bytes (64 KB). El programa solo recorre los que son múltiplos de 8 (por el paso de -56 bytes), que son 8192 posiciones. El resto de la memoria contiene código de la BIOS de vídeo _shadowed_ en RAM, datos basura y residuos de la inicialización. Todo eso también se XOR-ea y se envía al altavoz, añadiendo una textura granulada e impredecible al sonido. Es la razón por la que suena "punk" y no como un tono limpio.
+
+## Por qué 56 y no 16
+
+Si el paso fuera de 16 bytes en lugar de 56, el programa recorrería exactamente 4096 posiciones (65536/16=4096), que es múltiplo de 256 (el tamaño del registro de 8 bits). El acarreo se resetearía limpiamente al envolver el segmento y el sonido sería más agudo.
+
+Con paso de 56, que no divide a 65536, el programa da 7 vueltas al segmento antes de que el puntero vuelva a la posición inicial (8192 pasos). Esto duplica la longitud del ciclo, divide la frecuencia fundamental a la mitad y baja el sonido una octava. A nivel visual, solo se visitan 10 columnas distintas de la pantalla, creando el efecto de "pilares" de lluvia que caen en diagonal. Es la diferencia entre ver el fractal completo y ver el efecto Matrix.
+
+## La demoscene sigue viva
+
+HellMood lleva más de 15 años creando _tiny intros_. Su anterior obra, _M8trix_ (2014), ya generaba lluvia de letras pseudoaleatorias en solo 8 bytes. Lo que hace especial a _wake up! 16b_ es la sinestesia: la unión perfecta entre cálculo, visual y sonido en un espacio donde no sobra ni un solo bit.
+
+Un detalle que me encanta: el scener _miragept_ se tomó la molestia de ejecutar el programa en hardware real, un 286 con monitor MDA/Hercules de fósforo verde, parcheando la dirección de `0xB800` a `0xB000`. El resultado está en YouTube y es hipnótico. El brillo persistente del fósforo emborrona ligeramente los caracteres y el zumbido mecánico del equipo se mezcla con el sonido del altavoz. Es imposible replicar eso en un emulador.
+
+## Mi opinión
+
+Hay algo profundamente humano en la demoscene que la industria del software ha ido perdiendo. Cuando programas con restricciones tan brutales —16 bytes, sin sistema operativo, sin librerías— cada instrucción es una decisión. No hay espacio para el desperdicio, no hay frameworks, no hay dependencias. Solo tú, el procesador y la memoria.
+
+En una época donde cualquier proyecto de frontend arrastra 200 MB de `node_modules` y los LLMs generan cientos de líneas por minuto, un programa de 16 bytes que dibuja un fractal con sonido es un recordatorio de que la optimización extrema es una forma de arte. No es productividad, no es escalabilidad, no es _best practices_. Es belleza algorítmica en estado puro.
+
+Y es también un guiño a los orígenes. HellMood aprendió a programar en un IBM PC con monitor monocromo hace más de 30 años, igual que muchos de los que hoy diseñamos sistemas distribuidos o entrenamos modelos de lenguaje. Volver a esos 16 bytes es como volver a casa.
+
+Si te pica la curiosidad, el código fuente está desglosado con todo lujo de detalles matemáticos en la [web de HellMood](https://hellmood.111mb.de/wake_up_16b_writeup.html), hay vídeo en [YouTube](https://youtu.be/MvycyU-kLjg) y la ficha en [Pouet](https://www.pouet.net/prod.php?which=106210). Y si quieres probarlo tú, solo necesitas DOSBox y 16 bytes.
