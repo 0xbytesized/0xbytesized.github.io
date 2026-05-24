@@ -1,0 +1,141 @@
+---
+title: "ClickHouse libera Silk: fibras cooperativas con io_uring"
+date: "2026-05-24T21:00"
+tags: ["c++", "linux", "concurrencia", "open-source", "sistemas"]
+excerpt: "ClickHouse abre Silk, un scheduler de fibras stackful para Linux con io_uring y work-stealing. Rinde 13× más que Boost.Asio y compite con epoll puro."
+---
+
+La gente de ClickHouse acaba de publicar en GitHub un proyecto que llevaban cocinando en interno: **Silk**, un scheduler cooperativo de fibras para Linux. No es otra librería de corrutinas. Es un runtime completo con io_uring, work-stealing consciente de topología NUMA y primitivas de sincronización pensadas desde cero para este modelo.
+
+El repo lleva 59 commits y la documentación es excelente — de las que te lees de un tirón y aprendes más sobre schedulers que en tres asignaturas de la carrera. Vamos a ver qué trae.
+
+## El modelo: fibras stackful, no corrutinas stackless
+
+Silk usa fibras _stackful_: cada fibra tiene su propia pila de 64 KB mapeada con `mmap`, con páginas guardia arriba y abajo para pillar desbordamientos. El cambio de contexto lo hace Boost.Context en ensamblador, y cada fibra que se suspende no bloquea el hilo del SO — simplemente cede el control al scheduler.
+
+Esto es radicalmente distinto a las corrutinas stackless de C++20. En el modelo stackless, cada función que quiere suspender tiene que ser una corrutina, y cada nivel de la cadena de llamadas es una asignación de heap separada. Con fibras stackful, cualquier función a cualquier profundidad puede suspender sin que el código que la llama se entere.
+
+```cpp
+// Con fibras stackful, puedes hacer esto sin modificar la librería:
+auto response = httpClient.sendRequest(request);
+// La fibra se suspende dentro de sendRequest() y el scheduler
+// ejecuta otra fibra mientras esperas la respuesta.
+// Cuando llega, la fibra despierta exactamente donde se quedó.
+```
+
+El scheduler arranca un hilo por CPU. Cada hilo tiene su propio anillo de io_uring (128 entradas), su cola de fibras listas, su árbol de sleeps ordenado por TSC y sus buzones lock-free para sleeps y cancelaciones entrantes desde otras CPUs. Cuando un hilo se queda sin trabajo, roba fibras de la cola de un vecino — de ahí el work-stealing.
+
+## El bucle principal y el work-stealing
+
+Cada iteración del scheduler procesa tres cosas en orden: la cola de fibras listas, las completaciones de io_uring (CQEs) y las expiraciones del árbol de sleeps. Si después de todo eso la CPU sigue sin nada que hacer, intenta robar.
+
+El robo no es solo de fibras. Un hilo ocioso también puede **reclamar el service loop de un vecino**: procesa sus CQEs pendientes, despierta sus fibras dormidas y maneja sus cancelaciones. Esto evita que una CPU ocupada dentro de una fibra de larga duración acumule trabajo de io_uring sin atender.
+
+Las fibras despertadas por un robo se encolan de vuelta a la CPU original — el scheduler no las secuestra, solo ayuda a vaciar la cola de trabajo acumulado.
+
+## Siete primitivas de sincronización
+
+Silk no se conforma con un mutex y un future. Implementa una torre completa de primitivas, cada una construida sobre la anterior:
+
+```
+FiberFuture         → future single-producer/single-consumer
+FiberFutex          → contador con wakeup (patrón futex de Linux)
+FiberMutex          → exclusión mutua (injusta, rápida)
+FiberSequencer     → contador monótono con esperas ordenadas y cancelables
+  FiberEvent       → evento manual-reset
+  FairFiberMutex   → mutex justo (FIFO)
+```
+
+Todas son _fiber-aware_: cuando una fibra espera, se suspende a sí misma en lugar de bloquear el hilo del sistema operativo. El `FiberMutex` injusto tiene una fase de spin de 16 PAUSEs (~500 ns) antes de ceder y usa la tabla de waiters del scheduler directamente.
+
+Un ejemplo del patrón future:
+
+```cpp
+// Dos fibras se coordinan con FiberFuture
+FiberFuture resultado;
+
+// Fibra productora — ejecuta trabajo y entrega el resultado
+void fibraTrabajadora() {
+    int datos = calcularAlgoCostoso();
+    resultado.set(datos);
+}
+
+// Fibra consumidora — espera sin bloquear el hilo
+void fibraConsumidora() {
+    int valor = resultado.wait();  // se suspende hasta que llegue
+    procesarResultado(valor);
+}
+```
+
+`FiberFuture` también soporta `waitForMultiple` (esperar a que cualquiera de N futures se complete) y `waitWithTimeout` (esperar con deadline). Ambas están implementadas sin allocations extra — la primera reutiliza un `MultipleWaitState` en el stack de quien llama.
+
+## Thread mode: cuando necesitas bloquear de verdad
+
+A veces una fibra necesita hacer una syscall bloqueante o trabajo de CPU pesado que pararía el scheduler entero. Silk tiene un mecanismo para eso:
+
+```cpp
+void fibraConTrabajoPesado() {
+    {
+        FiberScheduler::ThreadModeScope scope;
+        // Este código corre en un thread pool, no en el scheduler.
+        // Puede bloquear sin afectar a otras fibras.
+        calcularAlgoMuyPesado();
+    }
+    // Al salir del scope, la fibra vuelve al scheduler cooperativo.
+}
+```
+
+La fibra se mueve a una cola compartida que consumen los workers del thread pool. Mientras está en thread mode, puede bloquear libremente. Al salir, `schedule()` la reencola en la cola de su CPU original. Si la cola de origen está llena, hay una cola de overflow compartida — el sistema se defiende solo ante picos.
+
+## Los números
+
+Las cifras del benchmark son serias. Medidas en un Xeon Platinum 8488C de 32 cores con Linux 6.17:
+
+**I/O de fichero (tmpfs, 4K, randread):**
+
+- 1 fibra, iodepth=1: **195k IOPS**
+- 16 fibras, iodepth=1: **2.289k IOPS** (~8.9 GiB/s)
+- 16 fibras, iodepth=16: **5.576k IOPS** (~21.3 GiB/s)
+- Mejor latencia p50: **3-4 µs**
+
+Silk duplica o triplica a fio con `iodepth=1` porque fio usa un hilo del SO por job y paga el coste del scheduler del kernel en cada operación. Con `iodepth=16`, fio gana porque amortiza mejor los envíos por lotes — pero Silk no está optimizando para synthetic benchmarks de tmpfs; en cargas reales de red o S3 la latencia de completación domina y el batching de Silk recupera la ventaja en p99.
+
+**Echo TCP (loopback, 64B):**
+
+- 1024 conexiones: **2.2M req/s**, p50 de 296 µs
+- Comparado con Boost.Asio + C++20 coroutines + epoll: **5-6× más throughput**
+- Comparado con epoll puro multihilo: epoll gana 13-30% en throughput y 1.5-2.2× en latencia p99
+
+El gap con epoll puro es honesto y los propios maintainers lo documentan sin maquillar: ~1.9 µs adicionales por request son el coste de la abstracción (suspend/resume de fibra + SQE/CQE de io_uring + bookkeeping de colas). Lo que ganas a cambio es composabilidad: sleeps, timeouts, protocolos multi-paso y control de flujo que en epoll requerirían una máquina de estados. Ellos mismos lo llaman "the structure you'd actually program against".
+
+**Cambio de contexto:**
+
+- 3.3 ns por switch con work-stealing activo
+- 126 ns sin work-stealing
+- La diferencia son ~120 ns que la fibra espera a que el service loop la reencole cuando no hay un stealer ya girando en otra CPU.
+
+## Stackful vs stackless: la comparación que más duele
+
+La documentación de Silk incluye una sección entera comparando los dos modelos y es demoledora. El problema central de las corrutinas stackless es el _viral problem_: si necesitas suspender a través de una cadena de 10 funciones, las 10 tienen que ser corrutinas. Eso son 10 asignaciones de heap separadas. Y si estás usando una librería de terceros con código síncrono, tienes que reescribirla entera o meter un thread pool.
+
+Con fibras stackful llamas a `session.sendRequest()` y ya está — la fibra se suspende dentro del código de la librería sin que Poco (o la librería que sea) se entere de nada.
+
+El paper académico que citan ([Stackless vs. Stackful Coroutines, SC'25](https://dl.acm.org/doi/10.1145/3731599.3767502)) da 32 ns para cambio de contexto stackless frente a 109 ns para stackful... pero con work-stealing, Silk baja a **3.3 ns**. El paper medía un scheduler sin robo de trabajo; con CPUs vecinas girando en caliente, el coste de switch prácticamente desaparece.
+
+## Lo que no es Silk
+
+Silk no es un reemplazo de Seastar (el motor de ScyllaDB), aunque varios comentaristas en HN trazaron el paralelismo. Seastar es un framework completo con su propio modelo de memoria, sharding explícito y APIs de red. Silk es más pequeño, más enfocado: un scheduler de fibras con io_uring y poco más. Está diseñado para integrarse en código existente, no para reemplazar tu runtime.
+
+Tampoco es una reinvención de Erlang/OTP, como sugirió otro hilo de la discusión. Las fibras de Silk comparten espacio de direcciones, no tienen aislamiento de memoria y no implementan supervisión. Es C++ de sistemas, no una VM.
+
+## Mi opinión
+
+Me gusta Silk por tres razones. La primera es que los números no están maquillados: publican el benchmark contra epoll puro donde pierden y explican exactamente por qué, sin excusas. Eso es rarísimo en proyectos que salen a la luz con aspavientos de marketing. Da confianza.
+
+La segunda es que la documentación del scheduler es didáctica. La sección de work-stealing explica cómo una CPU roba fibras y reclama service loops de vecinos con un nivel de detalle que te permite entender el diseño sin leer el código. Los diagramas de estado de las fibras, el manejo de carreras en `suspendCallback` y la justificación de por qué `enqueueWakeup` no cuenta como trabajo productivo son detalles de gente que ha depurado esto en producción.
+
+La tercera es que ocupa un hueco real. C++ no tiene un runtime de fibras estándar. Boost.Fiber existe pero no integra io_uring ni trabajo por CPU. Las corrutinas de C++20 te dan la maquinaria de `co_await` pero no el scheduler, el executor ni la integración con el sistema operativo. Silk te da todo eso en un solo bloque que compila con CMake y se integra como una librería más.
+
+La pega obvia es la dependencia de Clang 21 — estás atado a un compilador muy reciente. Y el ecosistema es minúsculo: 59 commits, un solo maintainer visible, sin promesa de estabilidad de API. Pero como base para estudiar cómo se construye un scheduler de fibras moderno, es oro puro.
+
+Si programas en C++ y trabajas con I/O de alto rendimiento en Linux, date una vuelta por el repo. La documentación sola ya vale la hora que te va a llevar leerla.
