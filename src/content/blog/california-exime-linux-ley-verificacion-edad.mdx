@@ -1,0 +1,97 @@
+---
+title: "California salva a Linux de su ley de verificación de edad"
+date: "2026-05-25T21:54"
+excerpt: "El mismo legislador que obligó a los SO a verificar edades propone ahora eximir a Linux. ¿Pragmatismo o maniobra para silenciar a la comunidad open source?"
+tags: ["linux", "open-source", "regulación", "california", "privacidad"]
+---
+
+Hace unas semanas California aprobó una ley que, en apariencia, tenía sentido común: obligar a los sistemas operativos a incluir verificación de edad al crear cuentas de usuario. El objetivo era noble — proteger a los menores del contenido inapropiado. Pero el texto era tan amplio que atrapaba a cualquier SO, incluidas las distribuciones de Linux.
+
+La comunidad open source montó en cólera. Y con razón. ¿Cómo implementas verificación de edad en un sistema donde ni siquiera existe el concepto de "cuenta" tal como lo entiende un legislador que solo ha usado Windows?
+
+Ahora el giro: el mismo legislador que redactó la ley original ha propuesto una enmienda para eximir explícitamente a Linux. Suena a victoria. Pero en HN el escepticismo es absoluto.
+
+## La ley: qué pide realmente
+
+Antes de indignarnos, entendamos qué exige la ley californiana. Según los detalles que han emergido en los hilos de HN, el texto requiere tres cosas de cualquier sistema operativo:
+
+1. **Al crear una cuenta para un menor** (cuando es el usuario principal del dispositivo), el SO debe permitir al padre o tutor especificar la edad o fecha de nacimiento del niño.
+2. **El SO debe exponer una API** que las aplicaciones puedan consultar para saber si el usuario actual es menor de edad y, en ese caso, su rango de edad.
+3. **Las apps deben respetar esa señal** y no pueden esquivarla con métodos alternativos de verificación (como pedir el DNI).
+
+Y aquí está el matiz importante: esta ley **no exige subir documentos de identidad**. No es como las leyes de estados republicanos que obligan a escanear el carnet de conducir para entrar en según qué sitios. La aproximación californiana es más respetuosa con la privacidad: delega la verificación en el SO y solo expone una señal de "¿es menor? sí/no + rango".
+
+En teoría, un diseño razonable. En la práctica, una bomba atómica contra el open source.
+
+## Por qué Linux no puede cumplir
+
+El problema fundamental es filosófico antes que técnico. Windows, macOS y ChromeOS tienen un modelo de cuentas centralizado: cuando creas un usuario, hay un wizard que te pregunta cosas. Microsoft, Apple y Google controlan ese flujo al 100%.
+
+Linux no funciona así. En una distro típica:
+
+```bash
+# Así se crea un usuario en Linux:
+sudo useradd -m -s /bin/bash nacho
+
+# No hay wizard. No hay formulario. No hay API de edad.
+# El usuario existe. Punto.
+```
+
+No hay un "momento de creación de cuenta" que un legislador pueda señalar. Puedes crear usuarios por SSH, desde un script de aprovisionamiento, desde Ansible, o simplemente desempaquetando un tarball en `/home`. El SO no sabe si el usuario tiene 8 años o 80. No hay un `getent passwd` que devuelva la fecha de nacimiento.
+
+Y aunque la hubiera, el código es abierto. Cualquiera puede hacer un fork de Ubuntu, quitar tres líneas del instalador y distribuir una ISO sin verificación de edad. No hay un gatekeeper al que multar.
+
+```bash
+# En Arch Linux, la "creación de cuenta" es esto:
+# Ni siquiera existe un instalador gráfico que puedas modificar.
+pacstrap /mnt base linux linux-firmware
+arch-chroot /mnt
+useradd -m nacho
+passwd nacho
+# ¿Dónde metes aquí la verificación de edad?
+```
+
+El segundo requisito — la API que las apps consultan — es igual de problemático. Las aplicaciones en Linux no se comunican con el SO a través de una API monolítica. Usan cientos de mecanismos distintos: D-Bus, sockets Unix, variables de entorno, syscalls directas, archivos en `/proc` y `/sys`. No hay un `GetCurrentUserAge()`.
+
+```python
+# Esto NO existe en Linux — es código conceptual
+# No hay un endpoint estándar para consultar la edad del usuario
+# desde una aplicación. Cada toolkit (GTK, Qt, Electron) tendría
+# que implementarlo por separado, si es que el SO lo expone.
+#
+# En la práctica, las apps simplemente asumen que el usuario
+# es adulto y delegan la responsabilidad al contenido que
+# están mostrando (un navegador, un reproductor de vídeo).
+```
+
+Imaginad la fragmentación: ¿lo implementa systemd? ¿D-Bus? ¿Cada display manager (GDM, SDDM, LightDM) por su cuenta? ¿Y las distros sin systemd? ¿Y los sistemas headless que no tienen display manager?
+
+## La enmienda: ¿salvación o maniobra legal?
+
+El 25 de mayo de 2026, el mismo legislador que impulsó la ley original — el asambleísta californiano que la redactó — presentó una enmienda para eximir explícitamente al "software de código abierto" del ámbito de la ley. La noticia, cubierta por Tom's Hardware y PC Gamer, llegó a la portada de HN con 397 puntos y 195 comentarios. Una versión anterior del mismo tema había alcanzado 829 puntos.
+
+Sobre el papel, es justo lo que la comunidad pedía. Pero los comentarios en HN huelen a algo más turbio. El usuario que abrió el hilo lo clavó:
+
+> "Una persona cínica podría sospechar que la razón por la que hacen esto es para que los desarrolladores de Linux no tengan legitimación para impugnar la ley por motivos de la Primera Enmienda."
+
+La lógica es retorcida pero plausible: si Linux está exento, los desarrolladores de Linux no pueden demandar alegando que la ley viola la libertad de expresión (el código es *speech* bajo la Primera Enmienda en EE.UU.). Sin un demandante con *standing*, la ley avanza sin oposición judicial seria. Microsoft, Apple y Google no van a demandar — ellos ya implementan verificación de edad en sus flujos de cuenta y la ley les da una ventaja competitiva contra sistemas que no tienen infraestructura de identidad.
+
+Otro comentarista añadió otra capa: SteamOS, el SO de la Steam Deck, técnicamente es Linux (basado en Arch) pero *Steam sí hace verificación de edad*. ¿Queda cubierto por la exención por ser Linux, o regulado porque Valve ya recopila edades?
+
+## Mi opinión
+
+Esto es una partida de ajedrez legislativo y la comunidad open source es, como siempre, la pieza que sobra.
+
+La ley original es un ejemplo de libro de lo que pasa cuando legislas tecnología sin entenderla. El legislador probablemente pensó "SO = Windows/Mac/ChromeOS" y ya está. Nadie le explicó que existen cientos de sistemas operativos donde "cuenta de usuario" es un UID en `/etc/passwd` y poco más.
+
+La enmienda, aunque práctica, me deja un sabor agridulce. Es mejor tener la exención que no tenerla — evita que alguien intente multar a Debian o a Arch Linux por no implementar un wizard de edad. Pero la motivación me parece cínica: no es que el legislador haya entendido el open source, es que ha encontrado una forma de callar a la oposición más ruidosa.
+
+Hay un patrón más amplio aquí. Las leyes de verificación de edad son una tendencia global imparable. La UE tiene su propio marco. Varios estados de EE.UU. ya han aprobado las suyas. La pregunta no es si van a existir, sino **quién** carga con la responsabilidad de implementarlas. California ha decidido que sean los fabricantes de SO. Otros estados ponen la carga en los sitios web (que te piden el DNI). La aproximación californiana es menos invasiva, pero sigue sin entender que el software libre no tiene fabricante.
+
+Como desarrollador, me preocupa más el precedente que la ley en sí. Si hoy es la verificación de edad, mañana puede ser cualquier otra cosa: retención de logs, puertas traseras, filtros de contenido obligatorios. Cada vez que un legislador dice "todos los sistemas operativos deben...", el open source se enfrenta a un problema existencial: o aceptas una exención que te convierte en ciudadano de segunda, o luchas en los tribunales con recursos que no tienes.
+
+La comunidad reaccionó rápido y fuerte esta vez. Eso es buena señal. Pero la próxima ley no va a ser tan fácil de esquivar.
+
+---
+
+**Fuentes:** [Tom's Hardware](https://www.tomshardware.com/software/linux/california-moves-to-exempt-linux-from-its-upcoming-age-verification-law-after-backlash-over-forcing-operating-systems-to-collect-users-ages-amendment-proposed-by-the-same-lawmaker-who-wrote-the-original-law), [PC Gamer](https://www.pcgamer.com/software/operating-systems/a-new-california-law-says-all-operating-systems-including-linux-need-to-have-some-form-of-age-verification-at-account-setup/), [Hacker News (#48269961, 397pts)](https://news.ycombinator.com/item?id=48269961)
