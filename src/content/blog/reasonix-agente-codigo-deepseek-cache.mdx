@@ -1,0 +1,139 @@
+---
+title: "Reasonix: el agente de código que vive del caché"
+date: "2026-05-25T04:00"
+tags: ["deepseek", "coding-agent", "terminal", "open-source", "typescript"]
+excerpt: "Un agente de código MIT para la terminal que convierte el prefix-cache de DeepSeek en una ventaja arquitectónica. 99.82% de acierto de caché en uso real."
+---
+
+Hace un mes justo, un proyecto llamado Reasonix apareció en GitHub sin hacer mucho ruido. Hoy tiene 6.800 estrellas, 200 comentarios en Hacker News y una propuesta técnica que ningún otro agente de código ha intentado: diseñar todo el bucle alrededor del sistema de caché de un solo proveedor.
+
+No es un wrapper genérico tipo "conéctate a OpenAI, Anthropic o lo que tengas". Es un agente que eligió una trinchera y cavó hacia abajo.
+
+## Qué es Reasonix
+
+Reasonix es un agente de código para la terminal, open source (MIT), escrito en TypeScript por la comunidad de [esengine](https://github.com/esengine/DeepSeek-Reasonix). Se instala con `npm install -g reasonix` y necesita Node ≥ 22.
+
+La premisa es simple y radical a la vez: funciona exclusivamente con los modelos de DeepSeek porque toda su arquitectura gira alrededor del *prefix-cache*, un mecanismo del backend que factura los tokens cacheados a ~10% del precio normal. Si el prefijo de tu petición es idéntico byte a byte al de la petición anterior, DeepSeek no te cobra (casi) por él.
+
+La mayoría de agentes destruyen esta ventaja sin querer: reordenan el historial, reescriben tool specs, meten timestamps dinámicos en cada turno. El resultado: tasas de acierto de caché por debajo del 20%.
+
+Reasonix se diseñó para lo contrario.
+
+## Los tres pilares
+
+El bucle se organiza en tres capas. La documentación las explica en detalle, pero vale la pena entender qué problema resuelve cada una.
+
+### Pilar 1: Bucle "cache-first"
+
+El contexto se parte en tres regiones con reglas estrictas:
+
+```
+┌──────────────────────────────┐
+│ PREFIJO INMUTABLE            │ ← system prompt + tool specs
+│                              │   congelado al iniciar sesión
+├──────────────────────────────┤
+│ LOG DE SOLO APPEND           │ ← crece monotónicamente
+│   [assistant₁][tool₁]...     │   sin reordenar, sin reescribir
+├──────────────────────────────┤
+│ SCRATCH VOLÁTIL              │ ← pensamiento por turno
+│                              │   nunca se envía al prefijo
+└──────────────────────────────┘
+```
+
+El prefijo se calcula una vez, se hashea y se congela. El log solo añade entradas al final, nunca las modifica. El scratch (donde vive el chain-of-thought) se descarta entre turnos para no contaminar el prefijo de la siguiente petición.
+
+Hay un caso de estudio real en los benchmarks del proyecto. Un usuario compartió su dashboard de DeepSeek del 1 de mayo de 2026:
+
+- **435 millones** de tokens de entrada totales
+- **99.82% de acierto de caché**
+- Coste del día: **$1.38** con caché vs **$61.06** sin él
+- Ahorro: ~97.7%
+
+No es un benchmark sintético. Es un día real de uso.
+
+### Pilar 2: Reparación de tool calls
+
+DeepSeek tiene fallos conocidos cuando emite tool calls: a veces genera el JSON dentro de ` reasoning` y no en `tool_calls`, trunca argumentos con schemas profundos, o entra en bucles llamando a la misma herramienta con los mismos argumentos.
+
+Reasonix aplica cuatro pasadas correctivas antes de ejecutar cualquier tool call:
+
+- **Flatten**: detecta schemas con más de 10 parámetros y los aplana a notación de puntos antes de enviarlos al modelo; al recibir la respuesta, los reanida.
+- **Scavenge**: barre el `reasoning_content` con regex + parser JSON buscando tool calls que el modelo olvidó emitir.
+- **Truncation**: detecta JSON desbalanceado y repara cerrando llaves o solicitando una completion de continuación.
+- **Storm**: suprime llamadas idénticas repetidas en una ventana deslizante e inyecta un turno de reflexión.
+
+### Pilar 3: Control de costes
+
+El agente usa por defecto el tier más barato y escala al más caro solo cuando el propio modelo lo pide. Si una tarea le supera, el modelo emite el marcador `<<<NEEDS_PRO>>>` como primera línea de su respuesta; el sistema aborta la llamada actual y reintenta con el modelo superior.
+
+Además, cada resultado de herramienta que supera los 3.000 tokens se compacta automáticamente al final del turno. El modelo tuvo el texto completo cuando lo necesitó; los turnos siguientes ven un resumen. Una llamada extra a `read_file` cuesta mucho menos que arrastrar 12 KB por cada prompt futuro.
+
+## Cómo se usa
+
+Instalarlo es un `npm install -g reasonix`. A partir de ahí:
+
+```bash
+# Agente de código (por defecto)
+reasonix code mi-proyecto
+
+# Chat sin acceso al sistema de ficheros
+reasonix chat
+
+# Tarea única, streaming a stdout
+reasonix run "refactoriza el módulo de auth para usar JWT"
+```
+
+El TUI muestra en tiempo real la tasa de acierto de caché, el coste por turno y el coste acumulado de la sesión. Verde por debajo de $0.05, amarillo hasta $0.20, rojo a partir de ahí. Sin sorpresas a fin de mes.
+
+También hay un cliente de escritorio (Tauri, en prerelease) y un canal QQ que permite extender una sesión activa desde el móvil.
+
+```bash
+# Dentro de una sesión code o chat
+/qq connect
+```
+
+## Skills y MCP sin fricción
+
+Reasonix soporta skills en el mismo formato que Claude Code — es decir, si tienes skills escritas para Claude, Reasonix las carga sin adaptadores. También acepta sus propios skills nativos:
+
+```bash
+# Crear un skill nuevo
+/skill new mi-skill
+
+# Cargar skills del ecosistema Claude
+npx openspec init --tools claude
+/skill openspec-propose "añadir endpoint de healthcheck"
+```
+
+Los skills pueden ejecutarse inline o como subagente (`runAs: subagent`), con un bucle aislado que no contamina el contexto principal.
+
+En cuanto a MCP (Model Context Protocol), soporta stdio, SSE y Streamable HTTP. Se configura en `~/.reasonix/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-filesystem", "/ruta/permitida"]
+    }
+  }
+}
+```
+
+## Comparación honesta
+
+El proyecto no esconde sus limitaciones. La propia documentación lista los "non-goals": no es multi-proveedor, no se integra en IDEs, no está pensado para benchmarks de razonamiento extremo ni para entornos air-gapped. Si tu caso de uso es "resolver una demostración doctoral", el README te recomienda empezar con Claude.
+
+Pero para el día a día — sesiones largas de desarrollo donde el agente se queda abierto mientras trabajas — la diferencia de coste es brutal. Frente a Claude Code, Cursor o Aider, Reasonix compite en precio, no en features.
+
+## Mi opinión
+
+Me gusta cuando un proyecto toma una decisión de arquitectura que suena a limitación — "solo DeepSeek" — y la convierte en su mayor ventaja. Reasonix no intenta ser el agente para todo el mundo. Es el agente para quien ya usa DeepSeek y quiere que la sesión de 8 horas no le cueste 200 dólares al mes.
+
+El diseño del bucle cache-first me parece la parte más interesante. No es un parche ni una optimización tardía: es la columna vertebral. Las tres regiones del contexto (prefijo inmutable, log append-only, scratch volátil) son una decisión de primer principio que la mayoría de frameworks ni siquiera consideran porque nacieron para otro modelo de precios.
+
+Las 6.800 estrellas en un mes dicen algo. No es hype de AI-du-jour; es ingeniería de la que se ensucia las manos con los bytes del prefijo, los fallos de parseo de tool calls y la compactación automática de contexto. Cosas que no salen en los títulos pero son las que determinan si un agente se usa todos los días o se abandona a la semana.
+
+El proyecto está en fase temprana. El cliente de escritorio es prerelease, hay discusiones abiertas sobre el diseño del TUI y del dashboard, y la comunidad está construyendo activamente. Pero la base técnica es sólida y la dirección es clara.
+
+Si usas DeepSeek para codificar, merece la pena probarlo. Si no, la arquitectura merece la pena leerla igualmente — hay lecciones sobre cómo diseñar software alrededor de las propiedades económicas de tu infraestructura que aplican a cualquier stack.
