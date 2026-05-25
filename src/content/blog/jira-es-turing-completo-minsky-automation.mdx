@@ -1,0 +1,177 @@
+---
+title: "Jira es Turing-completo: confirma tus peores pesadillas"
+date: "2026-05-25T15:45"
+tags: ["jira", "teoría-computacional", "automatización", "minsky", "turing"]
+excerpt: "Un investigador demuestra que Jira Automation puede ejecutar cualquier algoritmo. Sí, has leído bien: podrías implementar Fibonacci con incidencias."
+---
+
+El 22 de mayo de 2026, Nicolas Seriot publicó una demostración que cualquier ingeniero que haya sufrido con workflows de Jira ya sospechaba en el fondo: **Jira es Turing-completo**. No es una metáfora, no es una exageración de Twitter, es una prueba formal con implementación funcional incluida. Si alguna vez has pensado que configurar automatizaciones se parece peligrosamente a programar, estabas en lo cierto. Es literalmente programar.
+
+## El chiste que se volvió teorema
+
+El folclore de la ingeniería de software lleva años bromeando con que ciertas herramientas empresariales son Turing-completas. Excel lo es (hay quien ha escrito juegos completos en sus celdas), PowerPoint lo es y Jira llevaba tiempo en la lista de sospechosos. Pero nadie había presentado una reducción formal... hasta ahora.
+
+Seriot no se limitó a señalar vagamente las funcionalidades de automatización. **Construyó una máquina de Minsky real dentro de Jira Automation** y la grabó en vídeo funcionando en una instancia real de `*.atlassian.net`.
+
+## ¿Qué es una máquina de Minsky?
+
+Una máquina de Minsky es el modelo computacional más minimalista que sigue siendo Turing-completo. Solo necesita dos cosas:
+
+1. **Dos contadores no acotados** (registros A y B)
+2. **Dos tipos de instrucciones**:
+   - `INC r; goto S` — incrementa el registro `r` y salta a la instrucción `S`
+   - `DEC r; if r == 0 goto S else goto S'` — decrementa `r`; si llega a cero salta a `S`, si no a `S'`
+
+Eso es todo. Con esa miseria de primitivas puedes computar cualquier función que una máquina de Turing pueda computar. Marvin Minsky lo demostró en 1967.
+
+Un programa que suma A + B y guarda el resultado en B se ve así:
+
+```
+1. DEC A; if A == 0 goto 3 else goto 2
+2. INC B; goto 1
+3. HALT
+```
+
+Tres líneas. Ahora la pregunta era: ¿puede Jira ejecutar esto?
+
+## El mapeo: Jira como hardware computacional
+
+Seriot estableció una correspondencia directa entre los componentes de la máquina de Minsky y los elementos de Jira:
+
+| Máquina de Minsky | Jira |
+|---|---|
+| Registro A | Cantidad de issues vinculados de tipo **Bug** |
+| Registro B | Cantidad de issues vinculados de tipo **Task** |
+| Contador de programa | Estado (status) de un único **Epic** |
+| Tabla de despacho | Reglas de Jira Automation, una por instrucción |
+| Reloj | Transiciones disparadas por automatización |
+
+El Epic actúa como contador de programa: su estado actual codifica qué instrucción se está ejecutando. Las reglas de automatización inspeccionan los issues vinculados y deciden la siguiente transición.
+
+`INC` se implementa **creando** un issue del tipo correspondiente y vinculándolo al Epic. `DEC` se implementa **eliminando** un issue vinculado. La bifurcación condicional usa condiciones JQL dentro de las reglas de automatización.
+
+Visto así, un proyecto Jira es un computador primitivo donde los issues son celdas de memoria.
+
+## Implementación real: 2 + 3 = 5
+
+Esto no es un ejercicio teórico. Seriot montó la máquina de suma en una instancia real de Jira Cloud. Aquí está la receta paso a paso.
+
+### Workflow mínimo
+
+Cuatro estados con transiciones libres entre todos ellos:
+
+```
+BACKLOG → TODO → DEV → PROD
+```
+
+El Epic arranca en `BACKLOG`.
+
+### Regla TODO — la instrucción de decremento
+
+Traducida de la regla de Jira Automation:
+
+```text
+Gatillo: Epic cambia a estado TODO
+
+Condición: ¿Hay al menos un Bug vinculado?
+
+  SÍ → Eliminar un Bug, transicionar Epic a DEV
+  NO  → Transicionar Epic a PROD (halt)
+```
+
+### Regla DEV — la instrucción de incremento
+
+```text
+Gatillo: Epic cambia a estado DEV
+
+Acción: Crear un Task nuevo, vincularlo al Epic
+Acción: Transicionar Epic a TODO
+```
+
+Ambas reglas tienen activada la opción _"Permitir que esta regla dispare otras reglas"_. Esto es lo que permite la cascada de transiciones — el bucle de ejecución.
+
+### Inicializar registros
+
+Vinculamos manualmente 2 Bugs (A=2) y 3 Tasks (B=3) al Epic. El Epic está en `BACKLOG`.
+
+### Arrancar la máquina
+
+Transicionamos el Epic a `TODO`. La cascada es automática:
+
+```
+(2,3) TODO →  (1,3) DEV →  (1,4) TODO →  (0,4) DEV →  (0,5) TODO →  (0,5) PROD
+```
+
+Cinco transiciones después, el Epic aterriza en `PROD` con 0 Bugs y 5 Tasks vinculados. Acabamos de sumar 2 + 3 = 5.
+
+Hay un vídeo real de esto ejecutándose en `*.atlassian.net`. No es una simulación. Funciona.
+
+## Fibonacci en tres estados
+
+Una vez demostrada la Turing-completitud con la máquina de suma, Seriot fue más allá y mostró que Jira Automation puede simplificar ciertas operaciones usando `Convert Issue Type` (cambiar el tipo de un issue sobre la marcha). Un `CONVERT` es expresable como `DEC` + `INC`, así que no añade poder computacional, pero reduce drásticamente el tamaño de la tabla de despacho.
+
+El algoritmo de Fibonacci como transformación `(A, B) → (B, A+B)` se implementa con tres registros y tres estados:
+
+### Registros
+
+- **A** = Bugs vinculados
+- **B** = Tasks vinculados  
+- **C** = Stories vinculadas (registro temporal)
+
+### Estados e instrucciones
+
+La regla para el estado `TODO` traducida del original:
+
+```text
+TODO:
+  Si hay algún Task vinculado:
+    CONVERT Task → Story
+    INC Bug
+    Transicionar a TODO
+  Si no:
+    Transicionar a QA
+
+QA:
+  Si hay algún Bug vinculado:
+    CONVERT Bug → Task
+    Transicionar a QA
+  Si no:
+    Transicionar a DEV
+
+DEV:
+  Si hay alguna Story vinculada:
+    CONVERT Story → Bug
+    Transicionar a DEV
+  Si no:
+    Transicionar a TODO
+```
+
+### Traza de ejecución
+
+Inicializamos con A=1, B=1, C=0:
+
+```
+(1,1,0) TODO → (2,0,1) TODO → (0,2,0) QA → (0,2,0) DEV → (1,2,0) TODO →
+(3,0,1) TODO → (0,3,0) QA → (0,3,0) DEV → (2,3,0) TODO → (5,0,2) TODO →
+(0,5,0) QA → ...
+```
+
+La secuencia de Fibonacci (1, 1, 2, 3, 5, 8, 13...) aparece en el registro B (cantidad de Tasks).
+
+A diferencia de la máquina de suma, esta no se detiene sola — ejecuta hasta que Jira Cloud impone su límite de profundidad de cascada (10 transiciones por defecto). Para continuar, basta con re-disparar el Epic manualmente. La reducción sigue siendo válida: el humano solo suministra el siguiente pulso de reloj.
+
+## ¿Qué implica esto realmente?
+
+Que Jira Automation **puede ejecutar cualquier algoritmo**. Con tiempo, issues y reglas suficientes, podrías teóricamente implementar un compilador, un intérprete de Brainfuck o un solver de Sudoku dentro de Jira. La pregunta no es si se puede, sino a qué velocidad y con cuánto sufrimiento.
+
+El límite práctico, por supuesto, es la paciencia humana. Pero eso nunca ha invalidado una prueba de Turing-completitud. Como señala Seriot, toda computadora física es finita — los límites de cuota de Jira Cloud no refutan la construcción.
+
+## Mi opinión
+
+Este trabajo me parece brillante precisamente porque toma algo que todos sospechábamos y lo demuestra con rigor. No es un "mira qué divertido, Jira es complejo" — es una reducción formal que exhibe el mecanismo exacto.
+
+Lo que más me llama la atención es lo bien que encaja el modelo: los Bugs y Tasks como registros, el estado del Epic como contador de programa, las reglas de automatización como instrucciones. Es un emparejamiento tan limpio que casi parece diseñado. Casi dan ganas de pedirle a Atlassian que exponga una API de "modo computación" con un reloj interno en lugar del límite de cascada. Pero luego recuerdo que es una herramienta de gestión de proyectos y se me pasa.
+
+La consecuencia filosófica es más interesante: si una herramienta que usas a diario para trackear bugs es Turing-completa, ¿cuántas otras herramientas que das por sentadas también lo son? ¿Tu gestor de CI? ¿Tu sistema de tickets? ¿El configurador de tu router? La frontera entre "configuración" y "programación" es más difusa de lo que parece.
+
+En cualquier caso, la próxima vez que alguien se queje de que "configurar Jira es programar", tienes una prueba formal para darle la razón. Y si tu manager te pide que implementes Fibonacci en Jira, ya sabes cómo. Aunque probablemente sea mejor no contárselo.
