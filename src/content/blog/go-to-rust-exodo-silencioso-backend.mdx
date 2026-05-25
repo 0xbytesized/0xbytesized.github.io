@@ -1,0 +1,145 @@
+---
+title: "De Go a Rust: el éxodo silencioso del backend"
+date: "2026-05-25T09:35"
+tags: ["rust", "go", "backend", "migracion", "rendimiento"]
+excerpt: "Una guía de migración de Go a Rust incendia Hacker News. No por el código, sino por lo que revela sobre el agotamiento con Go cuando dejas de ser una startup."
+---
+
+Hace unos días Matthias Endler, fundador de la consultora Rust Corrode, publicó una guía de migración de Go a Rust que ha acumulado 276 puntos y 265 comentarios en Hacker News. El título es descriptivo — «Migrating from Go to Rust» — pero el contenido es una bomba de relojería cuidadosamente envuelta en tabla tras tabla de equivalencias.
+
+No es un artículo técnico más sobre «por qué Rust es mejor». Es un _mapa de salida_. Y eso es lo que lo hace tan interesante.
+
+## Lo que dice (y lo que no dice)
+
+Endler empieza con una confesión: «no soy fan de Go. Creo que es un lenguaje mal diseñado, aunque muy exitoso». Acto seguido, dedica 8.000 palabras a explicar — con código real, tabla de equivalencias y estrategias de migración probadas con clientes reales — cómo salir de Go sin incendiar la organización.
+
+La estructura del artículo es quirúrgica:
+
+1. Mapea cada herramienta de Go a su equivalente en Rust (`go build` → `cargo build`, `go vet` → `cargo clippy`, etc.)
+2. Traduce patrones Go a patrones Rust (goroutines → `tokio::spawn`, `context.Context` → `CancellationToken`)
+3. Reconoce _dónde Go gana_ (ausencia de _function coloring_, ecosistema Kubernetes, compilación instantánea)
+4. Detalla estrategias de migración incremental (carve-off, sidecar, strangler fig)
+5. Da cifras orientativas de mejora: 20-60% menos CPU, 30-50% menos memoria, latencia P99 plana
+
+La parte más interesante no es técnica. Es sociológica.
+
+## El paper-cut que se convierte en hemorragia
+
+Hay una frase que explica por qué este artículo resuena:
+
+> «Go is death by a thousand paper cuts. There is no single moment when Go loses its appeal, but teams find themselves wishing for more.»
+
+Traducción: Go no falla estrepitosamente. Te desgasta. Mil pequeños cortes que, por separado, son anecdóticos. Juntos, a los tres años y 200.000 líneas de código, hacen que tu equipo se pregunte por qué demonios siguen escribiendo `if err != nil { return err }` trescientas veces al día.
+
+Veamos un ejemplo real. Esto es Go idiomático para leer un archivo de configuración:
+
+```go
+func ReadConfig(path string) (*Config, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil, fmt.Errorf("reading config: %w", err)
+    }
+
+    var cfg Config
+    if err := json.Unmarshal(data, &cfg); err != nil {
+        return nil, fmt.Errorf("parsing config: %w", err)
+    }
+
+    return &cfg, nil
+}
+```
+
+Siete líneas, tres de ellas _boilerplate_ de error. El equivalente en Rust:
+
+```rust
+fn read_config(path: &Path) -> Result<Config, ConfigError> {
+    let data = fs::read_to_string(path)?;
+    let cfg = serde_json::from_str(&data)?;
+    Ok(cfg)
+}
+```
+
+Tres líneas. El operador `?` hace el trabajo de `if err != nil { return err }` y además convierte tipos automáticamente si implementas `From`. No es magia: es diseño de tipos.
+
+Pero lo que Endler señala — y donde acierta de pleno — es que el problema no es el `if err != nil`. Es que Go _no te obliga_ a manejar el error. Es una convención, no una regla del compilador. Puedes ignorar el error. Puedes olvidarte del `nil`. Puedes mutar un mapa desde dos goroutines sin lock y Go compilará felizmente. El `-race` lo pillaría... si ejecutas esa ruta en tests.
+
+En Rust, directamente no compila.
+
+## El nil que te despierta a las 3 AM
+
+El ejemplo más sangrante del artículo es este:
+
+```go
+func (s *Service) Handle(req *Request) error {
+    user, err := s.repo.Find(req.UserID)
+    if err != nil {
+        return err
+    }
+    return user.Account.Notify() // pánico si user es nil
+}
+```
+
+`Find` devuelve `(*User, error)`. Pero para «no encontrado», Go devuelve `nil, nil`. La persona que llama tiene que _acordarse_ de comprobar si `user == nil`. Si no lo hace — y es facilísimo no hacerlo — el servicio explota en producción seis meses después, un domingo, cuando una condición de carrera rarísima deja un usuario a medias.
+
+En Rust eso no existe porque `Option<User>` te obliga a manejar los dos casos:
+
+```rust
+fn handle(&self, req: &Request) -> Result<(), ServiceError> {
+    let user = self.repo.find(req.user_id)?;
+    user.notify()
+}
+```
+
+`find` devuelve `Option<User>`. El `?` convierte `None` en error automáticamente. Sin `nil`, sin pánicos fantasma, sin comprobaciones que dependen de que alguien se acordara.
+
+Esto no es opinión. Paul Dix, fundador de InfluxDB, lo dijo sin rodeos cuando reescribieron InfluxDB 3.0 en Rust: «eliminar las data races fue el principal beneficio. Teníamos bugs realmente desagradables en la versión Go de InfluxDB.»
+
+## Lo que Go hace mejor (y no es poco)
+
+Endler es honesto: Go gana en tres cosas que importan.
+
+**Compilación instantánea.** Un `go build` tarda milisegundos. Un `cargo build` de un servicio mediano tarda minutos en limpio. La diferencia se siente cada vez que iteras.
+
+**Sin _function coloring_.** En Go cualquier función puede lanzarse como goroutine sin cambiar su firma. No hay `async fn`, no hay `.await`, no hay executor que elegir. Escribes código secuencial y el runtime lo paraleliza. Esto es una ventaja de productividad _brutal_ que Rust no puede igualar.
+
+**Ecosistema Kubernetes.** Operadores, controladores, CRDs: todo el ecosistema K8s es Go. Si tu producto es una pieza de infraestructura cloud-native, Go sigue siendo la respuesta correcta.
+
+El propio Endler lo admite: «no todo debería migrarse. Go es excelente para tooling de Kubernetes, CLIs utilities y servicios glue. Una estrategia híbrida es perfectamente razonable.»
+
+## La acusación de IA que lo cambia todo
+
+Aquí viene el giro inesperado. En los comentarios de HN, un usuario llamado nemo1618 señaló algo incómodo:
+
+> «Las marcas de escritura con LLM son cada vez más sutiles, pero me siguen saltando a la vista. En particular, la palabra "genuinely": "This is the area where Go genuinely shines", "the lack of GC pauses is a genuine selling point", "Humans are genuinely bad at reasoning about memory".»
+
+El comentario generó una minitormenta. ¿Escribió un LLM partes de la guía? ¿Importa si el contenido es correcto? ¿Es irónico que una guía sobre migrar de Go a Rust — dos lenguajes que compiten por ser «el lenguaje correcto para sistemas» — esté bajo sospecha de haber sido generada por IA?
+
+Endler no ha respondido directamente. Pero el debate es más profundo que una acusación de copy-paste. Si un artículo técnico de 8.000 palabras con código funcional y comparativas precisas _pudo_ ser escrito por un LLM, ¿qué dice eso sobre el futuro de la documentación técnica? ¿Y sobre la autoridad?
+
+Mi opinión: el artículo es útil independientemente de cómo se escribió. Las equivalencias son correctas, los patrones funcionan y las estrategias de migración son sensatas. La pregunta no es «¿lo escribió un humano?», sino «¿puedo usarlo para tomar mejores decisiones?». Y la respuesta es sí.
+
+## Estrategias de migración que no duelen
+
+La parte más valiosa del artículo para cualquiera que esté considerando el salto son las estrategias de migración. No es teoría: son patrones que Endler ha usado con clientes reales.
+
+**1. Carve-off del hot path.** Reescribes _un solo servicio_, el que más problemas da, en Rust. Misma API, mismos contratos. El resto del sistema sigue en Go y nadie se entera.
+
+**2. Sidecar o worker process.** Los workers de cola, pipelines de ingesta y jobs batch son objetivos ideales. Tienen una frontera clara (una cola, un topic) y no comparten estado con el resto del sistema.
+
+**3. Strangler Fig tras un gateway.** Un API gateway enruta endpoints específicos al nuevo servicio Rust mientras el resto sigue en Go. El servicio nuevo «estrangula» al viejo hasta reemplazarlo.
+
+Victor Ciura, Principal Engineer en Microsoft, lo resumió bien: «no estamos reescribiendo todo en Rust por diversión. Hacemos elecciones tácticas: este componente nuevo, mejor lo hacemos en Rust.»
+
+## Mi veredicto
+
+He escrito Go. He escrito Rust. No tengo una consultoría que vender y no me va nada en que uses uno u otro. Así que aquí va mi opinión sin filtro.
+
+Go es un lenguaje para organizaciones que crecen rápido y necesitan que cualquier desarrolladora pueda ser productiva en dos semanas. Cumple ese objetivo de forma brillante. Es aburrido, predecible y no te deja dispararte en el pie... demasiado.
+
+Rust es un lenguaje para organizaciones que ya han crecido y ahora necesitan que el código _no falle_. Punto. No es más rápido escribirlo, no es más sencillo aprenderlo, no tiene mejor ecosistema. Pero el código que compila en Rust tiene categorías enteras de bugs eliminadas _por construcción_.
+
+La guía de Endler acierta al no vender Rust como la bala de plata. Te dice exactamente dónde duele (el borrow checker, los tiempos de compilación, el function coloring) y exactamente cuándo NO migrar (si tu equipo valora velocidad de iteración sobre corrección absoluta, quédate en Go).
+
+Si estás en un equipo que ya no es una startup, que tiene guardias de producción y que está harto de perseguir nils y data races a las 3 AM, esta guía es el empujón que necesitabas. No para reescribirlo todo. Para reescribir _ese servicio_. El que siempre falla. El que te despierta.
+
+Empieza por ahí.
