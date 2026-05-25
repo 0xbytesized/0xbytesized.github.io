@@ -1,11 +1,11 @@
 ---
-title: "86-DOS: Microsoft libera el ancestro que dio vida al PC"
+title: "86-DOS: el ancestro que dio vida al PC"
 date: "2026-05-24T15:08"
 tags: ["historia", "ensamblador", "microsoft", "open-source", "retrocomputación"]
-excerpt: "Microsoft libera el código de 86-DOS 1.00, escrito por Tim Paterson en 1981 y ancestro directo de MS-DOS. Rescatado de impresiones en papel, 45 años después."
+excerpt: "86-DOS 1.00, escrito por Tim Paterson en 1981 y ancestro directo de MS-DOS. La historia del sistema operativo que nadie quería y que lo cambió todo."
 ---
 
-Microsoft acaba de publicar el código fuente de 86-DOS 1.00, el ancestro directo de MS-DOS, en su 45º aniversario. Lo fascinante no es solo ver cómo arrancaba un sistema operativo en 1981: es que este código se rescató de **impresiones en papel** porque nadie conservó una copia digital.
+Microsoft lleva años abriendo su historia. En 2018 liberó MS-DOS 1.25 y 2.0. En 2024 llegó MS-DOS 4.0. Y ahora, 45 años después del nacimiento del PC, merece la pena recordar cómo empezó todo: con 86-DOS, el sistema operativo que Tim Paterson escribió para probar una placa base y que acabó dominando el mundo.
 
 ## El sistema que nadie quería (y que lo cambió todo)
 
@@ -41,15 +41,7 @@ Observa los campos reservados: 10 bytes tirados por si algún día hacían falta
 
 El boot sector es aún más espartano. En menos de 512 bytes tenía que caber el código que inicializaba la CPU, cargaba el sistema operativo desde el disquete y mostraba algo en pantalla si todo iba bien. O se quedaba mudo si algo fallaba, porque no había margen para mensajes de error.
 
-## Recuperar el pasado con OCR
-
-Este detalle me parece lo más increíble del anuncio. El código fuente de 86-DOS 1.00 no existía en formato digital. Nadie en Microsoft ni en Seattle Computer Products había conservado los disquetes o cintas originales con el código.
-
-Lo que sí existían eran **impresiones en papel**. Listados de código fuente impresos en los años 80, guardados en archivos o en cajas de algún coleccionista. Un equipo liderado por Yufeng Gao dedicó semanas a escanear esas impresiones, pasarlas por OCR y revisar manualmente cada línea para corregir los errores del reconocimiento óptico.
-
-Hay algo profundamente poético en esto: el ancestro del sistema operativo que dominó la informática de escritorio durante 15 años sobrevivió porque alguien, en algún momento, decidió imprimir el código y guardar el papel. Como un pergamino medieval que preserva un texto que de otra forma se habría perdido.
-
-## Cómo leer un disquete FAT12 hoy
+## Por qué importa recordarlo
 
 Para entender lo que 86-DOS hacía realmente, nada como leer una imagen de disco desde un lenguaje moderno. Este script en Python interpreta la estructura FAT12 y lista los archivos que contiene:
 
@@ -100,11 +92,9 @@ No es código que vayas a usar en producción. Pero revela cuántas capas de abs
 
 ## Por qué esto importa en 2026
 
-Microsoft lleva años abriendo su historia. En 2018 liberó MS-DOS 1.25 y 2.0. En 2024 llegó MS-DOS 4.0. Y ahora, en 2026, 86-DOS 1.00. Todos bajo licencia MIT.
+Microsoft lleva años abriendo su historia. En 2018 liberó MS-DOS 1.25 y 2.0. En 2024 llegó MS-DOS 4.0. Todos bajo licencia MIT. El repositorio de MS-DOS en GitHub tiene más de 32.000 estrellas.
 
-Esto no es filantropía. Es arqueología digital con intención. Microsoft sabe que su historia es un activo. Cada release de código histórico genera titulares que asocian "Microsoft" con "open source". Y funciona: el repositorio de MS-DOS en GitHub tiene más de 32.000 estrellas.
-
-Pero hay algo más. El código de 86-DOS es una cápsula del tiempo que nos recuerda lo que era programar sin stacks modernos, sin bibliotecas, sin protección de memoria. Cada byte contaba. Cada instrucción tenía un coste medible en ciclos de reloj. No había garbage collector, no había async/await, no había ni siquiera directorios anidados.
+Esto no es solo arqueología digital. El código de 86-DOS es una cápsula del tiempo que nos recuerda lo que era programar sin stacks modernos, sin bibliotecas, sin protección de memoria. Cada byte contaba. Cada instrucción tenía un coste medible en ciclos de reloj. No había garbage collector, no había async/await, no había ni siquiera directorios anidados.
 
 Y sin embargo, ese código improvisado por un ingeniero de 24 años que solo necesitaba probar una placa base se convirtió en la base sobre la que se construyó la industria del PC.
 
@@ -114,8 +104,8 @@ Me encanta esta historia por tres razones.
 
 Primero, porque desmitifica la innovación. 86-DOS no nació de un plan maestro. Nació de la necesidad inmediata de un ingeniero que necesitaba una herramienta. La mayor parte de la historia de la informática es así: gente resolviendo el problema que tiene delante, no gente diseñando el futuro.
 
-Segundo, porque el hecho de que este código sobreviviera en papel es casi un milagro. Piensa en todo el código que escribimos hoy y que desaparecerá porque está en repositorios privados que nadie archivará. En 40 años, ¿alguien podrá leer el código que estás escribiendo ahora?
+Segundo, porque leer código de hace 45 años es un ejercicio de humildad. Piensa en todo el código que escribimos hoy y que desaparecerá porque está en repositorios privados que nadie archivará. En 40 años, ¿alguien podrá leer el código que estás escribiendo ahora?
 
 Y tercero, porque leer ensamblador del 8086 en 2026 es un bofetón de humildad. Tim Paterson escribió un sistema operativo completo en menos líneas de las que necesita un `node_modules` para imprimir "hello world". No es nostalgia: es perspectiva.
 
-El código está disponible en el repositorio MS-DOS de Microsoft en GitHub. No es que vayas a forkearlo para montar tu propio sistema operativo. Pero si alguna vez te has preguntado cómo empezó todo, ahora puedes leerlo. Línea por línea. Como quien hojea un manuscrito medieval, pero con saltos condicionales.
+El código de MS-DOS 1.25, 2.0 y 4.0 está disponible en el repositorio de Microsoft en GitHub. No es que vayas a forkearlo para montar tu propio sistema operativo. Pero si alguna vez te has preguntado cómo empezó todo, ahora puedes leerlo. Línea por línea. Como quien hojea un manuscrito medieval, pero con saltos condicionales.

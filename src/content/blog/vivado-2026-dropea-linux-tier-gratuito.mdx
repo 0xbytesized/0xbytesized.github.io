@@ -39,7 +39,7 @@ Windows simplemente no puede ofrecer paridad de funcionalidades para workloads q
 
 ### 2. Rompe los pipelines de CI/CD
 
-Cuando trabajas con FPGAs en serio, la síntesis es parte de tu pipeline de integración continua. Commiteas código Verilog, el CI lo sintetiza en un servidor Linux headless, y recibes feedback sobre timing closure, utilización de recursos y warnings. Esto es imposible con Vivado 2026.1 gratuito.
+Cuando trabajas con FPGAs en serio, la síntesis es parte de tu pipeline de integración continua. Commiteas código Verilog, el CI lo sintetiza en un servidor Linux headless y recibes feedback sobre timing closure, utilización de recursos y warnings. Esto es imposible con Vivado 2026.1 gratuito.
 
 Un usuario lo resumió así: "This is terrible news for university users trying to professionalize their FPGA development with CI/CD. Which is probably the point of the change."
 
@@ -61,7 +61,7 @@ La buena noticia es que sí, aunque con matices. Vamos a ver qué opciones reale
 
 Lattice Semiconductor es el tercer fabricante de FPGAs y ha tenido una relación ambivalente con el open source. Sus herramientas (Lattice Diamond, Radiant) son gratuitas para los chips básicos (ECP5, Certus) y solo requieren licencia de pago para los chips con SerDes de alta velocidad (ECP5-5G, CertusPro).
 
-La comunidad open source ha hecho un trabajo increíble con Lattice. El proyecto IceStorm documentó completamente el bitstream del iCE40, y ahora tienes un flujo 100% abierto desde Verilog hasta el chip con Yosys + nextpnr. Para el ECP5, nextpnr también tiene soporte sólido.
+La comunidad open source ha hecho un trabajo increíble con Lattice. El proyecto IceStorm documentó completamente el bitstream del iCE40 y ahora tienes un flujo 100% abierto desde Verilog hasta el chip con Yosys + nextpnr. Para el ECP5, nextpnr también tiene soporte sólido.
 
 El problema: Lattice no termina de abrazar el open source como estrategia. Sigue manteniendo partes cerradas donde no sería necesario. Pero al menos no te echa de Linux.
 
@@ -103,7 +103,7 @@ Cuando incluso tus clientes de pago se quejan de la fricción, estás haciendo a
 
 ## Mi opinión
 
-Cada vez que un fabricante de hardware pone barreras artificiales a sus herramientas de desarrollo, acelera su propia irrelevancia. Pasó con las toolchains propietarias de microcontroladores (¿alguien se acuerda de cuando tenías que pagar por Keil o IAR?), y está pasando con las FPGAs.
+Cada vez que un fabricante de hardware pone barreras artificiales a sus herramientas de desarrollo, acelera su propia irrelevancia. Pasó con las toolchains propietarias de microcontroladores (¿alguien se acuerda de cuando tenías que pagar por Keil o IAR?) y está pasando con las FPGAs.
 
 La diferencia es que el ecosistema FPGA es más pequeño y el coste de ingeniería inversa de los bitstreams es altísimo. Por eso el progreso de las herramientas abiertas es lento. Pero cada decisión como esta de AMD añade leña al fuego.
 

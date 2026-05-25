@@ -31,7 +31,7 @@ Eso es todo. No hay inicialización de variables, no hay gestión de errores, no
 
 ## Cómo funciona: la memoria como lienzo
 
-El truco está en usar la memoria de vídeo como espacio de cálculo. `int 10h` configura el modo texto 40×25, y el segmento `0xb800` es donde la VGA mapea su _framebuffer_ de texto. Cada carácter son dos bytes: el código ASCII y el atributo de color.
+El truco está en usar la memoria de vídeo como espacio de cálculo. `int 10h` configura el modo texto 40×25 y el segmento `0xb800` es donde la VGA mapea su _framebuffer_ de texto. Cada carácter son dos bytes: el código ASCII y el atributo de color.
 
 Cuando la BIOS limpia la pantalla, no escribe ceros. Escribe `0x20` (espacio) y `0x07` (gris claro sobre negro) en cada una de las 2000 posiciones del buffer. La memoria _parece_ vacía, pero está llena de un patrón uniforme. El programa usa esos valores como semilla.
 

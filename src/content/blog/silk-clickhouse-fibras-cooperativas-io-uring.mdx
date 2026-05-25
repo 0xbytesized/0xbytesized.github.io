@@ -11,9 +11,9 @@ El repo lleva 59 commits y la documentación es excelente — de las que te lees
 
 ## El modelo: fibras stackful, no corrutinas stackless
 
-Silk usa fibras _stackful_: cada fibra tiene su propia pila de 64 KB mapeada con `mmap`, con páginas guardia arriba y abajo para pillar desbordamientos. El cambio de contexto lo hace Boost.Context en ensamblador, y cada fibra que se suspende no bloquea el hilo del SO — simplemente cede el control al scheduler.
+Silk usa fibras _stackful_: cada fibra tiene su propia pila de 64 KB mapeada con `mmap`, con páginas guardia arriba y abajo para pillar desbordamientos. El cambio de contexto lo hace Boost.Context en ensamblador y cada fibra que se suspende no bloquea el hilo del SO — simplemente cede el control al scheduler.
 
-Esto es radicalmente distinto a las corrutinas stackless de C++20. En el modelo stackless, cada función que quiere suspender tiene que ser una corrutina, y cada nivel de la cadena de llamadas es una asignación de heap separada. Con fibras stackful, cualquier función a cualquier profundidad puede suspender sin que el código que la llama se entere.
+Esto es radicalmente distinto a las corrutinas stackless de C++20. En el modelo stackless, cada función que quiere suspender tiene que ser una corrutina y cada nivel de la cadena de llamadas es una asignación de heap separada. Con fibras stackful, cualquier función a cualquier profundidad puede suspender sin que el código que la llama se entere.
 
 ```cpp
 // Con fibras stackful, puedes hacer esto sin modificar la librería:
