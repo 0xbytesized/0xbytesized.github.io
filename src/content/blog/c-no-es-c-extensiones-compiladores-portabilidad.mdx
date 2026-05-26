@@ -1,0 +1,153 @@
+---
+title: "C no es C: por qué el código real nunca es estándar"
+date: "2026-05-26T16:30"
+tags: ["c", "compiladores", "portabilidad", "gcc", "open-source"]
+excerpt: "El estándar ISO C es una ficción. Entre atributos de GCC, checks de versión y headers que asumen que eres clang, el C que compila de verdad nunca es portable."
+---
+
+Todo programador de C ha oído el mantra: "C es portable, escribe código estándar y funcionará en cualquier sitio". Es una de esas verdades que suenan muy bien en una charla de universidad, pero que se desmoronan en cuanto abres el primer header de sistema.
+
+El artículo ["On C extensions, portability, and alternative compilers"](https://lemon.rip/w/6-c-extensions-compilers/) del desarrollador de un compilador de C independiente (publicado el 24 de mayo en el blog lemon.rip, con 169 puntos y 87 comentarios en Hacker News) desmenuza esta realidad incómoda: el código C que realmente compila y funciona en producción está plagado de extensiones no estándar, checks de compilador y asunciones que harían llorar a Kernighan y Ritchie.
+
+No es un problema de malos programadores. Es que el ecosistema entero está construido sobre arenas movedizas.
+
+## glibc: bienvenido al mundo real
+
+Imagina que escribes tu propio compilador de C. Has implementado el estándar ISO C al pie de la letra. Todo orgulloso, compilas "hello world"... y truena.
+
+El problema es el primer `#include <stdio.h>`. Las cabeceras de glibc incluyen indirectamente `sys/cdefs.h`, un monstruo de preprocesador que decide qué extensiones están disponibles basándose en macros predefinidas del compilador.
+
+Aquí tienes un ejemplo real de lo que hace glibc:
+
+```c
+/* Fragmento real de sys/cdefs.h de glibc */
+#if !(defined __GNUC__ || defined __clang__ || defined __TINYC__)
+# define __attribute__(xyz) /* Ignorar */
+#endif
+```
+
+Traducción: si no eres GCC, clang o TCC, tus `__attribute__` valen cero. El problema es que algunas estructuras del sistema **dependen** de estos atributos para tener el layout correcto. Por ejemplo, `struct epoll_event` en Linux:
+
+```c
+/* De sys/epoll.h — necesita __attribute__((packed)) */
+struct epoll_event {
+    uint32_t     events;  /* Epoll events */
+    epoll_data_t data;    /* User data variable */
+} __attribute__((__packed__));
+```
+
+Sin `__attribute__((packed))`, el compilador puede insertar padding entre `events` y `data`. En arquitecturas de 64 bits, eso rompe la ABI. No es un capricho estético: si no implementas esta extensión de GCC, tu compilador no puede generar binarios compatibles con el kernel de Linux.
+
+El artículo menciona que incluso `limits.h` de glibc tiene una lógica retorcida: si detecta que eres GCC, usa `#include_next` (otra extensión no estándar) para incluir el `limits.h` interno del compilador; si no, intenta definir todas las constantes a mano. El resultado es un archivo de cabecera con más de 200 líneas de preprocesador condicional.
+
+## El desastre de `inline`
+
+Si hay un rincón de C donde el comité de estándares metió la pata y luego los compiladores la empeoraron, es la keyword `inline`.
+
+En C99, `inline` tiene semánticas muy específicas sobre cuándo y dónde se emite el símbolo externo. Pero GCC, antes de la versión 4.2, usaba sus propias reglas (modo `gnu89`). OpenBSD, en sus cabeceras de libc, declara funciones inline así:
+
+```c
+/* Cabeceras de OpenBSD — modo gnu89 asumido */
+__only_inline int sigemptyset(sigset_t *__set) {
+    *__set = 0;
+    return (0);
+}
+```
+
+Donde `__only_inline` se expande a diferentes cosas según la versión de GCC que detecte. Si no eres GCC, se convierte en `static`, lo cual **rompe el linkage** porque la función tiene una definición externa en la libc y ahora también una copia static en cada unidad de traducción.
+
+El artículo referencia el fichero `extern-inline.m4` de Gnulib, que contiene este fragmento digno de un thriller de terror:
+
+```c
+/* Fragmento de Gnulib — detección de inline */
+#if (((defined __APPLE__ && defined __MACH__)           \
+      || defined __DragonFly__ || defined __FreeBSD__)  \
+     && (defined HAVE___HEADER_INLINE                    \
+         ? (defined __cplusplus && defined __GNUC_STDC_INLINE__ \
+            && ! defined __clang__)                      \
+         : ((! defined _DONT_USE_CTYPE_INLINE_           \
+             && (defined __GNUC__ || defined __cplusplus)) \
+            || (defined _FORTIFY_SOURCE && 0 < _FORTIFY_SOURCE \
+                && defined __GNUC__ && ! defined __cplusplus))))
+# define _GL_EXTERN_INLINE_STDHEADER_BUG
+#endif
+```
+
+Esto no es una broma. Es código de producción que determina si tu sistema tiene un bug en las cabeceras estándar relacionado con `inline`. Gnulib tiene que hacer malabares entre Apple, DragonFly, FreeBSD, GCC, clang, C++, modos estándar y no estándar... todo por una keyword de 6 letras.
+
+## SDL y la adivinación de compiladores
+
+El artículo también menciona SDL (Simple DirectMedia Layer), una biblioteca usada por miles de juegos. Su cabecera `SDL_endian.h` contiene esta lógica para el byte-swapping:
+
+```
+┌─ ¿Eres GCC o clang Y tienes __builtin_bswapX?
+│   └─ Usa builtins. Rápido, portable entre GCC/clang.
+├─ ¿Eres MSVC ≥ v8.0?
+│   └─ Usa intrínsecos de Microsoft.
+├─ ¿Defines una macro ISA (__x86_64__, __arm__, etc.)?
+│   └─ Usa inline assembly. ¡Espera! ¿Y si no soportas
+│      la sintaxis de assembly extendido de GCC?
+└─ Ninguno de los anteriores:
+    └─ Fallback genérico con operaciones bit a bit.
+```
+
+El problema está en el tercer caso: si escribes un compilador para x86_64 que **no** es GCC ni clang, SDL asume que soportas la sintaxis de inline assembly de GCC (`__asm__ __volatile__` con constraints como `"=r"` y `"r"`). No hay un `__has_builtin` ni un feature test: es un chequeo de "¿qué compilador eres?" seguido de "pues usa lo que GCC usaría".
+
+## El truco de clang: fingir ser GCC
+
+Frente a este panorama, ¿cómo sobrevive un compilador nuevo? La respuesta de clang fue sencilla y pragmática: **mentir**.
+
+```c
+/* Lo que clang define internamente */
+#define __GNUC__            4
+#define __GNUC_MINOR__      2
+#define __GNUC_PATCHLEVEL__ 1
+```
+
+Clang le dice al mundo que es GCC 4.2.1. No porque lo sea, sino porque es la única forma de que el código existente —que comprueba `#ifdef __GNUC__` a mansalva— funcione sin parches.
+
+El problema, como señala el artículo, es que muchos proyectos ven `__GNUC__` definido y asumen que **todas** las extensiones de GCC están disponibles, sin molestarse en comprobar la versión. Si clang subiera su `__GNUC__` fingido a, digamos, 12, empezarían a aparecer fallos porque el código usaría extensiones que clang aún no ha implementado.
+
+Es un equilibrio precario: finge ser una versión lo suficientemente alta para que el código no te descarte, pero lo suficientemente baja para que no espere features que no tienes.
+
+## bionic: cuando el monopolio cambia de bando
+
+Hasta ahora parece que GCC es el rey indiscutible. Pero el artículo menciona un giro interesante: **bionic**, la libc de Android, asume que el compilador es clang.
+
+Sus cabeceras están llenas de extensiones específicas de clang como `_Nonnull` y `_Null_unspecified` (anotaciones de nulabilidad del sistema de análisis estático de clang). Si intentas compilar código de Android con GCC puro, te encuentras con errores de sintaxis en las propias cabeceras del sistema.
+
+El autor lo descubrió porque usa Termux en su teléfono Android como entorno de desarrollo nativo en aarch64. Un recordatorio de que el "monopolio" del compilador depende del ecosistema en el que te muevas.
+
+## Lo que los feature tests podrían arreglar
+
+El artículo no es solo una letanía de quejas. Propone una alternativa sensata: usar **macros de feature test** en lugar de checks de compilador.
+
+```c
+/* Así se hace ahora (mal) */
+#ifdef __GNUC__
+    #define PACKED __attribute__((__packed__))
+#elif defined(_MSC_VER)
+    #define PACKED __declspec(align(1)) /* aproximación */
+#else
+    #error "Compilador no soportado"
+#endif
+
+/* Así debería hacerse */
+#if __has_attribute(packed)
+    #define PACKED __attribute__((__packed__))
+#else
+    #error "Se necesita soporte para atributo packed"
+#endif
+```
+
+`__has_builtin`, `__has_feature`, `__has_attribute` e incluso macros estándar como `__STDC_NO_VLA__` permiten preguntar "¿soportas esta feature concreta?" en lugar de "¿qué compilador eres?". Esto abriría la puerta a compiladores independientes como **tcc**, **cproc**, **scc**, **vbcc**, **nwcc** o **kefir**, que el artículo menciona con admiración.
+
+## Mi veredicto
+
+El artículo de lemon.rip me parece una de esas lecturas obligatorias para cualquiera que toque C en serio. No por el morbo de ver código feo, sino porque explica **por qué** el ecosistema es como es.
+
+Hay quien ve este panorama y concluye que C está roto. Yo creo que es al revés: que C funcione a pesar de todo esto es un testimonio de su resiliencia. El estándar ISO da un suelo común, y las extensiones construyen puentes donde el estándar se queda corto. El problema no son las extensiones —es que las comprobamos preguntando "¿eres GCC?" en lugar de "¿sabes hacer X?".
+
+Los feature tests son el camino correcto. Pero migrar décadas de código que usa `#ifdef __GNUC__` como muleta universal es un trabajo titánico. Mientras tanto, clang seguirá fingiendo ser GCC 4.2.1, glibc seguirá usando `#include_next`, y los autores de compiladores independientes seguirán sufriendo en silencio.
+
+La gran lección: el C portable es un ideal asintótico. Te puedes acercar mucho, pero nunca llegar del todo. Y eso, curiosamente, es lo que lo mantiene interesante.
