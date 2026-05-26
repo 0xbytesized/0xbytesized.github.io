@@ -1,0 +1,149 @@
+---
+title: "Rosalind: genómica completa en 100 MB de RAM con Rust"
+date: "2026-05-26T22:00"
+tags: ["rust", "genómica", "bioinformática", "algoritmos", "rendimiento"]
+excerpt: "Un motor de genómica en Rust procesa genomas completos con menos de 100 MB de RAM. Adiós a los 64 GB y al cloud: Rosalind corre en portátiles de hospital."
+---
+
+Si alguna vez has tenido que alinear secuencias de ADN o llamar variantes genéticas en un entorno clínico real, sabes que el hardware es el primer cuello de botella. Las pipelines estándar —BWA, GATK y compañía— asumen que tienes 64 GB de RAM, discos NVMe y conectividad de centro de datos. En un hospital comarcal o en un laboratorio de campo con un portátil de 8 GB, esas herramientas simplemente no caben.
+
+**Rosalind** llega para cambiar eso. Es un motor de genómica escrito en Rust que procesa genomas humanos completos con menos de 100 MB de memoria de trabajo. Sí, 100 megas. Menos de lo que ocupa Chrome con tres pestañas abiertas.
+
+## La apuesta: de 64 GB a 100 MB sin perder precisión
+
+El titular es llamativo porque el salto es brutal. Una pipeline típica de alineamiento y calling de variantes para un genoma humano a 30× de cobertura necesita entre 50 y 100 GB de RAM. No es un problema de optimización pendiente: es que los algoritmos clásicos cargan copias completas de los archivos intermedios, índices y buffers de lecturas.
+
+Rosalind lo resuelve con una idea que suena casi a magia: divide el trabajo en √t bloques, donde t es el total de bases a procesar. Para un genoma humano a 30×, t ≈ 9.3×10¹⁰ bases, así que √t ≈ 305.000 posiciones activas en memoria. El resto se recalcula bajo demanda.
+
+El resultado: entre 30 y 80 MB de working set en una ejecución típica, con garantías de que el bound se mantiene incluso en el peor caso. Y todo esto sin sacrificar precisión: los resultados son bit a bit idénticos entre ejecuciones, independientemente del tamaño de bloque elegido.
+
+## Los cinco pilares del algoritmo
+
+La magia no es una sola idea, sino cinco piezas que encajan:
+
+### 1. Descomposición en bloques
+
+El trabajo se parte en bloques de tamaño √t. Solo un bloque reside en memoria en cada momento. Cuando necesitas resultados de un bloque anterior, lo recalculas desde el último checkpoint guardado. Esto es lo que los autores llaman _full-history equivalence_: el resultado es exactamente el mismo que si tuvieras toda la historia en RAM, pero sin tenerla.
+
+```rust
+// Conceptualmente, cada bloque se procesa de forma independiente
+// y solo se mantiene el resumen del anterior
+struct BlockProcessor {
+    current_block: Vec<u8>,         // ~√t posiciones activas
+    boundary_summary: BlockSummary,  // checkpoint del bloque anterior
+}
+
+impl BlockProcessor {
+    fn process_block(&mut self, block_data: &[Read]) -> BlockSummary {
+        // El bloque se alinea y analiza usando solo el estado local
+        let summary = self.align_and_analyze(block_data);
+        // El resumen se compacta antes de avanzar al siguiente bloque
+        self.boundary_summary = summary.compress();
+        summary
+    }
+}
+```
+
+### 2. Árboles comprimidos en altura
+
+Los resúmenes de cada bloque se fusionan mediante un árbol implícito de altura O(log √t). No se almacenan punteros: un DFS sin estado recorre el árbol usando solo 2 bits por nivel. Los nodos intermedios se recomputan al vuelo desde los hijos. Es una estructura de datos que apenas ocupa espacio pero permite recomponer el resultado global.
+
+### 3. FM-index por bloques con rank/select
+
+El índice FM (Burrows-Wheeler) es el corazón de cualquier alineador moderno. La novedad aquí es que Rosalind no construye el índice completo en memoria, sino que usa checkpoints por bloque con operaciones rank/select que solo necesitan O(√t) estado de trabajo.
+
+Para que te hagas una idea, un FM-index tradicional para el genoma humano ocupa entre 3 y 5 GB comprimido. Rosalind lo divide en fragmentos que caben en L1/L2.
+
+### 4. Pool de memoria compartida
+
+Todos los componentes —alineamiento, pileups, plugins— comparten una única región de memoria reutilizable. Esto evita la fragmentación del allocator y mantiene el bound estricto incluso cuando añades extensiones.
+
+```rust
+// La workspace pool es el mecanismo que garantiza el bound
+// global: todos los componentes asignan desde el mismo pool
+struct WorkspacePool {
+    buffer: Vec<u8>,
+    watermark: usize,
+}
+
+impl WorkspacePool {
+    fn allocate(&mut self, size: usize) -> &mut [u8] {
+        // Recicla espacio ya usado en lugar de pedir más al SO
+        let start = self.watermark;
+        self.watermark += size;
+        &mut self.buffer[start..self.watermark]
+    }
+
+    fn reset(&mut self) {
+        // Después de cada bloque, reiniciamos sin liberar
+        self.watermark = 0;
+    }
+}
+```
+
+### 5. Ledger de streaming con 2 bits por bloque
+
+Dos bits por bloque indican si está pendiente, en progreso o completado. Esto evita fusiones duplicadas y elimina la necesidad de almacenar árboles intermedios de dependencias.
+
+## Determinismo real: mismo input, mismos bits
+
+Una garantía poco habitual en pipelines bioinformáticas: Rosalind produce resultados **bit a bit idénticos** entre ejecuciones. En GATK o BWA, el orden de los hilos o el particionado de datos puede alterar los resultados. Aquí no: los tests de CI incluyen `cargo test --test determinism` que fallan si dos ejecuciones con los mismos inputs difieren en un solo byte.
+
+Esto es crítico en entornos clínicos. Si un hospital necesita auditar un diagnóstico, necesita saber que el pipeline que corrió en 2025 produce exactamente el mismo resultado en 2028. La invariabilidad de partición lo garantiza.
+
+## Lo que puedes hacer con Rosalind hoy
+
+El proyecto es funcional y tiene CLI, API Rust y bindings Python. Aquí un ejemplo real de alineamiento desde línea de comandos:
+
+```bash
+# Alinear lecturas FASTQ contra una referencia y emitir SAM
+cargo run --release -- align \
+  --reference ref.fa \
+  --reads reads.fastq \
+  --format sam \
+  --max-mismatches 2 > alineamientos.sam
+
+# Llamar variantes desde los alineamientos
+cargo run --release -- variants \
+  --reference ref.fa \
+  --alignments alineamientos.sam \
+  --mapq-threshold 10 \
+  --output variantes.vcf
+```
+
+Y desde Python, con los bindings via PyO3:
+
+```python
+from rosalind_py import PyGenomicEngine
+
+engine = PyGenomicEngine()
+
+# Coverage de una región específica
+depth = engine.run_rna_seq_plugin(
+    region_start=100_000,
+    region_end=101_000,
+    reads=[(100_020, "ACGTACGT"), (100_050, "TTTACGT")],
+    block_size=512,
+)
+print(f"Cobertura media: {sum(depth) / len(depth):.1f}x")
+```
+
+Los bindings son todavía básicos, pero la arquitectura de plugins permite extenderlos sin duplicar el estado de memoria. Cualquier análisis que implementes como `GenomicPlugin` hereda las mismas garantías de espacio.
+
+## ¿Qué sacrifica Rosalind a cambio?
+
+Ningún diseño es gratis. La recomputación de bloques para mantener el bound de memoria añade CPU. Si tienes un servidor con 256 GB de RAM, Rosalind probablemente será más lento que GATK para el mismo trabajo. La optimización no es para ti.
+
+El target es otro: entornos donde la RAM es el recurso escaso y no puedes —ni debes— subir datos de pacientes a la nube. Clínicas rurales, equipos de respuesta a brotes, aulas de universidad, laboratorios de campo. Ahí, que el pipeline quepa en 100 MB y corra en un portátil de 8 GB es la diferencia entre poder hacer genómica o no hacerla.
+
+## Mi opinión
+
+Lo que más me gusta de Rosalind es que es un proyecto con los pies en la tierra. No promete ser más rápido que GATK en un clúster de 256 núcleos. Sabe exactamente para qué escenario está diseñado y optimiza para ese escenario sin complejos.
+
+El enfoque algorítmico me recuerda a los trucos de la vieja escuela de sistemas embebidos, donde cada byte contaba. La idea de usar √t como tamaño de bloque no es nueva —aparece en teoría de algoritmos externos desde los 80—, pero aplicarla a genómica con garantías formales verificadas en CI es un ejercicio de ingeniería de primera.
+
+Rust como lenguaje es la elección natural aquí. El control sobre el layout de memoria, la ausencia de garbage collector y el sistema de ownership permiten implementar el pool de workspace compartido sin miedo a use-after-free. En Python o Java necesitarías bailar alrededor del GC, y en C++ tendrías que ser muy cuidadoso con los lifetimes. Rust te da ambas cosas: control y seguridad.
+
+El proyecto está en fase temprana —130 estrellas en GitHub, creado a finales de 2025— y aún le queda camino: soporte multi-contig, más plugins, documentación de las APIs internas. Pero la base algorítmica es sólida y los tests de regresión de espacio son una decisión de diseño que dice mucho del rigor del autor.
+
+Si trabajas en bioinformática o simplemente te gusta ver cómo se exprimen algoritmos hasta la última gota de memoria, merece la pena pasarse por el repositorio y leer el código. No todos los días ves una pipeline de genómica que quepa en menos RAM que un Electron app.
