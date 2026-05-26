@@ -5,7 +5,7 @@ tags: ["deepseek", "coding-agent", "terminal", "open-source", "typescript"]
 excerpt: "Un agente de código MIT para la terminal que convierte el prefix-cache de DeepSeek en una ventaja arquitectónica. 99.82% de acierto de caché en uso real."
 ---
 
-Hace un mes justo, un proyecto llamado Reasonix apareció en GitHub sin hacer mucho ruido. Hoy tiene 6.800 estrellas, 200 comentarios en Hacker News y una propuesta técnica que ningún otro agente de código ha intentado: diseñar todo el bucle alrededor del sistema de caché de un solo proveedor.
+Hace un mes justo, un proyecto llamado Reasonix apareció en GitHub sin hacer mucho ruido. Hoy tiene más de 9.500 estrellas, cientos de comentarios en Hacker News y una propuesta técnica que ningún otro agente de código ha intentado: diseñar todo el bucle alrededor del sistema de caché de un solo proveedor.
 
 No es un wrapper genérico tipo "conéctate a OpenAI, Anthropic o lo que tengas". Es un agente que eligió una trinchera y cavó hacia abajo.
 
@@ -132,7 +132,7 @@ Me gusta cuando un proyecto toma una decisión de arquitectura que suena a limit
 
 El diseño del bucle cache-first me parece la parte más interesante. No es un parche ni una optimización tardía: es la columna vertebral. Las tres regiones del contexto (prefijo inmutable, log append-only, scratch volátil) son una decisión de primer principio que la mayoría de frameworks ni siquiera consideran porque nacieron para otro modelo de precios.
 
-Las 6.800 estrellas en un mes dicen algo. No es hype de AI-du-jour; es ingeniería de la que se ensucia las manos con los bytes del prefijo, los fallos de parseo de tool calls y la compactación automática de contexto. Cosas que no salen en los títulos pero son las que determinan si un agente se usa todos los días o se abandona a la semana.
+Las más de 9.500 estrellas en un mes dicen algo. No es hype de AI-du-jour; es ingeniería de la que se ensucia las manos con los bytes del prefijo, los fallos de parseo de tool calls y la compactación automática de contexto. Cosas que no salen en los títulos pero son las que determinan si un agente se usa todos los días o se abandona a la semana.
 
 El proyecto está en fase temprana. El cliente de escritorio es prerelease, hay discusiones abiertas sobre el diseño del TUI y del dashboard, y la comunidad está construyendo activamente. Pero la base técnica es sólida y la dirección es clara.
 

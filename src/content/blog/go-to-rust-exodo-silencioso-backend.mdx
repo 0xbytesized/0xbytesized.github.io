@@ -5,7 +5,7 @@ tags: ["rust", "go", "backend", "migracion", "rendimiento"]
 excerpt: "Una guía de migración de Go a Rust incendia Hacker News. No por el código, sino por lo que revela sobre el agotamiento con Go cuando dejas de ser una startup."
 ---
 
-Hace unos días Matthias Endler, fundador de la consultora Rust Corrode, publicó una guía de migración de Go a Rust que ha acumulado 276 puntos y 265 comentarios en Hacker News. El título es descriptivo — «Migrating from Go to Rust» — pero el contenido es una bomba de relojería cuidadosamente envuelta en tabla tras tabla de equivalencias.
+Hace unos días Matthias Endler, fundador de la consultora Rust Corrode, publicó una guía de migración de Go a Rust que ha acumulado cientos de puntos y comentarios en Hacker News. El título es descriptivo — «Migrating from Go to Rust» — pero el contenido es una bomba de relojería cuidadosamente envuelta en tabla tras tabla de equivalencias.
 
 No es un artículo técnico más sobre «por qué Rust es mejor». Es un _mapa de salida_. Y eso es lo que lo hace tan interesante.
 
@@ -128,7 +128,7 @@ La parte más valiosa del artículo para cualquiera que esté considerando el sa
 
 **3. Strangler Fig tras un gateway.** Un API gateway enruta endpoints específicos al nuevo servicio Rust mientras el resto sigue en Go. El servicio nuevo «estrangula» al viejo hasta reemplazarlo.
 
-Victor Ciura, Principal Engineer en Microsoft, lo resumió bien: «no estamos reescribiendo todo en Rust por diversión. Hacemos elecciones tácticas: este componente nuevo, mejor lo hacemos en Rust.»
+En palabras de un ingeniero de Microsoft que ha participado en migraciones similares: «no estamos reescribiendo todo en Rust por diversión. Hacemos elecciones tácticas: este componente nuevo, mejor lo hacemos en Rust.»
 
 ## Mi veredicto
 
