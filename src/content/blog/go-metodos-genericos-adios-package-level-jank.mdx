@@ -1,0 +1,161 @@
+---
+title: "Go tendrá métodos genéricos: lo que la FAQ juró imposible"
+date: "2026-05-27T17:03"
+tags: ["go", "generics", "lenguajes", "tipos", "diseño-software"]
+excerpt: "Go 1.27 añadirá métodos genéricos en tipos concretos. Se acabaron las funciones sueltas a nivel de paquete para suplir lo que los métodos no podían hacer."
+---
+
+Cuando Go introdujo los genéricos en la versión 1.18, en marzo de 2022, hubo una omisión que sorprendió a más de uno: las funciones podían ser genéricas, pero los métodos no. Podías escribir `func Map[T, U any](s []T, f func(T) U) []U` sin problema, pero no podías declarar `func (c *Container[T]) Map[U any](f func(T) U) []U`. La FAQ oficial incluso sentenciaba: «no anticipamos que Go vaya a añadir métodos genéricos nunca».
+
+Pues bien, el 26 de mayo de 2026, la propuesta [#77273](https://github.com/golang/go/issues/77273) se cerró como **aceptada** con el milestone Go 1.27. La frase de la FAQ va a necesitar una actualización urgente.
+
+## El problema: ¿por qué no había métodos genéricos?
+
+La razón nunca fue técnica —o al menos no del todo—. Fue filosófica.
+
+El equipo de Go siempre vio los métodos como el mecanismo para implementar interfaces. Si un método concreto tiene parámetros de tipo, ¿debería existir una interfaz con un método equivalente? Y si es así, ¿cómo implementas el *dispatch* dinámico para un número potencialmente infinito de instanciaciones?
+
+La respuesta corta: no se podía. O al menos no de forma eficiente con el modelo de *structural typing* de Go, donde un tipo no declara explícitamente qué interfaces implementa.
+
+Así que la decisión original fue conservadora: **ni métodos genéricos ni métodos de interfaz genéricos**. El precio a pagar era un montón de funciones sueltas a nivel de paquete que existían solo porque no podías ponerlas donde conceptualmente pertenecían: como métodos del tipo que las usaba.
+
+## El cambio de perspectiva
+
+La propuesta da un giro conceptual importante:
+
+> Los métodos concretos son una característica del lenguaje útil por sí misma, independientemente de las interfaces.
+
+Si un método es, en esencia, una función con un receptor, entonces un **método genérico** no es más que una función genérica con un receptor. Punto. El hecho de que ese método no pueda invocarse a través de una interfaz es un aspecto ortogonal.
+
+Esto desacopla dos conceptos que siempre habían estado atados:
+
+- **Método concreto genérico** → permitido en Go 1.27
+- **Método de interfaz genérico** → sigue sin estar permitido
+
+Y el desacople tiene sentido: un método no solo sirve para implementar interfaces. Sirve para organizar código, para agrupar comportamiento junto a los datos y para permitir un encadenamiento natural (`x.Map(...).Filter(...).Reduce(...)` en lugar de `Reduce(Filter(Map(x, ...), ...), ...)`).
+
+## Sintaxis: menos cambios de los que parece
+
+La modificación en la gramática es mínima. La declaración de método pasa de:
+
+```ebnf
+MethodDecl = "func" Receiver MethodName Signature [ FunctionBody ] .
+```
+
+A:
+
+```ebnf
+MethodDecl = "func" Receiver MethodName [ TypeParameters ] Signature [ FunctionBody ] .
+```
+
+O, expresado de forma más elegante: una declaración de método **es** una declaración de función con receptor:
+
+```ebnf
+FunctionDecl = "func" [ Receiver ] identifier [ TypeParameters ] Signature [ FunctionBody ] .
+```
+
+En la práctica, esto significa que podrás escribir cosas como:
+
+```go
+type Set[T comparable] struct {
+    m map[T]struct{}
+}
+
+// Antes: esto no compilaba. Tenías que hacer una función package-level.
+func (s *Set[T]) Contains[U comparable](items ...U) map[U]bool {
+    result := make(map[U]bool, len(items))
+    for _, item := range items {
+        _, result[item] = s.m[item] // U debe ser convertible a T... con restricciones adecuadas
+    }
+    return result
+}
+```
+
+Para la llamada, la inferencia de tipos funciona exactamente igual que con las funciones genéricas:
+
+```go
+s := NewSet[int](1, 2, 3)
+// Sin type args explícitos si el compilador infiere U
+present := s.Contains(1, 4, 5)
+// O con type args explícitos si hace falta
+present := s.Contains[int](1, 4, 5)
+```
+
+Ojo: el ejemplo anterior tiene una sutileza. `Contains` usa `U` como tipo del slice de entrada y como clave del mapa de resultado, pero internamente accede a `s.m[item]`, donde `s.m` es `map[T]struct{}`. Para que compile, necesitarías que `U` sea asignable a `T`. En la práctica, usarías constraint `U comparable` y harías un type assertion o un conversion check. Pero la idea general es válida.
+
+## Dónde brilla esto de verdad
+
+El ejemplo canónico que aparece en la discusión de la propuesta es `math/rand/v2.Rand`. Esta struct tiene montones de métodos para generar valores aleatorios (`Int`, `Float64`, etc.), pero no puede tener un equivalente genérico del helper `rand.N[T]` que existe como función a nivel de paquete:
+
+```go
+// ESTO existe hoy como función package-level:
+func N[T int | float64](n T) T { ... }
+
+// ESTO no existe porque los métodos no pueden ser genéricos:
+func (r *Rand) N[T int | float64](n T) T { ... }
+```
+
+Con la propuesta aceptada, podrás escribir `r.N[float64](100)` en lugar de `rand.N[float64](100)` y mantener el generador de números aleatorios como receptor, lo que es conceptualmente más limpio y facilita el testing con generadores mock.
+
+Otro caso común: builders y tipos contenedor:
+
+```go
+type QueryBuilder struct {
+    table  string
+    wheres []string
+}
+
+func (qb *QueryBuilder) Where(cond string) *QueryBuilder {
+    qb.wheres = append(qb.wheres, cond)
+    return qb
+}
+
+// Con métodos genéricos, puedes tipar la salida sin perder el receiver:
+func (qb *QueryBuilder) Collect[T any](scan func(rows *sql.Rows) (T, error)) ([]T, error) {
+    // ejecutar query, iterar rows, aplicar scan
+}
+```
+
+El método `Collect` es genérico sobre `T` pero opera sobre los datos concretos del builder (`table`, `wheres`). Hoy tendrías que hacer una función package-level que reciba el builder como primer argumento, rompiendo el *fluent interface*.
+
+## Lo que NO cambia
+
+Tres cosas importantes que **no** llegan con esto:
+
+1. **Las interfaces no aceptan métodos genéricos.** Un `type Transformer interface { Map[U any](func(T) U) }` sigue sin ser válido. La propuesta es explícita: los métodos de interfaz no se tocan. Si tienes un método genérico en tu tipo concreto, no cuenta para satisfacer ninguna interfaz.
+
+2. **No hay dispatch dinámico para métodos genéricos.** Por el mismo motivo: como las interfaces no pueden declararlos, no hay forma de llamar a un método genérico a través de una interfaz.
+
+3. **Reflection no los ve.** Igual que `reflect` no puede acceder a funciones genéricas sin instanciar, los métodos genéricos sin instanciar son invisibles para el paquete `reflect`.
+
+En resumen: los métodos genéricos son **azúcar sintáctico con esteroides**. No cambian el modelo de tipos de Go, no añaden polimorfismo de orden superior y no complican el runtime. Solo eliminan la fricción de tener que sacar funciones fuera de su tipo solo porque necesitan un parámetro de tipo adicional.
+
+## La comunidad, dividida
+
+La discusión en Hacker News refleja la eterna tensión dentro de la comunidad de Go. Por un lado, comentarios como:
+
+> «Esto resuelve un vacío enorme en los genéricos para quienes venimos de otros lenguajes.» — reactordev
+
+> «La cantidad de veces que he tenido que hacer APIs de paquete raras para que la API fuera razonable es más de las que puedo contar.» — mackross
+
+> «Voy a reescribir algunas de mis librerías.» — samber
+
+Y por otro, la resistencia predecible:
+
+> «Perseguir un vacío percibido entre las características del lenguaje y las expectativas de los usuarios ha sido y sigue siendo el mayor error en el liderazgo de Go.» — binary132
+
+> «Un día triste para Go. Los PhD han ganado, la simplicidad ha muerto.» — throwpikerob
+
+No es la primera vez que Go añade una feature que «nunca» iba a tener. Los genéricos mismos se resistieron durante una década. El lema era «simplicidad ante todo», pero la presión de una comunidad que crecía y venía de lenguajes donde los genéricos son pan de cada día acabó inclinando la balanza.
+
+## Mi opinión
+
+Go nunca ha sido un lenguaje para puristas del diseño de tipos. Es un lenguaje para gente que quiere enviar binarios estáticos a producción sin dramas. Y en ese contexto, los métodos genéricos son una adición pragmática.
+
+No añaden complejidad al runtime. No introducen un nuevo sistema de tipos. No obligan a nadie a usarlos. Simplemente eliminan una restricción artificial que obligaba a separar función y receptor cuando la operación necesitaba un parámetro de tipo adicional.
+
+¿Es un paso más hacia la «javificación» de Go? Puede ser. Pero también es un paso hacia una API más expresiva sin sacrificar lo que hace a Go distinto: compilación rápida, binarios pequeños y una curva de aprendizaje que no requiere un máster en teoría de tipos.
+
+La clave está en que el equipo de Go ha sido quirúrgico: métodos concretos sí, métodos de interfaz no. Eso mantiene el *structural typing* intacto y evita el agujero de complejidad que habría supuesto el dispatch dinámico sobre métodos genéricos.
+
+Si tuviera que apostar, diría que en dos años miraremos atrás y nos parecerá raro que esto no existiera desde Go 1.18.
