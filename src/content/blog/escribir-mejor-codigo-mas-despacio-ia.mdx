@@ -25,43 +25,9 @@ El resultado es contundente: montones de bugs reales, casi cero falsos positivos
 
 La clave está en la **independencia de contexto**. Cada modelo revisa el PR sin ver los resultados de los demás. Esto evita el sesgo de anclaje: si Claude dice que la línea 42 tiene un bug, Codex tenderá a mirar esa misma línea con lupa y confirmar el sesgo. Al aislarlos, cada uno encuentra problemas distintos.
 
-Veamos cómo se podría orquestar esto con un script sencillo:
+El patrón es simple pero potente: lanzas tres modelos en paralelo, cada uno con el mismo prompt de revisión pero sin acceso a los resultados de los demás. Cuando terminan, un cuarto pase consolida los hallazgos, elimina duplicados y pondera los bugs detectados por más de un revisor.
 
-```bash
-#!/usr/bin/env bash
-# review-pr.sh — lanza 3 revisores independientes y consolida resultados
-
-PR_DIFF=$(git diff origin/main...HEAD)
-REVIEWERS=("claude" "codex" "cursor-bugbot")
-RESULTS_DIR="./review-results"
-mkdir -p "$RESULTS_DIR"
-
-for reviewer in "${REVIEWERS[@]}"; do
-  echo "Lanzando $reviewer..."
-  # Cada revisor recibe el mismo diff, sin ver resultados de otros
-  echo "$PR_DIFF" | agent "$reviewer" \
-    --prompt "Review this PR diff. Find bugs ranked as critical/high/medium/low.
-              Check for: security issues, correctness errors, off-by-one,
-              missing error handling, race conditions, and SQL injection.
-              For each bug, include file path, line number, and severity." \
-    > "$RESULTS_DIR/${reviewer}.md" &
-done
-
-wait
-
-echo "Consolidando resultados..."
-# Un cuarto pase cruza los hallazgos y elimina duplicados
-cat "$RESULTS_DIR"/*.md | agent claude \
-  --prompt "Cross-reference these bug reports. Remove duplicates.
-            For bugs found by 2+ reviewers, increase confidence.
-            Flag anything that looks like a false positive.
-            Output a final report sorted by severity." \
-  > REVIEW-REPORT.md
-
-echo "Informe generado en REVIEW-REPORT.md"
-```
-
-El patrón es simple pero potente: paralelismo, aislamiento de contexto y consolidación por separado. Lo interesante es que no necesitas modelos de élite para que funcione. Lawson menciona que incluso modelos públicos recientes de Anthropic y OpenAI son suficientes.
+Lawson usa Claude, Codex y Cursor Bugbot como sus tres revisores, pero la técnica funciona con cualquier combinación de modelos. Lo interesante es que no necesitas modelos de élite para que funcione: el propio Lawson menciona que incluso los modelos públicos recientes de Anthropic y OpenAI son suficientes.
 
 ## Deduplicación inteligente de hallazgos
 
