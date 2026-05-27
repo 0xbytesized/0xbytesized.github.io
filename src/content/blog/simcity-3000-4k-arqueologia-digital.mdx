@@ -1,0 +1,146 @@
+---
+title: "SimCity 3000 a 4K: arqueología digital que resucita clásicos"
+date: "2026-05-27T23:15"
+tags: ["reverse-engineering", "videojuegos", "windows", "preservacion-software", "dll-patching"]
+excerpt: "Un ingeniero resucita SimCity 3000 a 4K parcheando EXEs, wrappers D3D y cabeceras PE. La arqueología del software es un arte que merecemos preservar."
+---
+
+Hace unos días, un artículo de un ingeniero llamado Thran llegó a la portada de Hacker News con 239 puntos y 83 comentarios. El título era modesto: "SimCity 3k in 4k". El contenido era una clase magistral de arqueología digital aplicada.
+
+SimCity 3000 salió en 1999. Para ponerlo en contexto: Windows 98 era el rey, las tarjetas gráficas llevaban 32 MB de VRAM si tenías suerte y los monitores CRT mostraban 1024x768 como resolución premium. Hoy Thran lo ejecuta en un Ryzen 5 3600 con una Radeon RX 7600 y 48 GB de RAM, a 3840x2160 nativos.
+
+El artículo no es un tutorial de instalar-y-ya-está. Es un recordatorio de que el software viejo no muere: simplemente necesita que alguien le eche un rato.
+
+## Los seis problemas (y sus seis parches)
+
+Thran enumeró seis obstáculos al instalar desde su CD original de la Scholastic Edition — sí, el que compró en una feria escolar en un edificio que ya no existe — y los resolvió uno a uno:
+
+1. **Sin soporte widescreen** → EXE parcheado por GOG.com con soporte de resoluciones modernas.
+2. **Aceleración del ratón demencial** → Un valor mágico en `SC3U.ini`: `ScrollMarginFactor = 0.005787`.
+3. **Gráficos torcidos en resoluciones múltiplos de 8** → Un wrapper Direct3D 9 (dxwrapper) que redirige las llamadas a DirectX 11+.
+4. **Tiles fantasma al hacer scroll** → El parche de 4GB que modifica la cabecera PE del ejecutable.
+5. **Ralentización al abrir el juego** → Un `UpdateSettings.ini` que mata el auto-updater que intenta conectar con un servidor muerto hace 15 años.
+6. **Música ausente** → Copiar los `.xa` del CD y un parche para el fichero de configuración de audio.
+
+Cada uno de estos pasos es una técnica que se repite en docenas de proyectos de preservación. Son patrones. Vamos a destripar los tres más interesantes desde el punto de vista del código.
+
+## El parche de los 4GB: destripando una cabecera PE
+
+El ejecutable original de SimCity 3000 es de 32 bits. En Windows, un proceso de 32 bits tiene 4 GB de espacio de direcciones virtuales, pero por defecto solo puede usar 2 GB. El resto se reserva para el kernel. El flag `IMAGE_FILE_LARGE_ADDRESS_AWARE` le dice al sistema: "dame los 4 GB enteros".
+
+El parche de 4GB que usa Thran (de NTCore) modifica ese bit en la cabecera PE. Aquí va una implementación mínima en Python que hace exactamente lo mismo:
+
+```python
+import struct
+import sys
+
+def patch_large_address_aware(exe_path: str) -> bool:
+    with open(exe_path, "r+b") as f:
+        # Leer el offset e_lfanew (últimos 4 bytes del DOS header, offset 0x3C)
+        f.seek(0x3C)
+        pe_offset = struct.unpack("<I", f.read(4))[0]
+
+        # Verificar la firma PE ("PE\0\0")
+        f.seek(pe_offset)
+        signature = f.read(4)
+        if signature != b"PE\x00\x00":
+            return False
+
+        # El campo Characteristics está en el FileHeader,
+        # a 0x16 bytes del inicio de la firma PE
+        characteristics_offset = pe_offset + 4 + 0x12
+        f.seek(characteristics_offset)
+        characteristics = struct.unpack("<H", f.read(2))[0]
+
+        # IMAGE_FILE_LARGE_ADDRESS_AWARE = 0x0020
+        if characteristics & 0x0020:
+            print("El flag LARGE_ADDRESS_AWARE ya está activo.")
+            return True
+
+        characteristics |= 0x0020
+        f.seek(characteristics_offset)
+        f.write(struct.pack("<H", characteristics))
+        return True
+
+if __name__ == "__main__":
+    if patch_large_address_aware(sys.argv[1]):
+        print("Parche aplicado correctamente.")
+    else:
+        print("No se encontró la firma PE. ¿Es un ejecutable válido?")
+```
+
+Este script abre el ejecutable en modo lectura/escritura binaria, navega hasta el offset correcto y activa un solo bit en el campo `Characteristics` del _file header_. Con eso, el juego puede direccionar más memoria, las texturas y tiles se cachean mejor y el scroll deja de mostrar cubos pálidos.
+
+La gracia está en que el formato PE no ha cambiado sustancialmente desde Windows NT. La misma estructura de cabeceras lleva décadas funcionando. Parchear un ejecutable de 1999 con conocimiento de 2026 es posible porque Microsoft se tomó en serio la retrocompatibilidad.
+
+## El wrapper D3D: cuando el hardware moderno no entiende a tu juego
+
+El tercer problema es el más esotérico. SimCity 3000 usa Direct3D 9. Las gráficas modernas ejecutan DirectX 11, 12 o Vulkan. El driver traduce llamadas de D3D9, pero introduce artefactos visuales, sobre todo en resoluciones no estándar para la época.
+
+La solución que usa Thran es `dxwrapper`, un proyecto de PCGamingWiki que se coloca entre el juego y la API gráfica. El mecanismo es un clásico del reverse engineering: un archivo DLL con el mismo nombre que la DLL del sistema (`d3d9.dll`) colocado en el directorio del juego. Windows, por diseño, busca DLLs primero en el directorio del ejecutable antes que en `System32`.
+
+Así funciona conceptualmente:
+
+```c
+// dxwrapper: un proxy DLL simplificado (conceptual)
+// Se compila como d3d9.dll y se coloca en la carpeta del juego
+
+#include <windows.h>
+#include <d3d9.h>
+
+// Punteros a la DLL real del sistema
+static HMODULE real_d3d9 = NULL;
+typedef IDirect3D9* (WINAPI *Direct3DCreate9_t)(UINT);
+static Direct3DCreate9_t Real_Direct3DCreate9 = NULL;
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        // Cargar la d3d9.dll real desde System32
+        char sys_path[MAX_PATH];
+        GetSystemDirectoryA(sys_path, MAX_PATH);
+        strcat_s(sys_path, MAX_PATH, "\\d3d9.dll");
+        real_d3d9 = LoadLibraryA(sys_path);
+
+        if (real_d3d9) {
+            Real_Direct3DCreate9 = (Direct3DCreate9_t)
+                GetProcAddress(real_d3d9, "Direct3DCreate9");
+        }
+    }
+    return TRUE;
+}
+
+// Nuestra versión de Direct3DCreate9 que el juego llamará
+IDirect3D9* WINAPI Direct3DCreate9(UINT sdk_version) {
+    IDirect3D9* real = Real_Direct3DCreate9(sdk_version);
+    // Aquí se aplican parches: forzar VSync, ajustar backbuffer,
+    // redirigir a true fullscreen, etc.
+    return real;
+}
+```
+
+El truco es elegante: el juego no sabe que está hablando con un intermediario. La DLL proxy recibe las llamadas, aplica correcciones y las reenvía a la DLL real del sistema. Es la misma técnica que usan los mods de gráficos, los injectores de overlays y — en el lado oscuro — algunos rootkits.
+
+## INI archeology: depurando con el bloc de notas
+
+El cuarto parche es menos glamuroso pero igual de importante. El auto-updater de SimCity 3000 intenta conectar con un servidor de Maxis que lleva apagado desde que Electronic Arts reestructuró el estudio. El juego se congela durante segundos esperando un timeout de red.
+
+La solución es un archivo `UpdateSettings.ini` que desactiva el updater. Thran usó un archivo proporcionado por un usuario de Simtropolis. La configuración tiene esta pinta:
+
+```ini
+[Update]
+CheckForUpdates=0
+UpdateURL=
+LastCheck=0
+```
+
+El patrón es universal: software antiguo que llama a endpoints muertos, espera timeouts de red y degrada la experiencia. He visto lo mismo en editores de texto, herramientas CLI y hasta en firmware de impresoras. A veces cambiar un `1` por un `0` en un archivo de configuración es todo lo que separa un programa usable de uno roto.
+
+## Mi veredicto
+
+El artículo de Thran me parece importante no por SimCity 3000 en sí, sino por lo que representa. Hay una generación de software — juegos, herramientas, sistemas operativos — que está atrapada entre medios físicos que se degradan y sistemas operativos que evolucionan. Sin gente que dedique tardes a parchear ejecutables y escribir wrappers, ese patrimonio digital se pierde.
+
+Lo que hace Thran no es solo jugar a un juego viejo. Es documentar un proceso. Cada paso que documenta — el EXE de GOG, el wrapper D3D, el parche de 4GB — es reproducible. Otro ingeniero en 2036 podrá seguir el mismo camino, o adaptarlo a lo que exista entonces.
+
+Hay una lección más amplia para quienes escribimos software hoy: lo que construyes ahora será el "software antiguo" de alguien dentro de 25 años. La retrocompatibilidad no es un capricho de Microsoft: es una decisión de diseño que permite que un binario compilado para Windows 98 siga ejecutándose en Windows 11. Pocas industrias tecnológicas respetan tanto su propio legado.
+
+Mientras tanto, yo me quedo con la imagen de Thran construyendo las Torres Gemelas sin hospitales ni bomberos en su ciudad simulada a 4K, tentando al destino. Porque al final, de eso va esto: de divertirse resucitando cosas que otros dieron por muertas.
