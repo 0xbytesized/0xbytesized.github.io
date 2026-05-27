@@ -1,0 +1,157 @@
+---
+title: "Cloudflare Flagship: feature flags que viven en el edge"
+date: "2026-05-27T04:45"
+tags: ["cloudflare", "workers", "feature-flags", "openfeature", "edge-computing"]
+excerpt: "Cloudflare lanza Flagship, feature flags que se evalúan dentro del Worker sin HTTP. Nativo en Workers y compatible con OpenFeature."
+---
+
+Llevo años viendo a equipos montar feature flags con tres servicios distintos: uno para el backend, otro para el frontend y un tercero para el edge. Cada uno con su SDK, su latencia de red y su factura mensual. LaunchDarkly cobra por asiento. Statsig te factura por evento. Y mientras tanto, tu Worker de Cloudflare hace un `fetch` a un endpoint externo para preguntar si debe mostrar el botón azul o el rojo.
+
+**Cloudflare Flagship** llega para cortar ese sinsentido de raíz.
+
+Flagship es el nuevo servicio de feature flags de Cloudflare. La diferencia clave con cualquier otra solución del mercado es dónde se evalúa el flag: dentro de tu Worker, sin HTTP, sin round-trips, sin latencia añadida. El flag viaja como configuración interna de la plataforma y se resuelve en el mismo proceso que tu código.
+
+## Cómo funciona: un binding, cero HTTP
+
+La integración es brutalmente simple. Añades un binding en tu `wrangler.jsonc` y el flag aparece como una variable local en `env`:
+
+```jsonc
+{
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "abc123-def456"
+    }
+  ]
+}
+```
+
+Dentro del Worker, usas métodos tipados que nunca lanzan excepciones. Si algo falla —red, configuración, flag inexistente— recibes el valor por defecto que tú mismo defines:
+
+```typescript
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const showNewUI = await env.FLAGS.getBooleanValue(
+      "new-dashboard",
+      false,
+      { userId: "user-42", country: "ES" }
+    );
+
+    return new Response(
+      showNewUI ? "Nuevo dashboard" : "Dashboard clásico"
+    );
+  },
+};
+```
+
+El tercer argumento es el contexto de evaluación: pares clave-valor que Flagship usa para decidir qué variación devolver. Puedes pasar `userId`, `country`, `plan`, `team` o cualquier atributo que hayas definido en las reglas de targeting. Flagship evalúa el flag contra ese contexto sin salir del Worker.
+
+Esto cambia la latencia de «lo que tarde un fetch externo» a «lo que tarde una lectura de memoria». En edge computing, donde cada milisegundo cuenta, la diferencia es abismal.
+
+## Cuatro tipos, no solo booleanos
+
+Los feature flags booleanos son el 80% de los casos de uso, pero Flagship no se queda ahí. Soporta cuatro tipos nativos:
+
+```typescript
+// String: variantes de algoritmo o versión de UI
+const variant = await env.FLAGS.getStringValue(
+  "checkout-flow", "v1",
+  { userId: "user-42" }
+);
+
+// Number: límites, timeouts, thresholds
+const maxRetries = await env.FLAGS.getNumberValue(
+  "max-retries", 3,
+  { plan: "enterprise" }
+);
+
+// Object: bloques de configuración enteros como un solo flag
+interface ThemeConfig {
+  primaryColor: string;
+  fontSize: number;
+}
+const theme = await env.FLAGS.getObjectValue<ThemeConfig>(
+  "theme-config",
+  { primaryColor: "#000", fontSize: 14 },
+  { userId: "user-42" }
+);
+```
+
+El método `getObjectValue<T>` es particularmente potente. Te permite empaquetar configuraciones complejas en un solo flag y cambiarlas desde el dashboard sin tocar código. Imagina modificar los colores, fuentes y layout de una página entera activando un flag en producción. No es un toggle: es un sistema de configuración remota con tipos.
+
+## Rollouts progresivos con hashing consistente
+
+Los rollouts porcentuales usan hashing consistente sobre un atributo configurable —por defecto `targetingKey`— para garantizar que el mismo usuario vea siempre la misma variación.
+
+Esto significa que puedes activar una feature para el 10% de tus usuarios, monitorizar métricas durante una hora y subir al 50% sin que nadie experimente el efecto «parpadeo» de ver dos versiones distintas en recargas sucesivas.
+
+Si no proporcionas `targetingKey` ni configuras un atributo de bucketing alternativo, Flagship asigna el bucket aleatoriamente en cada evaluación —y pierdes la consistencia. Es un detalle de implementación que la documentación deja claro de forma explícita, algo que agradezco porque otros servicios lo esconden en letra pequeña.
+
+## OpenFeature: el estándar que faltaba
+
+Cloudflare ha hecho algo inteligente aquí: en lugar de inventar su propia API propietaria, Flagship implementa el proveedor de [OpenFeature](https://openfeature.dev/), el estándar de la CNCF para feature flags.
+
+Esto tiene dos implicaciones prácticas enormes.
+
+Primero, **portabilidad real**. Si dentro de dos años quieres migrar de Flagship a otro proveedor, tu código de evaluación no cambia. Cambias el provider en la configuración y todo lo demás —`getBooleanValue`, `getStringValue`, `getObjectValue`— sigue funcionando igual. OpenFeature desacopla la interfaz de evaluación de la implementación del backend.
+
+Segundo, **un solo SDK para todo**. El paquete `@cloudflare/flagship` funciona en Workers, Node.js y navegador. El provider de servidor (`FlagshipServerProvider`) puede usar el binding de Workers para cero latencia o un API token para entornos externos. El provider de cliente (`FlagshipClientProvider`) precarga los flags en el navegador y evalúa síncronamente desde caché.
+
+```typescript
+import { OpenFeature } from "@openfeature/server-sdk";
+import { FlagshipServerProvider } from "@cloudflare/flagship";
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    await OpenFeature.setProviderAndWait(
+      new FlagshipServerProvider({ binding: env.FLAGS })
+    );
+
+    const client = OpenFeature.getClient();
+
+    const showNewUI = await client.getBooleanValue(
+      "new-dashboard", false,
+      { targetingKey: "user-42" }
+    );
+
+    return new Response(showNewUI ? "Nuevo dashboard" : "Dashboard clásico");
+  },
+};
+```
+
+El mismo `client.getBooleanValue` funciona igual si mañana cambias a un provider de LaunchDarkly o Split. Es exactamente el tipo de abstracción que queremos en infraestructura: cambias la implementación sin tocar el código de negocio.
+
+## Los detalles que marcan la diferencia
+
+Hay dos métodos que delatan que quien diseñó esto ha operado feature flags en producción: los `*Details`.
+
+Cuando un flag falla —error de tipo, flag no encontrado, timeout— los métodos normales devuelven silenciosamente el valor por defecto. Pero en depuración necesitas saber _por qué_. Para eso existen `getBooleanDetails`, `getStringDetails`, `getNumberDetails` y `getObjectDetails`:
+
+```typescript
+const details = await env.FLAGS.getStringDetails(
+  "checkout-flow", "v1",
+  { userId: "user-42" }
+);
+
+console.log(details.value);   // "v2"
+console.log(details.variant); // "new"
+console.log(details.reason);  // "TARGETING_MATCH"
+```
+
+Si hay un error, `details.errorCode` te dice si fue `TYPE_MISMATCH` (llamaste a `getBooleanValue` sobre un flag de tipo string) o `GENERAL` (fallo de red, flag inexistente). En localhost esto es un lujo; en producción, con un usuario reportando un comportamiento extraño, es la diferencia entre diagnosticar en segundos o pasarte una tarde entera persiguiendo fantasmas.
+
+## Mi veredicto
+
+Cloudflare está ejecutando una estrategia que me parece acertadísima: absorber servicios que tradicionalmente vivían fuera de su plataforma y meterlos dentro del edge. Ya lo hizo con KV (Redis), D1 (SQLite), R2 (S3), Queues (SQS) y Durable Objects (actores con estado). Flagship es el siguiente paso lógico: el feature flag como primitiva de plataforma, no como SaaS externo.
+
+¿La parte que menos me gusta? La seguridad del token en el provider de cliente. La documentación advierte explícitamente de que el API token para el client-side provider no tiene scope por app, así que quien tenga ese token puede evaluar flags de todas tus apps. En una SPA pública, esto es un vector de ataque no trivial. Cloudflare lo documenta, pero la solución adecuada —tokens scopeados por app— no existe todavía.
+
+Dicho esto, para equipos que ya viven en Cloudflare Workers, Flagship es la opción más natural. Cero latencia, tipado fuerte, OpenFeature-compatible y sin factura de terceros. Si estás montando feature flags desde cero o harto de pagar por eventos que se podrían resolver en el edge, merece la pena probarlo.
+
+**Puntos clave:**
+- Evaluación dentro del Worker, sin HTTP externo
+- Cuatro tipos: boolean, string, number, object
+- Rollouts porcentuales con hashing consistente
+- OpenFeature-compatible (CNCF)
+- SDK para Workers, Node.js y navegador
+- Métodos `*Details` para debugging en producción
