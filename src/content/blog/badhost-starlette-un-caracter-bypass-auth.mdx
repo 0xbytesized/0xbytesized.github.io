@@ -1,0 +1,199 @@
+---
+title: "BadHost: un solo carácter para saltarse la auth en Starlette"
+date: "2026-05-27T10:00"
+tags: ["python", "security", "starlette", "fastapi", "cve"]
+excerpt: "CVE-2026-48710: un solo carácter en el header Host basta para saltarse la autenticación en Starlette. FastAPI, vLLM y miles de proyectos afectados."
+---
+
+El 26 de mayo de 2026, OSTIF y X41-Dsec hicieron pública una vulnerabilidad en Starlette que llevaba años pasando desapercibida. La han bautizado como **BadHost** y, aunque el CVSS le da un 6.5 (MEDIUM), el impacto real es mucho más grave: un solo carácter en el header `Host` basta para saltarse cualquier middleware de autenticación basado en rutas. Y como Starlette es la base de FastAPI, LiteLLM, vLLM y prácticamente todo el ecosistema de inferencia LLM en Python, la superficie de ataque es enorme.
+
+## El problema: cuando reensamblar una URL te la juega
+
+Starlette reconstruye `request.url` tomando el header `Host` de la petición HTTP, concatenándolo con el path real y reparseando el resultado. Hasta aquí todo normal. El problema es que, antes de la versión 1.0.1, **el valor del header Host no se validaba contra ningún formato**.
+
+Esto significa que un atacante puede meter caracteres como `/`, `?`, `#` o `@` dentro del header `Host` y el parser de URLs (el `urlsplit` de Python) interpretará esos caracteres como delimitadores, cambiando por completo la estructura de la URL reconstruida.
+
+La clave está en el desacoplamiento entre dos componentes:
+
+- El **router** despacha la petición usando el path real que llega por el wire (`scope["path"]`).
+- El **middleware** ve `request.url.path`, que se reconstruye a partir del header `Host`.
+
+Si el header `Host` está manipulado, el router ejecuta el endpoint real mientras el middleware cree que está viendo otra ruta distinta.
+
+## Cómo se explota: un PoC mínimo
+
+La prueba de concepto más simple cabe en una línea de curl:
+
+```bash
+# Petición normal → el middleware la bloquea
+curl -i -H 'Host: ejemplo.com' http://target/admin
+# HTTP/1.1 403 Forbidden
+
+# Misma petición con un '?' en el Host → el middleware no la ve
+curl -i -H 'Host: ejemplo.com?' http://target/admin
+# HTTP/1.1 200 OK
+```
+
+¿Qué ha pasado? Al añadir `?` al Host, `urlsplit` interpreta que el path termina antes del `?` y todo lo que viene después es la query string. El path reconstruido es `/` en lugar de `/admin`, el middleware de autenticación ve una ruta pública y deja pasar la petición. Pero el router ya había decidido ejecutar `/admin` basándose en el path real.
+
+Otros caracteres que producen el mismo efecto:
+
+```bash
+# Con '/' en el Host, el path se desplaza
+curl -i -H 'Host: ejemplo.com/public?' http://target/admin
+
+# Con '#' la parte del fragmento se descarta
+curl -i -H 'Host: ejemplo.com#' http://target/admin
+
+# Con '@' el parser lo interpreta como userinfo
+curl -i -H 'Host: admin@ejemplo.com' http://target/admin
+```
+
+## Simulando el fallo en código
+
+Vamos a reproducir lo que ocurre dentro de Starlette para entender el mecanismo. Este código imita la reconstrucción de la URL que hacían las versiones vulnerables:
+
+```python
+from urllib.parse import urlsplit
+
+def simular_url_vulnerable(host_header: str, path: str) -> dict:
+    """Simula cómo Starlette < 1.0.1 reconstruía request.url."""
+    scheme = "http"
+    url = f"{scheme}://{host_header}{path}"
+    partes = urlsplit(url)
+    return {
+        "url_completa": url,
+        "path_reconstruido": partes.path,
+        "path_real": path,
+        "bypass": partes.path != path,
+    }
+
+# Host legítimo
+print(simular_url_vulnerable("ejemplo.com", "/admin"))
+# path_reconstruido = '/admin', bypass = False
+
+# Host manipulado con '?'
+print(simular_url_vulnerable("ejemplo.com?", "/admin"))
+# path_reconstruido = '/', bypass = True ← el middleware ve '/' en vez de '/admin'
+
+# Host manipulado con '/'
+print(simular_url_vulnerable("ejemplo.com/public?", "/admin"))
+# path_reconstruido = '/admin', pero ahora apunta a 'ejemplo.com/public?.../admin'
+```
+
+El caso con `#` es aún más sutil:
+
+```python
+print(simular_url_vulnerable("ejemplo.com#ignorado", "/admin"))
+# path_reconstruido = '/' — todo tras # es fragmento, el path real se pierde
+```
+
+## El middleware que confía en request.url: la víctima más común
+
+El patrón vulnerable es este middleware tan típico que probablemente has escrito alguna vez:
+
+```python
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Middleware que protege rutas según request.url.path — VULNERABLE."""
+
+    RUTAS_PROTEGIDAS = {"/admin", "/internal", "/metrics", "/v1/models"}
+
+    async def dispatch(self, request, call_next):
+        # ⚠️ request.url.path se reconstruye desde el Host header
+        if request.url.path in self.RUTAS_PROTEGIDAS:
+            if not self._usuario_autenticado(request):
+                return Response("No autorizado", status_code=403)
+        return await call_next(request)
+
+    def _usuario_autenticado(self, request) -> bool:
+        return request.headers.get("Authorization") == "Bearer secreto"
+```
+
+Con la versión vulnerable de Starlette, un atacante sin token puede acceder a `/admin` simplemente añadiendo un `?` al header `Host`. El middleware evalúa `request.url.path` que da `/` (no `/admin`) y deja pasar la petición. Pero el router ejecuta el endpoint de `/admin`.
+
+## El fix: validar antes de reensamblar
+
+El parche introducido en Starlette 1.0.1 es elegante por lo simple que es: un regex que valida el header `Host` contra la gramática definida en RFC 9112 §3.2 y RFC 3986 §3.2.2 antes de usarlo para reconstruir la URL. Si el Host no cumple el formato, se descarta y se usa `scope["server"]` como fallback:
+
+```python
+import re
+
+# El regex que introdujo Starlette 1.0.1
+_HOST_RE = re.compile(
+    r"^([a-z0-9.-]+|\[[a-f0-9]*:[a-f0-9.:]+\])(?::[0-9]+)?$",
+    re.IGNORECASE,
+)
+
+def reconstruir_url_segura(host_header, path, server):
+    """Reconstrucción segura: valida el Host antes de usarlo."""
+    if host_header is not None and _HOST_RE.fullmatch(host_header):
+        return f"http://{host_header}{path}"
+    # Si el Host no es válido, usamos el server del scope ASGI
+    host, port = server
+    return f"http://{host}:{port}{path}"
+```
+
+Los casos probados en los tests del parche cubren todos los vectores conocidos:
+
+```python
+# Tests extraídos del commit 764dab0 — todos los Hosts maliciosos son rechazados
+HOSTS_MALICIOSOS = [
+    b"foo/?x=",     # question-mark
+    b"foo/#",        # hash
+    b"foo/bar",      # slash
+    b"user@foo",     # at-sign
+    b"foo\\bar",     # backslash
+    b"foo bar",      # space
+]
+# Para cada uno, el regex no hace match → se usa el server tuple → path correcto
+```
+
+## Por qué ha pasado desapercibido tanto tiempo
+
+Hay varias razones. La primera es que Starlette rara vez se despliega directamente expuesto a internet. Lo normal es tener nginx, Caddy o un load balancer por delante, y la mayoría de estos proxies **ya validan o reescriben el header Host**. Si tu nginx tiene `server_name` configurado, las peticiones con Hosts raros ni siquiera llegan a Starlette.
+
+Pero aquí está la trampa: en el ecosistema de AI/LLM, muchas veces Starlette sí está expuesto directamente. Servidores de inferencia como vLLM, proxies como LiteLLM y MCP gateways se ejecutan en entornos donde la configuración de red es mínima. Contenedores con `--net=host`, despliegues locales para desarrollo, o entornos de laboratorio donde la seguridad de red brilla por su ausencia.
+
+La segunda razón es que el bug es sutil. El comportamiento de `urlsplit` con Hosts que contienen delimitadores no es un bug de Python, es comportamiento documentado: `urlsplit` parsea lo que le des según la gramática RFC. El error está en darle algo que no es un Host válido y asumir que el resultado tendrá sentido.
+
+## El factor humano: Kludex contra la marea
+
+OSTIF fue muy claro en su disclosure: el maintainer de Starlette, [Kludex](https://github.com/Kludex), está teniendo unas semanas complicadas. El proceso de disclosure + parche ha sido largo, con múltiples partes contactándole mientras lidia con el aluvión de reportes de seguridad que todo proyecto open source está recibiendo en 2026 (gracias, en parte, a los escáneres automáticos impulsados por IA).
+
+Este bug es un caso clásico de "brecha de responsabilidad": si Kludex no parcheaba, miles de proyectos tenían que asegurarse individualmente. Al hacerlo, asumió voluntariamente la responsabilidad de proteger a todo el ecosistema. Y lo hizo sin deberle nada a nadie.
+
+Si usas Starlette, plantéate [sponsorear a Kludex](https://github.com/sponsors/Kludex).
+
+## Cómo protegerte
+
+Si mantienes algún proyecto basado en Starlette o FastAPI:
+
+1. **Actualiza a Starlette >= 1.0.1** inmediatamente. El fix está en PyPI desde mayo de 2026.
+
+2. **No uses `request.url.path` en middleware de seguridad**. Usa `request.scope["path"]`, que contiene el path real sin procesar y no puede ser manipulado por el Host header.
+
+3. **Pon un proxy inverso delante**. Nginx, Caddy o Traefik con `server_name` configurado correctamente bloquean peticiones con Hosts inválidos antes de que lleguen a tu aplicación.
+
+4. **Aplica defensa en profundidad**. Aunque actualices Starlette, valida las rutas protegidas basándote en el scope, no en la URL reconstruida. Una línea de defensa nunca es suficiente.
+
+```python
+# ✅ Forma correcta: usar scope["path"] en middleware de seguridad
+async def dispatch(self, request, call_next):
+    if request.scope["path"] in self.RUTAS_PROTEGIDAS:
+        if not self._usuario_autenticado(request):
+            return Response("No autorizado", status_code=403)
+    return await call_next(request)
+```
+
+## Mi veredicto
+
+BadHost me parece una vulnerabilidad fascinante por lo minimalista que es. Un solo carácter — un `?`, un `#`, un `/` — y tienes las llaves del castillo. No necesita payloads complejos, no necesita condiciones de carrera, no necesita memory corruption. Es pura manipulación de parsing.
+
+Lo que me preocupa es la superficie de ataque en el ecosistema LLM. La explosión de herramientas "AI-first" en 2025-2026 ha normalizado exponer servidores Python directamente, sin proxy inverso, porque "es solo para desarrollo" o "corre en un contenedor aislado". Pero un contenedor aislado con un endpoint `/shutdown` accesible o un endpoint de tool-execution sin autenticación no está tan aislado como parece.
+
+El CVSS de 6.5 es engañoso. Cuando una vulnerabilidad afecta a "miles de proyectos downstream y billones de instalaciones", como dijo el equipo de OSTIF, la severidad real no se mide solo con el vector de ataque sino con el radio de impacto. Y el radio de impacto de BadHost es descomunal.
+
+La buena noticia es que el fix es trivial y la mitigación con proxy inverso es efectiva. Si tienes Starlette o FastAPI en producción, actualiza hoy. No esperes al lunes.
