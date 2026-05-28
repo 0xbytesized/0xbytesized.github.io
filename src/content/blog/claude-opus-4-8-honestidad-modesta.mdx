@@ -1,0 +1,99 @@
+---
+title: "Claude Opus 4.8: la honestidad como ventaja competitiva"
+date: "2026-05-28T23:00"
+tags: ["claude", "anthropic", "ia", "llm", "desarrollo"]
+excerpt: "Anthropic lanza Opus 4.8 con una mejora «modesta pero tangible» y un dato que lo cambia todo: es 4 veces menos probable que deje pasar bugs sin avisar."
+---
+
+Anthropic acaba de lanzar Claude Opus 4.8. Es la noticia que está dominando Hacker News hoy con más de 1100 puntos y casi mil comentarios. Y hay algo que me ha llamado más la atención que los benchmarks o las features nuevas: **la honestidad con la que lo presentan**.
+
+La frase exacta del anuncio es: *"Users will find Opus 4.8 to be a modest but tangible improvement on its predecessor"*. Traducción: es una mejora modesta pero real. No es un salto generacional. No es magia. Es un paso adelante que se nota.
+
+En un sector donde cada release viene envuelta en superlativos —"revolucionario", "sin precedentes", "el mejor modelo jamás creado"— que Anthropic diga "es una mejora modesta" es casi un acto de rebeldía. Y creo que es la actitud correcta.
+
+## Lo que trae Opus 4.8
+
+El modelo mejora sobre Opus 4.7 en benchmarks de código, tareas agénticas, razonamiento y trabajo práctico. Según los early testers, los cambios más notables están en tres áreas:
+
+**Mejor criterio.** Tom Pritchard, Staff Engineer, dice que "hace las preguntas correctas, detecta sus propios errores y se resiste cuando un plan no tiene sentido". Esto es clave para cualquiera que use agentes de código a diario: un modelo que te dice "esto no me cuadra" vale más que uno que te da código incorrecto con confianza.
+
+**Menos verbosidad, más precisión.** Scott Wu, CEO de Cognition (Devin), menciona que Opus 4.8 corrige los problemas de verborrea y tool-calling que vieron en Opus 4.7. Menos ruido, más señal.
+
+**Honestidad 4x.** Este es el dato que más me ha impactado. Anthropic reporta que Opus 4.8 es **cuatro veces menos probable que su predecesor** de permitir que fallos en su propio código pasen sin ser mencionados. No es que escriba menos bugs —es que cuando los escribe, **te avisa**. Señala incertidumbres en lugar de fingir que todo funciona.
+
+## El control de esfuerzo: pensar más o menos según necesites
+
+Una de las novedades más prácticas es el control de esfuerzo. Hasta ahora, los modelos decidían por sí mismos cuánto "pensar" antes de responder. Con Opus 4.8, tú decides:
+
+- **Bajo:** respuestas rápidas, consume menos tokens, ideal para tareas simples
+- **Por defecto (alto):** el equilibrio recomendado. Gasta tokens similares a Opus 4.7 pero con mejor rendimiento
+- **Extra (xhigh):** para tareas difíciles y workflows asíncronos de larga duración
+- **Máximo:** el modelo piensa todo lo que necesita para dar la mejor respuesta posible
+
+En Claude Code se configura así:
+
+```bash
+# En una sesión de Claude Code:
+/claude opus-4-8
+
+# Configurar el nivel de esfuerzo:
+# Por defecto usa "high", equivalente a lo que hacía Opus 4.7
+# Pero puedes pedir más (o menos):
+"Analiza este PR con esfuerzo extra, no tengo prisa"
+"Responde rápido, solo necesito un sanity check"
+```
+
+Los rate limits se han ajustado al alza en Claude Code para acomodar el mayor consumo de tokens de los niveles altos, así que no te penaliza usar "extra" cuando lo necesitas de verdad.
+
+## System entries en mitad de la conversación
+
+Esta feature es más técnica pero muy relevante para quien construye agentes. Hasta ahora, el system prompt se definía al inicio de la conversación y no se podía modificar sin romper el prompt cache. Con Opus 4.8, la API de Messages acepta entradas de sistema **dentro del array de mensajes**:
+
+```json
+{
+  "model": "claude-opus-4-8",
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Eres un asistente de código. Trabajas en un proyecto TypeScript."
+    },
+    {
+      "role": "user",
+      "content": "Añade validación de tipos a esta función"
+    },
+    {
+      "role": "assistant",
+      "content": "He añadido validación. ¿Algo más?"
+    },
+    {
+      "role": "system",
+      "content": "Ahora tienes permiso para modificar archivos del directorio src/utils/. El token budget se ha ampliado a 200k."
+    }
+  ]
+}
+```
+
+Esto permite actualizar permisos, presupuestos de tokens o contexto del entorno **a mitad de la tarea** sin pasar por un turno de usuario. Para agentes que operan en entornos cambiantes (un CI/CD, un sandbox que se va ampliando, un workflow que descubre nuevas necesidades sobre la marcha), esto es un cambio de arquitectura importante. El prompt cache se mantiene intacto entre actualizaciones de sistema.
+
+## Precios: más rápido y más barato
+
+Los precios base no cambian: 5 $/M tokens de input y 25 $/M de output. Pero el modo rápido —donde Opus 4.8 funciona a 2.5× la velocidad normal— ahora cuesta **tres veces menos** que en modelos anteriores: 10 $/M input y 50 $/M output.
+
+Para tareas donde la velocidad importa más que exprimir cada gota de rendimiento, es una rebaja considerable.
+
+## Lo que viene: Mythos
+
+El anuncio incluye un guiño al futuro. Anthropic confirma que tienen una nueva clase de modelos —Mythos— con "inteligencia incluso mayor que Opus". De momento, solo unas pocas organizaciones lo usan para ciberseguridad bajo el paraguas de Project Glasswing. Pero la propia Anthropic dice que esperan abrirlo a todos los clientes "en las próximas semanas".
+
+Es la primera vez que mencionan un calendario para Mythos. Si lo cumplen, el salto generacional que Opus 4.8 no pretende ser podría llegar antes de lo que muchos esperábamos.
+
+## Mi veredicto
+
+Opus 4.8 no es el modelo que te hará tirar Opus 4.7 a la basura. Es una iteración medida, honesta y centrada en lo que de verdad importa para el trabajo diario: mejor criterio, menos alucinaciones silenciosas y más control sobre cómo gasta sus recursos.
+
+La cifra de los 4x en honestidad —en detectar y señalar sus propios bugs— me parece el avance más significativo de este lanzamiento, por encima de cualquier benchmark. Un modelo que te dice "esto podría estar mal" es infinitamente más útil que uno que puntúa 5 puntos más en un benchmark pero te miente sobre la calidad de su output.
+
+La feature de system entries es un regalo para quienes construimos agentes. Y el control de esfuerzo pone al usuario al mando de una decisión —velocidad vs profundidad— que antes era opaca. Ambas cosas apuntan en la dirección correcta: más transparencia, más control.
+
+Anthropic está jugando a largo plazo y se nota. Mientras otros persiguen titulares, ellos lanzan un modelo llamándolo "modesto" y te cuentan exactamente en qué es mejor y en qué no. En un sector intoxicado de hype, ese nivel de franqueza es una ventaja competitiva real.
