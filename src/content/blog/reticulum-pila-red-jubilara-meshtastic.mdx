@@ -1,0 +1,160 @@
+---
+title: "Reticulum: la pila de red que jubilará a Meshtastic"
+date: "2026-05-28T11:30"
+tags: ["mesh", "LoRa", "Reticulum", "redes", "Python"]
+excerpt: "Meshtastic inunda la red, MeshCore es propietario. Reticulum lo cambia todo siendo una pila de red de verdad, no otra app de mensajería."
+---
+
+Hace unos días me topé con [un artículo de Jonah Aragon](https://www.jonaharagon.com/posts/im-getting-into-mesh-networks-meshtastic-meshcore-and-reticulum/) que me dejó con la ceja levantada. Jonah no es cualquiera: montó [su propia ISP](https://www.triplebit.org/) en 2024, con ASN propio, espacio IPv4/IPv6 y fibra tendida por él mismo. Si este tío dice que algo en redes mesh le parece mal, escuchas. Y su veredicto sobre el estado del arte es demoledor: Meshtastic no escala, MeshCore es propietario y la única cosa que parece diseñada con cabeza se llama **Reticulum**.
+
+No lo conocía. Y tras pasarme un par de horas leyendo su documentación, entiendo por qué Jonah y otros se están pasando.
+
+## El problema de fondo: apps disfrazadas de redes
+
+Meshtastic es el rey indiscutible del mesh sobre LoRa. Fue el primero en hacerlo bien para el consumidor y si quieres comunicarte con tu grupo de senderismo sin cobertura, funciona. El problema llega cuando intentas escalar: en una red con decenas o cientos de nodos, Meshtastic inunda la red con cada mensaje. No hay enrutamiento real, solo un _flood_ que espera que el destinatario esté escuchando. El límite por defecto son 3 saltos (ampliable a 7), lo que pone un techo muy real a la cobertura geográfica.
+
+MeshCore intenta arreglar esto con un sistema de enrutamiento real: los mensajes viajan por rutas de repetidores, no por inundación. Suena bien. Hasta que lees la letra pequeña:
+
+- Los clientes oficiales son **propietarios**.
+- Algunas funciones están tras un paywall.
+- El modelo separa _companions_ (los que envían/reciben) de _repeaters_ (los que enrutan), añadiendo fricción al despliegue.
+
+Para una tecnología que se vende como "off-grid" y "desastre-ready", depender de software propietario y procesadores de pago es, como poco, una contradicción.
+
+## Reticulum: no es una app, es una pila de red
+
+Aquí está el giro copernicano. Meshtastic y MeshCore son aplicaciones de mensajería que funcionan sobre LoRa. Reticulum es una **pila de red completa** que funciona sobre lo que le eches: LoRa, WiFi, Ethernet, packet radio, I2P, TCP, UDP o un simple puerto serie.
+
+La diferencia es fundamental. En Meshtastic, si quieres conectar dos redes LoRa que operan en frecuencias distintas (915 MHz en EEUU, 868 MHz en Europa), necesitas un bridge MQTT cutre que degrada el rendimiento. En Reticulum, eso es un caso de uso nativo.
+
+La magia está en el **enrutamiento heterogéneo**. Reticulum no hace distinción entre interfaces: un paquete puede entrar por LoRa, saltar por WiFi, cruzar un enlace punto a punto por microondas y llegar por fibra. La pila elige la mejor ruta automáticamente en función del ancho de banda y la disponibilidad. Si un enlace cae, el tráfico se reencamina sin que las aplicaciones se enteren.
+
+Esto lo cambia todo. Puedes montar una red mesh de barrio sobre LoRa, interconectarla con la del barrio de al lado por WiFi y tender un backbone entre ciudades por Internet o microondas. Todo dentro de la misma red Reticulum, sin gateways, sin bridges, sin malabares.
+
+## Cómo se ve en código
+
+Reticulum está escrito en Python (con partes en Cython para rendimiento) y se instala con `pip install rns`. Vamos a ver lo mínimo para poner un nodo en marcha.
+
+### Inicialización e identidad
+
+```python
+import RNS
+
+# Inicializar Reticulum con la configuración por defecto
+reticulum = RNS.Reticulum()
+
+# Crear una identidad. Las claves se generan automáticamente
+# con Curve25519 (X25519 para cifrado, Ed25519 para firmas)
+identidad = RNS.Identity()
+
+print(f"Mi hash: {RNS.prettyhexrep(identidad.hash)}")
+```
+
+Cada nodo en Reticulum tiene una identidad criptográfica única. No hay autoridades centrales repartiendo direcciones como IANA con las IPs: el hash de la clave pública **es** la dirección. Esto garantiza que dos redes Reticulum independientes puedan fusionarse sin colisiones.
+
+### Crear un destino que escucha
+
+```python
+# Un destino es un endpoint direccionable en la red.
+# La dirección completa incluye: hash de identidad + aspectos de la app
+destino = RNS.Destination(
+    identidad,
+    RNS.Destination.IN,        # Dirección de entrada
+    RNS.Destination.SINGLE,    # Destino único (no grupo)
+    "mi_app",                  # Nombre de aplicación
+    "sensores",                # Aspectos jerárquicos
+    "temperatura"
+)
+
+# Configurar prueba automática de entrega
+destino.set_proof_strategy(RNS.Destination.PROVE_ALL)
+
+# Callback cuando llega un paquete
+def recibir_paquete(mensaje, paquete):
+    print(f"Recibido: {mensaje.decode('utf-8')}")
+    print(f"RSSI: {paquete.rssi} dBm, SNR: {paquete.snr} dB")
+
+destino.set_packet_callback(recibir_paquete)
+
+# Anunciar el destino en la red para que otros lo encuentren
+destino.announce()
+```
+
+Los tres strings al crear el destino (`"mi_app"`, `"sensores"`, `"temperatura"`) forman lo que Reticulum llama _aspects_. Son como un sistema de nombres jerárquico que permite filtrar announces: puedes suscribirte solo a destinos bajo `mi_app.sensores.*` sin recibir tráfico de `mi_app.chat.*`.
+
+### Enviar un paquete
+
+```python
+# Desde otro nodo, tras recibir un announce del destino anterior
+hash_destino = bytes.fromhex("a1b2c3d4...")  # Hash recibido vía announce
+
+if RNS.Transport.has_path(hash_destino):
+    identidad_remota = RNS.Identity.recall(hash_destino)
+    
+    destino_salida = RNS.Destination(
+        identidad_remota,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        "mi_app", "sensores", "temperatura"
+    )
+    
+    paquete = RNS.Packet(destino_salida, b"23.5 C")
+    receipt = paquete.send()
+    
+    # Callback cuando el destino confirma la entrega
+    receipt.set_delivery_callback(
+        lambda r: print(f"¡Entregado! RTT: {r.get_rtt()}s")
+    )
+```
+
+Lo relevante aquí es el `Identity.recall()`: Reticulum mantiene una caché de identidades conocidas. Cuando recibes un announce, la identidad del emisor se almacena. `recall()` la recupera para que puedas dirigirle tráfico. El `has_path()` comprueba que la red sabe cómo llegar físicamente a ese destino.
+
+### Configurar una interfaz LoRa
+
+Reticulum se configura mediante un archivo de texto, no desde código. Aquí un ejemplo con un [RNode](https://unsigned.io/rnode/) — el transceptor LoRa recomendado:
+
+```ini
+[[RNode LoRa Interface]]
+    type = RNodeInterface
+    enabled = yes
+    port = /dev/ttyUSB0
+    frequency = 868000000
+    bandwidth = 125000
+    txpower = 7
+    spreadingfactor = 8
+    codingrate = 5
+
+[[Default Interface]]
+    type = AutoInterface
+    enabled = yes
+    devices = wlan0
+```
+
+Con estas 13 líneas, tu nodo Reticulum habla LoRa por el RNode en 868 MHz **y** descubre automáticamente otros nodos en la WiFi local. Sin bridges, sin MQTT, sin configuraciones separadas. La pila de red se encarga de enrutar paquetes por la mejor interfaz disponible para cada destino.
+
+## Por qué esto importa (de verdad)
+
+El diseño de Reticulum resuelve tres problemas que llevan años estancando las redes mesh comunitarias:
+
+**1. Fragmentación de frecuencias.** LoRa usa 915 MHz en América, 868 MHz en Europa, 923 MHz en Asia. En Meshtastic, estas redes son islas incomunicadas. En Reticulum, si tienes un nodo frontera con dos radios — una a 868 y otra a 915, conectadas entre sí — las dos redes se fusionan automáticamente. Sin servidor central, sin coordinación.
+
+**2. Escalabilidad geográfica.** Una red Reticulum puede empezar como un grupo de vecinos con RNode y crecer orgánicamente: añades un backbone por fibra entre dos barrios, luego un enlace microondas entre ciudades, luego un túnel I2P para llegar a otro país. Cada nuevo enlace añade redundancia. Si el backbone de fibra se cae, el tráfico busca rutas alternativas por LoRa o WiFi.
+
+**3. Soberanía real.** Sin software propietario. Sin paywalls. Sin servidores de pago. Reticulum está liberado bajo una licencia MIT _peculiar_ que prohíbe su uso en sistemas diseñados para dañar a humanos o en entrenamiento de IA. Más allá de eso, es software libre. Si la red depende de tu hardware y tu código, la red es tuya.
+
+## Mi opinión
+
+Llevo un tiempo siguiendo el mundo mesh LoRa y siempre me ha parecido que algo no encajaba. Meshtastic está bien para mandar cuatro mensajes en una excursión, pero la visión de "Internet descentralizada del pueblo" se queda cortísima con una app que inunda la red y no enruta.
+
+Reticulum me parece el primer intento serio de tratar el mesh como lo que es: un problema de redes, no de mensajería. La decisión de separar la pila de red de las aplicaciones que corren encima (NomadNet, Sideband, Meshchat) es exactamente lo que hizo TCP/IP bien en los 80. No construyes una app de chat sobre Ethernet; construyes una pila de red y dejas que las aplicaciones hagan lo suyo.
+
+El punto débil, como señala Jonah en su artículo, es que Reticulum no tiene firmware dedicado para radios LoRa baratas al estilo Meshtastic. Necesitas un RNode o hardware compatible y eso añade fricción. Pero viendo la actividad del proyecto (5900 estrellas en GitHub, commits diarios del creador Mark Qvist), no me sorprendería que en un año tengamos opciones _plug-and-play_.
+
+Si te interesa el mesh más allá del "mira qué chulo, le he mandado un emoji a mi vecino", Reticulum merece una tarde de tu tiempo. La documentación es excelente y los ejemplos de código funcionan a la primera. No todas las semanas aparece una pila de red que de verdad hace algo distinto.
+
+## Referencias
+
+- [Reticulum Network Stack](https://reticulum.network/) — Web oficial y documentación
+- [I'm Getting Into Mesh Networks — Jonah Aragon](https://www.jonaharagon.com/posts/im-getting-into-mesh-networks-meshtastic-meshcore-and-reticulum/) — El artículo que disparó este post
+- [RNode — Unsigned.io](https://unsigned.io/rnode/) — Transceptor LoRa recomendado para Reticulum
+- [Reticulum en GitHub](https://github.com/markqvist/Reticulum) — 5900+ estrellas, desarrollo muy activo
