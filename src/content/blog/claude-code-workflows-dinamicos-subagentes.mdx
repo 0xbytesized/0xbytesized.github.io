@@ -1,0 +1,117 @@
+---
+title: "Claude Code ya no trabaja solo: workflows dinámicos"
+date: "2026-05-28T17:38"
+tags: ["claude-code", "agentes-ia", "herramientas", "desarrollo", "productividad"]
+excerpt: "Anthropic lanza workflows dinámicos en Claude Code: cientos de subagentes en paralelo que se auditan entre sí. Y hay un modo ultracode."
+---
+
+Hoy Anthropic ha anunciado una de esas features que cambian la forma de trabajar. No es un parche ni un ajuste cosmético: **los workflows dinámicos de Claude Code** son la respuesta a la pregunta que todos nos hacíamos desde que los agentes de código empezaron a ser útiles de verdad. ¿Qué pasa cuando una tarea es demasiado grande para un solo agente?
+
+Hasta ahora, la respuesta era: la troceas tú. Abres varias sesiones, planificas a mano, repartes el trabajo. El agente ejecuta, pero la orquestación la llevas tú. Con los workflows dinámicos, Claude Code **escribe sus propios scripts de orquestación**, lanza decenas o cientos de subagentes en paralelo dentro de una misma sesión y verifica los resultados antes de que te llegue nada.
+
+La frase del anuncio es ambiciosa: "el trabajo que normalmente planificarías en trimestres ahora se termina en días". Puede sonar a hype, pero los early adopters dentro de Anthropic ya lo están usando para cosas serias.
+
+## Qué son exactamente los workflows dinámicos
+
+No es un sistema de plantillas ni un configurador de pipelines. Es más simple y más potente a la vez: **Claude decide dinámicamente cuándo y cómo paralelizar**. Tú le pides algo grande —"encuentra todos los bugs de validación de inputs en este servicio", "migra estos 300 archivos de Express a Hono", "hazme una auditoría de seguridad del repo entero"— y Claude escribe un plan de ejecución que divide el trabajo en trozos independientes.
+
+Cada trozo va a un subagente. Los subagentes trabajan en paralelo. Cuando terminan, hay agentes verificadores que revisan el trabajo antes de consolidarlo. El resultado es un informe o un PR donde cada hallazgo ha pasado por al menos dos pares de ojos digitales.
+
+Esto es importante: **no es solo paralelismo bruto**. Es paralelismo con verificación cruzada. Anthropic lo llama "adversarial agents working to break the result before you see it". Es la primera vez que veo un producto de coding agent que incorpora verificación adversarial como feature de producto, no como idea de paper.
+
+## Cómo se usa
+
+Los workflows dinámicos están disponibles hoy mismo en research preview para Claude Code CLI, Desktop y la extensión de VS Code. Los planes Max, Team y Enterprise (si el admin lo habilita) tienen acceso. También está disponible vía API en Anthropic, Bedrock, Vertex AI y Microsoft Foundry.
+
+Hay dos formas de activarlo:
+
+```bash
+# Opción 1: Pedírselo directamente
+# Dentro de una sesión de Claude Code:
+> Crea un workflow para auditar la seguridad de este repositorio
+
+# Opción 2: Activar el modo ultracode
+# Desde el menú de esfuerzo (effort menu):
+> /ultracode
+# O simplemente:
+> Activa el modo ultracode
+```
+
+El modo `ultracode` es interesante porque no le dices *cuándo* usar workflows: dejas que Claude decida. Pone el nivel de esfuerzo en `xhigh` y el agente evalúa si la tarea se beneficia de paralelizarse. Si sí, lanza el workflow sin que tengas que microgestionar nada.
+
+Un detalle importante que menciona Anthropic: **los workflows consumen sustancialmente más tokens** que una sesión normal. No es un juguete para tirar prompts de dos líneas. Es una herramienta para trabajo pesado donde el coste del token se justifica porque el resultado llega en horas en lugar de semanas.
+
+## El patrón de subagentes: cómo funciona por dentro
+
+Aunque Anthropic no ha publicado la arquitectura interna, podemos inferir el patrón por lo que describen. Esencialmente, cuando Claude decide lanzar un workflow:
+
+1. **Fase de planificación**: Claude analiza la tarea y la descompone en subtareas independientes. Esto lo hace él mismo, no un template predefinido.
+
+2. **Fase de ejecución paralela**: Cada subtarea se envía a un subagente independiente. Los subagentes heredan el contexto relevante pero no toda la conversación: cada uno recibe solo lo que necesita.
+
+3. **Fase de verificación cruzada**: Subagentes "adversariales" revisan el trabajo de otros subagentes. Si dos subagentes llegan a conclusiones distintas sobre el mismo archivo, el conflicto se escala.
+
+4. **Fase de consolidación**: Claude integra los resultados en un output unificado.
+
+En pseudocódigo, el patrón se parece a esto:
+
+```
+tarea_principal = "Auditar validación de inputs en todo el repo"
+
+plan = claude.planificar(tarea_principal)
+# plan = [
+#   { subtarea: "auditar auth.ts", contexto: "middleware de autenticación" },
+#   { subtarea: "auditar api/users.ts", contexto: "endpoints de usuario" },
+#   { subtarea: "auditar api/products.ts", contexto: "endpoints de producto" },
+#   ...
+# ]
+
+resultados = parallel_execute(
+    [subagente(subtarea) for subtarea in plan]
+)
+
+resultados_verificados = cross_validate(resultados)
+# Subagentes adversariales revisan hallazgos de otros
+
+informe_final = claude.consolidar(resultados_verificados)
+```
+
+Lo novedoso no es el paralelismo —cualquiera puede lanzar 50 hilos— sino que **la planificación, la ejecución y la verificación las decide y ejecuta el mismo agente**, sin intervención humana. Es la diferencia entre darte herramientas y darte un compañero que sabe usarlas.
+
+## Lo que ya están haciendo con esto
+
+El anuncio incluye una cita de Alessio Vallero, Senior Engineering Manager en Anthropic, que dice algo revelador:
+
+> "Dynamic workflows have been especially valuable for discovery and review tasks across large codebases. We've seen strong results using it to identify dead code and surface cleanup opportunities that traditional static analysis missed."
+
+Traducción: están encontrando código muerto que el análisis estático tradicional no ve. Esto es interesante porque el análisis estático es determinista y exhaustivo, pero carece de contexto. Un agente que lee el código como un desarrollador puede detectar patrones que un AST no captura: "esta función solo se llama desde tests que ya no existen", "este flag de configuración lleva tres releases deprecado y nadie lo usa".
+
+Los casos de uso que Anthropic destaca son:
+
+- **Cazas de bugs a nivel de codebase entera**: Claude busca en paralelo por todo el servicio y luego verifica cada hallazgo de forma independiente. El informe final solo contiene issues reales, no falsos positivos.
+- **Migraciones grandes**: cambios de framework, deprecaciones de API, ports de lenguaje que tocan miles de archivos.
+- **Trabajo crítico con verificación doble**: cuando un fallo cuesta caro, los workflows lanzan intentos independientes y agentes adversariales que intentan romper el resultado antes de que lo veas.
+
+Un detalle que me gusta: **el progreso se guarda conforme avanza**. Si el trabajo dura horas o días y algo interrumpe la ejecución, retoma donde lo dejó. La coordinación ocurre fuera de la conversación, así que el plan no se degrada con sesiones largas.
+
+## Mi opinión
+
+Voy a ser directo: esto es lo más interesante que ha sacado Anthropic para desarrolladores desde el propio Claude Code.
+
+La razón no es solo técnica. Es que resuelve el problema de confianza que tenemos con los agentes de código. Cuando un agente te dice "he encontrado 47 bugs", tu primer instinto es revisarlos uno por uno. Con los workflows dinámicos, la verificación cruzada viene de fábrica. No elimina la necesidad de revisar, pero la reduce drásticamente porque los hallazgos ya han pasado un filtro adversarial.
+
+El modo `ultracode` me parece un acierto de naming y de diseño. No es un flag binario de "usa workflows sí/no": es un nivel de esfuerzo. Le estás diciendo al agente "esto es importante, dedícale recursos, decide tú cómo". Es un modelo mental mucho más natural que configurar pipelines.
+
+Dicho esto, hay dos peros importantes:
+
+**El coste en tokens.** Anthropic lo advierte explícitamente: los workflows consumen "meaningfully more usage". Si ya Claude Code te parecía caro en sesiones largas, esto es un multiplicador. Para trabajo crítico —una migración que te ahorra dos semanas de un equipo de cinco personas— el coste es irrelevante. Para el día a día, probablemente no lo uses.
+
+**La caja negra.** Claude decide cómo paralelizar y tú no ves los detalles de la orquestación. Es un tradeoff deliberado: delegas la planificación a cambio de velocidad. Pero significa que si algo sale mal, hacer debug de *por qué* salió mal va a ser más difícil que con un script que has escrito tú.
+
+En cualquier caso, la dirección es clara: los agentes de código están pasando de ser asistentes que ejecutan instrucciones a ser compañeros que planifican y ejecutan trabajo complejo de principio a fin. Los workflows dinámicos son el primer producto mainstream que lo hace sin pedirte que seas tú quien diseñe el plan.
+
+Si tienes acceso a Claude Code en plan Max o Team, pruébalo con una tarea acotada. Elige algo que ya conozcas bien —así puedes evaluar si el resultado merece el coste extra en tokens— y déjalo trabajar. Lo peor que puede pasar es que aprendas algo sobre cómo tu propia codebase aguanta el escrutinio de una docena de agentes trabajando en paralelo.
+
+---
+
+**Referencia:** [Introducing dynamic workflows in Claude Code](https://claude.com/blog/introducing-dynamic-workflows-in-claude-code) — Anthropic Blog, 28 de mayo de 2026.
