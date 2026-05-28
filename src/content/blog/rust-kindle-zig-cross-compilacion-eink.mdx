@@ -1,0 +1,149 @@
+---
+title: "Rust en tu Kindle: hacks, Zig y pantallas e-ink"
+date: "2026-05-28T05:20"
+tags: ["rust", "embedded", "kindle", "zig", "linux"]
+excerpt: "Tu Kindle es un ordenador Linux con framebuffer, panel táctil y CPU ARMv7. Aquí te cuento cómo cruzar Rust, Zig y Slint para convertirlo en lo que quieras."
+---
+
+Sverre Johannessen, un desarrollador noruego, publicó esta semana un artículo que me ha tenido sonriendo todo el rato: ha conseguido ejecutar aplicaciones Rust con GUI —usando [Slint](https://slint.dev/)— en un Kindle Paperwhite de séptima generación. Su motivación oficial era hacerse un dashboard para Home Assistant en la mesilla de noche. La real, confiesa, era simplemente *ver si podía*.
+
+Y esa es la mejor motivación que existe.
+
+## Tu Kindle es un ordenador Linux
+
+Esto no es nuevo, pero se nos olvida: un Kindle Paperwhite es un ordenador Linux con pantalla e-ink, panel táctil, WiFi y un procesador ARMv7. Solo que Amazon te lo vende con un launcher que no te deja salir de su jardín.
+
+El jailbreak lleva años disponible. Herramientas como [KUAL](https://www.mobileread.com/forums/showthread.php?t=203326) (Kindle Unified Application Launcher) y [USBNetwork](https://www.mobileread.com/forums/showthread.php?t=88004) te dan shell por SSH. A partir de ahí, es un Linux empotrado de libro: `/dev/fb0` para el framebuffer, `/dev/input/event1` para el táctil y `/mnt/us` como almacenamiento.
+
+Lo que Sverre aporta es la receta completa para saltar de "tengo una shell" a "tengo una app Rust con GUI funcionando en mi e-reader". Y la receta es deliciosa.
+
+## El truco: cargo-zigbuild
+
+Compilar Rust para ARMv7 directamente en el Kindle es inviable. El dispositivo tiene poca RAM y cero toolchain. La solución clásica es cross-compilar desde tu máquina, pero configurar el target `armv7-unknown-linux-musleabihf` con su libc, linker y sysroot puede ser un infierno.
+
+Aquí entra [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild), una herramienta que usa Zig como toolchain de cross-compilación. Zig incluye las fuentes de musl libc para todas las arquitecturas y su propio linker, así que `zig cc` puede actuar como un toolchain completo para cualquier target musl.
+
+La compilación se reduce a esto:
+
+```bash
+# Instalas Zig y cargo-zigbuild una vez
+cargo install cargo-zigbuild
+
+# Compilas para el Kindle como si fuera nativo
+cargo zigbuild --release --target armv7-unknown-linux-musleabihf
+```
+
+El binario resultante lo copias por SCP al Kindle y funciona. Sin Docker, sin sysroots manuales, sin `arm-linux-gnueabihf-gcc`. Solo Zig haciendo de pegamento universal.
+
+## Pintar píxeles en e-ink: el framebuffer
+
+La pantalla e-ink del Kindle se controla escribiendo en `/dev/fb0`. Es un framebuffer Linux estándar: un archivo mapeado en memoria donde cada byte (en modo grayscale) representa un píxel. Escribes, llamas a `ioctl()` para decirle al driver que refresque y la tinta electrónica hace su magia.
+
+El backend arranca consultando la geometría real de la pantalla con los ioctls estándar de Linux (`FBIOGET_VSCREENINFO` y `FBIOGET_FSCREENINFO`, definidos en `<linux/fb.h>`). Así funciona en cualquier modelo de Kindle sin hardcodear resoluciones. Luego mapea el framebuffer con `mmap`:
+
+```rust
+use std::os::fd::AsRawFd;
+
+let fb_file = std::fs::OpenOptions::new()
+    .read(true)
+    .write(true)
+    .open("/dev/fb0")?;
+
+// Consultar geometría con FBIOGET_VSCREENINFO
+let mut vinfo = FbVarScreeninfo::default();
+unsafe {
+    libc::ioctl(fb_file.as_raw_fd(), FBIOGET_VSCREENINFO, &mut vinfo);
+}
+let (width, height) = (vinfo.xres as usize, vinfo.yres as usize);
+
+// Mapear todo el framebuffer en nuestro espacio de direcciones
+let len = height * vinfo.xres as usize;
+let map = unsafe {
+    libc::mmap(
+        std::ptr::null_mut(),
+        len,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_SHARED,
+        fb_file.as_raw_fd(),
+        0,
+    )
+};
+```
+
+Escribir píxeles es tan simple como copiar bytes en el slice que apunta al mmap:
+
+```rust
+fn write_line(fb: &mut [u8], stride: usize, y: usize, pixels: &[u8]) {
+    let start = y * stride;
+    fb[start..start + pixels.len()].copy_from_slice(pixels);
+}
+```
+
+El toque final es decirle al controlador e-ink que refresque la zona modificada. En los Kindle, esto se hace con un ioctl propietario del driver EPDC (`MXCFB_SEND_UPDATE`), pasándole una estructura con el rectángulo sucio, el modo de waveform (GC16 para calidad o AUTO para velocidad) y el tipo de refresco (parcial o completo).
+
+Aquí no hay magia: es el mismo mecanismo que usa cualquier aplicación nativa del Kindle. Linux te da las piezas; tú las ensamblas.
+
+## El panel táctil: structs crudos desde el kernel
+
+El touch del Kindle se lee desde un archivo en `/dev/input/`. Abres el descriptor y haces `read()`. El kernel te devuelve directamente una estructura C:
+
+```rust
+#[repr(C)]
+struct InputEvent {
+    tv_sec: libc::time_t,
+    tv_usec: libc::suseconds_t,
+    type_: u16,
+    code: u16,
+    value: i32,
+}
+
+let mut event: InputEvent = unsafe { std::mem::zeroed() };
+let fd = unsafe { libc::open(device_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+
+loop {
+    let n = unsafe {
+        libc::read(fd, &mut event as *mut _ as *mut libc::c_void, std::mem::size_of::<InputEvent>())
+    };
+    if n <= 0 { break; }
+
+    match event.type_ {
+        3 => { // EV_ABS — coordenadas absolutas
+            match event.code {
+                0x35 => { /* ABS_MT_POSITION_X */ }
+                0x36 => { /* ABS_MT_POSITION_Y */ }
+                0x39 => { /* ABS_MT_TRACKING_ID */ }
+                _ => {}
+            }
+        }
+        0 => { // EV_SYN — sincronización del lote
+            // SYNC_REPORT: disparar evento de pointer a Slint
+        }
+        _ => {}
+    }
+}
+```
+
+El Kindle usa el protocolo multi-touch tipo B de Linux: los eventos llegan como coordenadas individuales (`ABS_MT_POSITION_X` = 0x35, `ABS_MT_POSITION_Y` = 0x36, `ABS_MT_TRACKING_ID` = 0x39) y el kernel los agrupa con un `SYN_REPORT`. Cuando el tracking ID vale -1 significa que el dedo se ha levantado — toca disparar un `PointerReleased`.
+
+Un detalle importante: el backend además hace un *grab* exclusivo del dispositivo con `EVIOCGRAB` (un ioctl definido en `<linux/input.h>`). Si no lo hiciera, el framework táctil original del Kindle seguiría consumiendo eventos y la GUI de Slint no vería ni un solo toque.
+
+Esto es programación de sistemas en estado puro. Nada de frameworks, nada de abstracciones. Lees structs del kernel y se los pasas a Slint para que gestione botones, sliders y layouts.
+
+## El resultado: una app Rust con GUI en tu e-reader
+
+Sverre publicó su backend en GitHub como [`slint-kindle-backend`](https://github.com/sverrejb/slint-kindle-backend). Con eso, cualquier app Slint puede compilarse para un Kindle jailbrokeado. La API es mínima: una llamada a `install()` que recibe los bytes de una fuente TTF (el Kindle no trae fuentes usables, así que tienes que embeber una) y devuelve un handle para seguir registrando tipografías adicionales antes de lanzar `app.run()`.
+
+Lo que me flipa no es el dashboard de Home Assistant que Sverre quiere construir. Es la puerta que deja abierta. Un Kindle Paperwhite cuesta 100 euros y tiene una pantalla e-ink de 300 DPI que no cansa la vista, una batería que dura semanas y ahora sabemos cómo ejecutar Rust + GUI sobre ella. Las posibilidades son absurdas:
+
+- Un lector de RSS offline que se actualiza por WiFi cada mañana y te presenta las noticias como un periódico.
+- Un panel de monitorización para servidores con alertas visibles sin tener que encender el móvil.
+- Un Pomodoro mudo que solo cambia el número en pantalla, sin notificaciones, sin interrupciones.
+- Cualquier dashboard que aprecies en blanco y negro y que no necesite 60 FPS.
+
+## Mi veredicto
+
+Este tipo de proyectos me recuerdan por qué me dedico a esto. No hay negocio, no hay SaaS, no hay ronda de financiación. Hay un tío con un Kindle, curiosidad y la negativa a aceptar que un dispositivo que compró es solo lo que Amazon dice que es.
+
+La parte técnica es impecable: `cargo-zigbuild` es un atajo brillante que más gente debería conocer. El modelo de "todo es un archivo" de Linux brilla especialmente aquí — `/dev/fb0` para dibujar, `/dev/input/event*` para leer toques. Y Slint demuestra que las GUIs en Rust ya no son experimentales; son perfectamente capaces de funcionar en hardware que nadie diseñó para ello.
+
+Si tienes un Kindle antiguo cogiendo polvo en un cajón, igual es el momento de darle una segunda vida. No como lector — para eso ya tienes el nuevo. Sino como el lienzo programable que siempre fue.
