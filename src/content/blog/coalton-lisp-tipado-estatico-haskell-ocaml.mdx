@@ -1,0 +1,125 @@
+---
+title: "Coalton: el Lisp que aprendió tipos estáticos de Haskell y OCaml"
+date: "2026-05-29T11:00"
+tags: ["coalton", "common-lisp", "haskell", "ocaml", "tipos"]
+excerpt: "Coalton mete un sistema de tipos Hindley-Milner dentro de Common Lisp sin sacrificar la interactividad. ADTs, pattern matching y cero runtime cost."
+---
+
+¿Qué pasa cuando coges Common Lisp —con toda su dinamismo, su REPL interactivo y su condición de lenguaje programable— y le inyectas un sistema de tipos estático al estilo Haskell?
+
+El resultado es [Coalton](https://coalton-lang.github.io/), un lenguaje funcional que compila a Common Lisp y que acaba de resurgir en Hacker News con 168 puntos y 31 comentarios. No es nuevo —lleva en desarrollo desde 2018— pero el interés renovado dice algo: hay desarrolladores que quieren tipos de verdad sin renunciar a Lisp.
+
+## ¿Qué es exactamente Coalton?
+
+Coalton no es un lenguaje independiente. Es un DSL tipado que vive *dentro* de Common Lisp. Lo cargas como una librería cualquiera con `(asdf:load-system "coalton")` y empiezas a escribir código con tipos estáticos, inferencia Hindley-Milner, algebraic data types y pattern matching. Todo compila a Common Lisp y se beneficia del compilador nativo de SBCL.
+
+La promesa es ambiciosa: tener el pastel (tipos estáticos, safety en tiempo de compilación) y comértelo también (desarrollo interactivo, REPL, hot-reloading). Dos mundos que normalmente están en guerra.
+
+```lisp
+(defpackage #:mi-app
+  (:use #:coalton #:coalton-prelude)
+  (:local-nicknames
+   (#:math #:coalton-library/math)))
+
+(in-package #:mi-app)
+
+(coalton-toplevel
+  ;; Un tipo algebraico para expresiones aritméticas
+  (define-type (Expr :t)
+    (EConst :t)
+    (EAdd (Expr :t) (Expr :t))
+    (EMul (Expr :t) (Expr :t)))
+
+  ;; Evaluar una expresión
+  (declare eval (Num :t => Expr :t -> :t))
+  (define (eval expr)
+    (match expr
+      ((EConst n) n)
+      ((EAdd a b) (+ (eval a) (eval b)))
+      ((EMul a b) (* (eval a) (eval b))))))
+
+;; Probarlo desde el REPL:
+(coalton (eval (EAdd (EConst 3) (EMul (EConst 2) (EConst 4)))))
+;; => 11
+```
+
+El tipo `Expr :t` es paramétrico: puedes tener `Expr Integer`, `Expr Single-Float`, etc. Y si intentas mezclar tipos, el compilador te para los pies *antes* de ejecutar nada.
+
+## Lo que Coalton hace distinto
+
+Hay tres decisiones de diseño que marcan la diferencia frente a otros intentos de tipar Lisp:
+
+### 1. No intenta adaptarse a Common Lisp, crea su propio espacio
+
+A diferencia de los sistemas de "gradual typing" que intentan añadir tipos al CL existente, Coalton define un sub-lenguaje completo con su propia semántica. No tienes que migrar tu código Lisp entero: escribes las partes críticas en Coalton y las llamas desde CL, o viceversa.
+
+Esto es pragmatismo puro. Los autores —Robert Smith, Elias Lawson-Fox y Cole Scott— argumentan que intentar tipar el CL existente es una batalla perdida porque el dinamismo está en el ADN del lenguaje. Mejor crear un espacio seguro dentro de Lisp que pretender que todo Lisp es seguro.
+
+### 2. Interoperabilidad bidireccional sin fricción
+
+Desde Coalton llamas a funciones Common Lisp con el operador `lisp`:
+
+```lisp
+(coalton-toplevel
+  (declare saludar (String -> Unit))
+  (define (saludar nombre)
+    (lisp Unit (nombre)
+      (cl:format cl:t "¡Hola, ~A!~%" nombre)
+      Unit)))
+```
+
+Y desde Common Lisp llamas a funciones definidas en Coalton como si fueran funciones Lisp normales, porque *lo son*. Coalton compila a CL y SBCL convierte ese CL en código máquina. No hay runtime de tipos, no hay boxing adicional, no hay intérprete separado.
+
+### 3. Sin auto-currying, pero con múltiples valores de retorno
+
+A diferencia de Haskell u OCaml, Coalton no hace currying automático. Una función declarada como `Integer -> Integer -> Integer` devuelve una función, sí, pero tienes que construirla explícitamente con `fn`. En su lugar, Coalton usa aridades fijas con tuplas de argumentos: `Integer * String -> Boolean`.
+
+Y soporta múltiples valores de retorno reales (no tuplas):
+
+```lisp
+(coalton-toplevel
+  (declare dividir (Integer -> Integer -> Integer * Integer))
+  (define (dividir a b)
+    (values (cl:floor a b) (cl:mod a b))))
+```
+
+Este diseño evita las sobrecargas del currying automático y encaja mejor con la ABI de Common Lisp, donde `values` y `multiple-value-bind` son construcciones nativas y eficientes.
+
+## Un ejemplo más real: validación con Optional
+
+Una de las cosas que más echo de menos cuando escribo Lisp vanilla es poder expresar "este valor puede no existir" sin recurrir a `nil` y sus ambigüedades. Coalton tiene `Optional`, como el `Maybe` de Haskell o el `Option` de Rust:
+
+```lisp
+(coalton-toplevel
+  (declare parse-edad (String -> Optional Integer))
+  (define (parse-edad s)
+    (lisp (Optional Integer) (s)
+      (let ((n (cl:parse-integer s :junk-allowed cl:t)))
+        (if n
+            (Some n)
+            None))))
+
+  (declare es-mayor-edad (String -> Boolean))
+  (define (es-mayor-edad s)
+    (match (parse-edad s)
+      ((Some edad) (>= edad 18))
+      ((None) False))))
+```
+
+Fíjate en la interop: `parse-integer` es una función de Common Lisp. Coalton no te obliga a reescribir todo el ecosistema. Usas lo que necesitas de CL, envuelto en tipos seguros.
+
+## El estado del proyecto
+
+Coalton no ha llegado a 1.0. Los propios maintainers advierten que puedes encontrarte rough edges. Pero ya se usa en producción en dos dominios donde los tipos importan de verdad: software de defensa y computación cuántica. El compilador cuántico de [HRL Laboratories](https://coalton-lang.github.io/20220906-quantum-compiler/) está escrito en Coalton, generando Quil desde tipos algebraicos seguros.
+
+El ecosistema es pequeño pero activo. Hay una [lista Awesome Coalton](https://github.com/Jason94/awesome-coalton) con librerías comunitarias, el manual de lenguaje está completo y el soporte para SBCL, Allegro CL y Clozure CL es sólido.
+
+## Mi veredicto
+
+Coalton me parece uno de esos proyectos que resuelven un problema real sin intentar ser la solución definitiva a nada. No quiere matar a Common Lisp ni convertirse en el próximo Haskell. Quiere darte tipos de verdad cuando los necesitas, sin pedirte que abandones tu REPL, tu SLIME, tu Quicklisp y tres décadas de librerías.
+
+La decisión de no hacer auto-currying es pragmática y acertada. La interoperabilidad con `lisp` está bien resuelta. Y que compile a código máquina vía SBCL sin overhead adicional es la guinda.
+
+Lo que le falta: más adopción, más librerías y probablemente un 1.0 que estabilice la API. Pero como herramienta para escribir el núcleo tipado de una aplicación Lisp más grande, ya es perfectamente usable.
+
+Si vienes de Haskell y sientes curiosidad por Lisp pero te da miedo el dinamismo sin red, Coalton es tu puerta de entrada. Y si ya escribes Common Lisp y te has pegado con bugs que un type checker te habría pillado en dos segundos, instálalo y pruébalo en tu próximo módulo crítico. La experiencia de recibir un error de tipos *antes* de que explote en producción es adictiva.
