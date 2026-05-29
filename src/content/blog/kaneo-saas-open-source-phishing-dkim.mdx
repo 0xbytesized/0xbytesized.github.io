@@ -1,0 +1,171 @@
+---
+title: "Kaneo: el SaaS open source que envió 14.000 emails de phishing"
+date: "2026-05-29T18:00"
+tags: ["open-source", "seguridad", "phishing", "saas", "kaneo"]
+excerpt: "Un proyecto open source con SaaS gratuito fue abusado para enviar 14.520 invitaciones de phishing con firma DKIM legítima. No hubo exploit: el atacante usó la app tal cual fue diseñada."
+---
+
+El jueves pasado, Andrej Acevski se despertó con un email de Resend. Su cuota de envío para `cloud.kaneo.app` estaba agotada. Lo raro es que él no había enviado nada en días.
+
+Andrej es el creador de [Kaneo](https://github.com/usekaneo/kaneo), una herramienta de gestión de proyectos open source. Simple, sin bloat, hace lo que promete. La versión cloud existe para que la gente pueda probarla sin montar un Postgres. El mismo código que corre en self-hosted, pero gestionado por él.
+
+Alguien había encontrado otra utilidad para Kaneo.
+
+## Lo que encontró al hacer SSH
+
+Andrej se conectó al servidor y lanzó una consulta. Los nuevos workspaces tenían esta pinta:
+
+> 🔒 Paul Brown from BANKING OPERATION invited you to join 3.4090_BTC receipt...
+
+949 workspaces. Todos creados en una ventana de tres horas durante la madrugada. Cada uno desde un proveedor de email desechable distinto: `yomail.info`, `dropmail.me`, `spymail.one`. Cada cuenta había creado un workspace cuyo nombre era el asunto completo de un email de phishing y luego había enviado unas cien invitaciones a una lista de desconocidos.
+
+14.520 invitaciones en total. La mayoría mientras Andrej dormía.
+
+El email de invitación salía desde su dominio verificado de Resend. El asunto era el nombre del workspace. El cuerpo decía educadamente: *"&lt;carga útil de phishing&gt; te ha invitado a unirte a &lt;carga útil de phishing&gt; en Kaneo. Haz clic aquí para aceptar."*
+
+El "haz clic aquí" apuntaba al sitio real de Kaneo, lo que hacía que el email pareciera legítimo. El nombre del workspace llevaba el enlace real de la estafa, apuntando a `craftum.io` con un sufijo de tracking.
+
+No hubo exploit. No hay CVE. No hay vulnerabilidad que parchear.
+
+El atacante rellenó el formulario de registro 942 veces, creó 942 workspaces, envió 942 lotes de invitaciones y paró. Usó la herramienta **exactamente como fue diseñada**. El diseño era simplemente lo bastante bueno para ser útil para phishing.
+
+## El modelo de amenaza que nadie te cuenta
+
+Aquí está la lección que me parece brillante y dolorosa a partes iguales.
+
+Cuando construyes una versión cloud de tu proyecto open source, el modelo de amenaza no tiene **nada que ver** con el de la versión self-hosted.
+
+En self-hosted, el operador y el usuario son la misma persona, o al menos se conocen. Los nombres de workspace adversariales no importan porque nadie los crearía. Los rate limits no importan porque no hay incentivo para spamearte a ti mismo.
+
+En un SaaS multi-tenant, el operador eres tú y los usuarios son todo el mundo. Y lo más importante: **el operador avala todo lo que el usuario hace ante cada sistema externo que el SaaS toca**.
+
+Resend no distingue entre una invitación que enviaste tú y una que envió un desconocido a través de tu proyecto. Tu firma DKIM está en ambas.
+
+Piénsalo así en código:
+
+```typescript
+// Esto es lo que construiste — un flujo inocente
+async function sendInvitation(workspace: Workspace, email: string) {
+  const inviteLink = `https://tusass.cloud/join/${workspace.id}`;
+  await resend.emails.send({
+    from: "TusaaS <noreply@tusass.cloud>",
+    to: email,
+    subject: `${workspace.name} te ha invitado`,
+    html: `<p>${workspace.name} te ha invitado. <a href="${inviteLink}">Aceptar</a></p>`,
+  });
+}
+
+// Pero workspace.name puede ser cualquier cosa, incluyendo:
+// "🔒 Paul Brown from BANKING OPERATION invited you to join 3.4090_BTC"
+// Y tu dominio verificado le da legitimidad ante el filtro de spam
+```
+
+El usuario malicioso no necesita romper nada. Solo necesita que tu formulario de signup esté abierto y que tu endpoint de envío de emails no tenga rate limiting.
+
+```python
+# El "exploit" — solo automatización básica
+import requests
+from itertools import cycle
+
+throwaway_emails = cycle(open("emails.txt"))
+phish_subjects = open("subjects.txt").readlines()
+targets = open("victims.csv").readlines()
+
+for subject in phish_subjects:
+    email = next(throwaway_emails)
+    # Paso 1: registrarse
+    sess = requests.Session()
+    sess.post("https://tusass.cloud/api/auth/signup", json={
+        "email": email,
+        "password": "Password123!"
+    })
+    # Paso 2: crear workspace con nombre = asunto de phishing
+    r = sess.post("https://tusass.cloud/api/workspaces", json={
+        "name": subject.strip()
+    })
+    workspace_id = r.json()["id"]
+    # Paso 3: invitar víctimas
+    for target in targets[:100]:
+        sess.post(f"https://tusass.cloud/api/workspaces/{workspace_id}/invite", json={
+            "email": target.strip()
+        })
+```
+
+Así de simple. Tres llamadas a tu API. Ni un solo hack.
+
+## La limpieza: una transacción de Postgres
+
+La parte destructiva fue sorprendentemente sencilla. Una sola transacción:
+
+```sql
+BEGIN;
+
+-- Bloquear las cuentas bot
+UPDATE users SET banned = true
+WHERE email_domain IN ('yomail.info', 'dropmail.me', 'spymail.one')
+  AND created_at > '2026-05-28 00:00:00';
+
+-- Eliminar workspaces y, por cascada, invitaciones
+DELETE FROM workspaces
+WHERE owner_id IN (
+  SELECT id FROM users WHERE banned = true
+);
+
+-- Verificar conteos
+SELECT
+  (SELECT COUNT(*) FROM users WHERE banned = true) as banned_users,
+  (SELECT COUNT(*) FROM invitations WHERE workspace_id NOT IN
+    (SELECT id FROM workspaces)) as orphan_invitations;
+
+-- ROLLBACK; -- primero verificar, luego...
+COMMIT;
+```
+
+942 usuarios baneados, 947 workspaces eliminados, 14.533 invitaciones fuera gracias a las foreign keys. Una hora de trabajo. La parte fácil.
+
+## Las defensas que llegaron después
+
+Lo que Andrej implementó tras el incidente es un catálogo de sentido común que cualquier SaaS con componente de envío debería tener desde el día uno:
+
+- **CAPTCHA en el signup.** Sí, es molesto. Sí, es necesario.
+- **Bloqueo de dominios de email desechables.** Hay listas mantenidas, úsalas.
+- **Rate limiting en el endpoint de invitaciones.** Si un workspace nuevo invita a 100 personas en 2 minutos, algo va mal.
+- **Filtro de nombres de workspace.** Si el nombre contiene "BTC", "BANK", "verify", o patrones de phishing, bloquear o poner en cuarentena.
+- **Cuentas guest sin capacidad de enviar invitaciones.** La funcionalidad de envío se reserva para cuentas verificadas.
+
+Lo interesante es que **nada de esto se despliega en la versión self-hosted**. El modelo de amenaza es diferente y Andrej no quiere ralentizar a usuarios legítimos con paranoia que no necesitan.
+
+```typescript
+// Defensas progresivas — solo en el tier cloud
+const CLOUD_ONLY_MIDDLEWARE = process.env.DEPLOYMENT === "cloud";
+
+export async function signupHandler(req: Request) {
+  if (CLOUD_ONLY_MIDDLEWARE) {
+    await verifyCaptcha(req.body.captchaToken);
+    throwIfDisposableEmail(req.body.email);
+    throwIfRateLimited(req.ip, "signup", 5, 60 * 60); // 5/hora
+  }
+  // ... resto del flujo
+}
+
+export async function inviteHandler(req: Request, workspaceId: string) {
+  if (CLOUD_ONLY_MIDDLEWARE) {
+    throwIfGuestAccount(req.userId);
+    throwIfRateLimited(req.userId, "invite", 20, 60); // 20/min
+    throwIfPhishingWorkspaceName(workspaceId);
+  }
+  // ... resto del flujo
+}
+```
+
+## Mi veredicto
+
+Esta historia me golpea porque yo mismo mantengo servicios expuestos y he pensado en el modelo de amenaza exactamente como Andrej: "esto es para developers, nadie va a hacer nada raro".
+
+El salto mental más importante es este: **en el momento en que pones tu dominio y tu reputación de envío detrás de acciones iniciadas por usuarios anónimos, estás avalando esas acciones ante el resto de internet**. Tu DKIM no distingue intenciones. Tu IP no tiene contexto. Tu dominio en los filtros de spam solo ve volumen y patrones.
+
+La parte que más me ha hecho reflexionar es que el atacante no era sofisticado. No buscó un zero-day. No hizo reversing del binario. Simplemente notó algo que Andrej no había visto: un dominio verificado de envío de email pegado a un registro abierto y sin verificar es un primitivo potentísimo si no te importa lo que envías.
+
+Si tienes un SaaS, da igual lo pequeño que sea: el día que alguien descubra que puede usar tu infraestructura como arma, lo hará. Y no necesitará romper nada. Solo necesitará que confíes en que todos tus usuarios quieren lo mismo que quieres tú.
+
+No es cierto. Y ahora tienes 14.000 razones para saberlo.
