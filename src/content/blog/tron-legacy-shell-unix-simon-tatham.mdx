@@ -1,0 +1,156 @@
+---
+title: "El shell de Tron Legacy: lo que Hollywood no sabe de Unix"
+date: "2026-05-29T05:00"
+tags: ["unix", "shell", "linux", "cine", "curiosidades"]
+excerpt: "Simon Tatham, creador de PuTTY, congela un fotograma de Tron Legacy y analiza cada comando. Una clase magistral de forense Unix desde Hollywood."
+---
+
+Simon Tatham es el creador de PuTTY, el cliente SSH que probablemente has usado más veces de las que recuerdas. Pero esta semana no está en Hacker News por PuTTY, sino por algo mucho más inesperado: **un análisis forense del shell de Unix que aparece en Tron Legacy**.
+
+La historia ha acumulado más de 210 puntos en HN y es una delicia para cualquiera que haya pasado tiempo en una terminal. Tatham congela un fotograma de la película de 2010 y dedica un artículo entero a desmenuzar cada comando, cada decisión del departamento de arte y cada "error" que revela cómo se hizo realmente la escena.
+
+## La escena
+
+Sam Flynn, el protagonista, entra en el estudio abandonado de su padre. Se sienta frente a un ordenador, aparta el polvo de la pantalla con la mano y empieza a teclear comandos para averiguar en qué estaba trabajando Flynn senior antes de desaparecer misteriosamente.
+
+Lo que aparece en pantalla es una sesión de terminal Unix. Y Tatham, "ese tipo de friki", pulsó pausa en su DVD y se puso a leer.
+
+Lo sorprendente no es que la sesión tenga errores —es que es **casi plausible**. Alguien en el equipo de producción sabía lo que hacía. O al menos, sabía lo suficiente para construir algo que aguanta un primer vistazo.
+
+## La transcripción
+
+Esto es lo que Sam teclea y lo que el sistema responde:
+
+```bash
+$ whoami
+flynn
+$ uname -a
+SolarOS 4.0.1 Generic_50203-02 sun4m i386
+Unknown.Unknown
+$ login -n root
+Login incorrect
+login: backdoor
+No home directory specified in password file!
+Logging in with home=/
+# bin/history
+  488  cd /opt/LLL/controller/laser/
+  489  vi LLLSDLaserControl.c
+  490  make
+  491  make install
+  492  ./sanity_check
+  493  ./configure -o test.cfg
+  494  vi test.cfg
+  495  vi ~/last_will_and_testament.txt
+  496  cat /proc/meminfo
+  497  ps -a -x -u
+  498  kill -9 2207
+  499  kill 2208
+  500  ps -a -x -u
+  501  touch /opt/LLL/run/ok
+  502  LLLSDLaserControl -ok 1
+#
+```
+
+Hay mucho que desgranar aquí. Vamos por partes.
+
+## `bin/history`: el cable visible
+
+Esto fue lo primero que le saltó a Tatham cuando vio la escena por primera vez. Sam escribe `bin/history` en lugar de simplemente `history`. ¿Por qué?
+
+En Unix real, `history` es un builtin del shell —una función interna del propio intérprete de comandos— porque el historial se almacena en estructuras de datos dentro del proceso del shell. No puede ser un binario externo; no tendría acceso a esas estructuras.
+
+Tatham sospecha que esto revela **el truco de producción**: generaron la sesión en una máquina Unix real y `bin/history` era un script que imprimía el historial falso que necesitaban para la trama. Es el equivalente digital a un cable de acrobacias visible: la marca del equipo de efectos especiales que se les escapó.
+
+Fíjate además en que el historial **no termina con el comando `bin/history`**. En una shell real, el último comando del historial siempre es el `history` que acabas de ejecutar, porque se inserta en la lista antes de mostrarla. Aquí no aparece. Otro indicio de que es contenido pregrabado:
+
+```bash
+# Así funciona el history real:
+$ history
+  1  ls
+  2  cd /tmp
+  3  history    # ← este siempre aparece
+```
+
+La solución correcta habría sido usar un alias: `alias history='cat /ruta/al/historial/falso'`. Así Sam podría haber escrito `history` a secas y nadie se habría dado cuenta. Pero quien montó la escena sabía cómo modificar el PATH pero no cómo crear aliases.
+
+## SolarOS 4.0.1: un Frankenstein encantador
+
+El `uname -a` devuelve `SolarOS 4.0.1 Generic_50203-02 sun4m i386`. Esto es una mezcla imposible que delata a un guionista informado pero no experto:
+
+- **SolarOS**: no existe. Es un cruce entre Solaris (Sun Microsystems) y SunOS. Un nombre ficticio convincente para cualquiera que no conozca la historia de Sun.
+- **sun4m**: arquitectura real de Sun (SPARC de 32 bits). Correcto para la época.
+- **i386**: arquitectura Intel x86. Imposible combinarlo con sun4m. Es como decir que tu coche tiene motor diésel y gasolina al mismo tiempo.
+
+Alguien sabía lo suficiente para meter `sun4m` (que suena auténtico y técnico), pero no lo suficiente para saber que es incompatible con `i386`. Es un detalle precioso.
+
+## El backdoor y el login fallido
+
+Sam intenta `login -n root` y falla. Luego escribe `backdoor` como usuario y el sistema le deja entrar, aunque con un aviso: "No home directory specified in password file! Logging in with home=/".
+
+Esto es sutilmente correcto en espíritu pero no en implementación. El flag `-n` no se usa así en el `login` real, y `backdoor` no es un comando —es el nombre de usuario que Flynn padre dejó como puerta trasera. Pero la sintaxis `login: backdoor` mezcla el prompt y el input en la misma línea, lo cual no es como funciona realmente.
+
+Dicho esto, el mensaje de error sobre el home directory es verosímil. Si creas un usuario sin directorio home en `/etc/passwd`, el sistema te deja entrar pero con `/` como home. Esto es correcto.
+
+## Lo que nos cuenta el historial sobre Flynn padre
+
+Aquí está la parte más divertida del análisis forense. Las entradas 488 a 502 nos revelan exactamente en qué estaba trabajando Kevin Flynn antes de desaparecer:
+
+```bash
+488  cd /opt/LLL/controller/laser/
+489  vi LLLSDLaserControl.c
+490  make
+491  make install
+492  ./sanity_check
+493  ./configure -o test.cfg
+494  vi test.cfg
+495  vi ~/last_will_and_testament.txt
+```
+
+Estaba escribiendo un controlador láser en C (`LLLSDLaserControl.c`), lo compilaba con `make`, lo instalaba, ejecutaba tests. Todo normal. Hasta que edita su testamento (`last_will_and_testament.txt`). Algo le hizo sospechar que no volvería.
+
+Luego:
+
+```bash
+496  cat /proc/meminfo
+497  ps -a -x -u
+498  kill -9 2207
+499  kill 2208
+500  ps -a -x -u
+```
+
+Consulta la memoria, lista procesos, mata dos (uno con `-9`, otro sin ella — alguien que sabe que `-9` es SIGKILL y no se puede ignorar) y vuelve a listar procesos para verificar.
+
+```bash
+501  touch /opt/LLL/run/ok
+502  LLLSDLaserControl -ok 1
+```
+
+Y finalmente deja un archivo de señal y arranca el láser.
+
+Lo que me flipa de esto es que la secuencia **cuenta una historia coherente**. No es ruido aleatorio. Alguien escribió un arco narrativo en 15 comandos de shell. Un desarrollador compilando, testeando, detectando algo raro en los procesos, matando lo que no debería estar ahí y lanzando su creación antes de desaparecer.
+
+## Lo que Hollywood hizo bien
+
+Tatham admite que empezó el análisis esperando encontrar "tonterías pseudo-informáticas inventadas por gente de cine". Y se llevó una sorpresa:
+
+- `whoami`, `uname -a`, `ps`, `kill`, `make`, `vi`, `cat /proc/meminfo` son comandos reales con sintaxis correcta
+- La bandera `-9` en kill es SIGKILL real
+- El concepto de `backdoor` como puerta trasera tiene sentido narrativo
+- La secuencia del historial cuenta una historia con progresión lógica
+- `/opt/LLL/` es una ruta plausible para software de laboratorio (LLL = ?)
+
+El mayor error (aparte de `bin/history`) es el `uname` mixto sun4m/i386. Pero incluso eso tiene encanto: es el tipo de error que un informático real detecta en segundos pero que el 99.9% del público nunca notará.
+
+## Mi veredicto
+
+Me he pasado 20 años viendo películas donde los hackers escriben a 300 pulsaciones por minuto en interfaces 3D con letras verdes gigantes mientras dicen cosas como "estoy entrando en el mainframe". Tron Legacy al menos lo intentó.
+
+El artículo de Tatham es una joya porque **transforma un error de producción en una clase de Unix**. Cada "fallo" es una oportunidad para explicar cómo funcionan de verdad los builtins del shell, las arquitecturas de CPU, el sistema de login o el formato de `/proc`.
+
+Es justo el tipo de contenido que me encantaría ver más en la divulgación técnica: coger algo de la cultura pop, congelarlo y usarlo como excusa para enseñar conceptos reales. No es corrección pedante —es pedagogía disfrazada de frikismo.
+
+Y si eres desarrollador, la próxima vez que veas una terminal en una película, ya sabes: pausa, lee y disfruta. Puede que aprendas algo. O al menos, puede que encuentres el próximo `bin/history`.
+
+---
+
+*Fuente: [Nitpicking the shell history scene in 'Tron: Legacy'](https://www.chiark.greenend.org.uk/~sgtatham/quasiblog/tron-legacy/) por Simon Tatham, vía [Hacker News](https://news.ycombinator.com/item?id=48314002).*
