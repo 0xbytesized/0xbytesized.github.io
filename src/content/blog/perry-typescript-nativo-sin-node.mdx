@@ -1,0 +1,113 @@
+---
+title: "Perry: TypeScript compilado a binario nativo, adiós a Node"
+date: "2026-05-30T18:00"
+tags: ["typescript", "rust", "compiladores", "llvm", "rendimiento"]
+excerpt: "Perry compila TypeScript directamente a ejecutables nativos usando SWC y LLVM. Sin runtime, sin Node.js, binarios de ~300 KB que compiten con Rust."
+---
+
+Imagina escribir TypeScript y que el resultado sea un binario nativo de 300 KB que arranca en 0 ms. Sin Node.js, sin V8, sin Electron, sin intérpretes. Solo un ejecutable que corre en macOS, Linux, Windows, iOS y Android desde el mismo código fuente. Eso es **Perry**, un compilador escrito en Rust que acaba de alcanzar la versión 0.5 y ya está generando aplicaciones de producción.
+
+Lo descubrí esta semana en Hacker News, donde acumula más de 100 puntos y un hilo de comentarios que oscila entre el escepticismo y la fascinación. Y después de leer su documentación, benchmarks y código fuente, creo que hay razones de peso para los dos sentimientos.
+
+## Cómo funciona
+
+Perry usa [SWC](https://swc.rs/) para parsear TypeScript y [LLVM](https://llvm.org/) para generar código máquina. El pipeline es directo: TypeScript → HIR (representación intermedia) → transformaciones (inline, closures, async) → LLVM → enlazado con el linker del sistema → ejecutable nativo.
+
+Los tipos se borran en tiempo de compilación, igual que hace `tsc`. Los valores en runtime usan NaN-boxing para representar enteros, floats, strings y objetos en 64 bits. No hay JIT, no hay warmup, no hay garbage collector complejo en el camino crítico.
+
+Instalarlo es inmediato:
+
+```bash
+npm install @perryts/perry
+npx perry compile src/main.ts -o hola
+./hola  # eso es todo
+```
+
+También está en Homebrew, APT, Scoop y Winget. La herramienta viene como un binario precompilado que no requiere configuración adicional más allá de tener un compilador de C instalado para el linker.
+
+## Lo que puedes hacer con esto
+
+La librería estándar de Perry replica una buena parte de las APIs de Node.js. Puedes importar `fs`, `path`, `crypto`, `os`, `Buffer`, `child_process` y escribir código que se parece mucho a lo que ya conoces:
+
+```typescript
+import { readFile, writeFile } from "fs";
+import { join } from "path";
+
+const contenido = readFile(join("data", "entrada.txt"));
+const procesado = contenido.toUpperCase();
+writeFile(join("data", "salida.txt"), procesado);
+console.log(`Procesado: ${procesado.length} caracteres`);
+```
+
+Este código se compila a un binario de unos 380 KB. La función `readFile` no llama a libuv ni a V8: es una implementación nativa que usa `std::fs` de Rust internamente. Perry detecta qué partes del runtime necesitas y solo enlaza lo que usas.
+
+Para servidores HTTP, la compatibilidad con `node:http` es sorprendentemente completa. Puedes coger un servidor Express, Koa o Hono y compilarlo sin tocar una línea:
+
+```typescript
+import { createServer } from "http";
+
+const server = createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ mensaje: "hola desde Perry", timestamp: Date.now() }));
+});
+
+server.listen(3000, () => {
+  console.log("Servidor nativo en puerto 3000");
+});
+```
+
+Detrás de esa `createServer` no hay Node.js. Perry implementa el protocolo HTTP sobre `hyper` + `rustls` + `tokio-tungstenite`. El mismo handler acepta peticiones HTTP/1.1 y HTTP/2 por el mismo puerto gracias a la negociación ALPN.
+
+## Threads de verdad
+
+Aquí es donde Perry hace algo que ningún runtime de JavaScript puede hacer: **hilos del sistema operativo reales**. Ni workers aislados, ni `structuredClone`, ni múltiples instancias de V8 compitiendo por memoria.
+
+```typescript
+import { parallelMap } from "perry/thread";
+
+const datos = Array.from({ length: 10_000_000 }, (_, i) => i);
+const resultado = parallelMap(datos, (n) => {
+  // Esto corre en threads reales del SO
+  let suma = 0;
+  for (let i = 0; i < n % 1000; i++) suma += i;
+  return suma;
+});
+```
+
+Perry detecta automáticamente el número de núcleos, divide el array en fragmentos, lanza un thread por núcleo y recolecta los resultados en orden. Para arrays pequeños, omite el threading y procesa inline — cero overhead.
+
+Además de `parallelMap`, tienes `parallelFilter` para filtrar arrays grandes y `spawn` para lanzar tareas en background y recibir una Promise. Esto abre posibilidades que en Node requerirían arquitecturas mucho más complejas con `worker_threads` y colas de mensajes.
+
+## Lo que aún no está
+
+Perry está en versión 0.5 y eso significa que hay bordes. No todo el ecosistema npm funciona: paquetes que dependen de APIs muy específicas de V8 o que usan bindings nativos complejos pueden no compilar. La propia documentación es clara al respecto: el soporte de paquetes npm es experimental.
+
+El compilador también tiene limitaciones con ciertas construcciones de TypeScript. Los decoradores experimentales, algunas formas de genéricos complejos y ciertos patrones de metaprogramación pueden fallar. La [lista de funcionalidades compatibles](https://perryts.github.io/perry/language/supported-features.html) en la documentación cubre lo esencial: variables, funciones, clases, async/await, closures, generadores, destructuring, spread, template literals, Map, Set, typed arrays, regex y módulos.
+
+Para proyectos nuevos que no dependan de un ecosistema enorme de npm, el subconjunto que Perry soporta es más que suficiente. Para migrar una app Express con middlewares estándar, también. Para un monolito Next.js con 500 dependencias... aún no.
+
+## Los números
+
+Los benchmarks del README (ejecutados en mayo de 2026 en un M1 Max, mediana de 11 ejecuciones) colocan a Perry en el mismo barrio que Rust y C++ en la mayoría de pruebas:
+
+| Benchmark | Perry | Rust | C++ | Node |
+|-----------|------:|-----:|----:|-----:|
+| Fibonacci recursivo | 309ms | 316ms | 309ms | 987ms |
+| Creación de objetos | 2ms | 0ms | 0ms | 8ms |
+| Bucles anidados | 18ms | 8ms | 8ms | 17ms |
+
+En closures (10M invocaciones), Perry hace 50ms frente a los 304ms de Node. En JSON roundtrip con lazy parsing y GC generacional, 83ms contra 377ms de Node y 249ms de Bun.
+
+No todo son victorias: en Mandelbrot, Node gana por un pelo (25ms vs 28ms). Y hay regresiones declaradas en closures y factorial respecto a versiones anteriores que el equipo tiene marcadas como follow-ups. La transparencia del README al documentar estas regresiones es, de hecho, uno de los detalles que más confianza me da en el proyecto.
+
+## Mi veredicto
+
+Perry me parece el proyecto más interesante que ha aparecido en el ecosistema TypeScript desde Deno. Y va un paso más allá: Deno seguía siendo un runtime. Perry elimina el runtime por completo.
+
+No creo que vaya a reemplazar a Node.js en el corto plazo. El ecosistema de npm es demasiado grande y hay demasiadas aplicaciones empresariales que dependen de él. Pero sí creo que ocupa un nicho que nadie estaba cubriendo bien: **herramientas de línea de comandos, utilidades de sistema, servicios pequeños y aplicaciones de escritorio que necesitan arranque instantáneo y mínimo consumo de recursos**.
+
+El caso de uso que más me convence es el de las CLI tools. Un binario de 2-5 MB que hace una tarea concreta, sin dependencias, que puedes distribuir con un `curl | sh` y que arranca en milisegundos. Escribir eso en Rust requiere lidiar con el borrow checker. En Go necesitas otro ecosistema. Con Perry escribes TypeScript — el lenguaje que probablemente ya usas — y obtienes un binario nativo.
+
+Si el proyecto mantiene el ritmo de desarrollo — y los commits en el repositorio sugieren que sí — en uno o dos años podríamos estar hablando de una alternativa seria para un montón de casos de uso donde hoy metemos un contenedor de 200 MB para ejecutar 200 líneas de JavaScript.
+
+Merece la pena seguirle la pista.
