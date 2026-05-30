@@ -1,0 +1,107 @@
+---
+title: "Zig reinventa su build system: 10× más rápido"
+date: "2026-05-30T12:22"
+tags: ["zig", "build-system", "compiladores", "rendimiento", "herramientas"]
+excerpt: "Andrew Kelley rediseña el build system de Zig: configurador y ejecutor separados. zig build pasa de 150ms a 14ms con caché inteligente."
+---
+
+Andrew Kelley acaba de mergear una rama que parte en dos el build system de Zig. El PR #35428 —"separate the maker process from the configurer process"— ha aterrizado en main y los números son ridículos: `zig build --help` pasa de 150ms a 14ms. Un 90% más rápido. Y eso es solo el aperitivo.
+
+El cambio es profundo y rompe una API que llevaba años igual, pero la lógica detrás es tan limpia que merece la pena entenderla.
+
+## El problema: un solo proceso para todo
+
+Hasta ahora, cuando ejecutabas `zig build`, el compilador de Zig hacía esto:
+
+1. Compilaba tu `build.zig` **junto con todo el build system** de Zig en un solo binario
+2. Lo compilaba en **modo Debug** (sin optimizaciones)
+3. Ejecutaba el binario resultante, que primero construía el grafo de compilación en memoria y luego lo ejecutaba
+
+El resultado era un proceso monolítico que hacía demasiadas cosas a la vez. Cada vez que tocabas tu `build.zig`, Zig recompilaba el build system entero —aunque no hubiera cambiado nada de la infraestructura—. Y encima lo ejecutaba sin optimizar.
+
+Esto no era un problema con proyectos pequeños. Pero Zig está añadiendo funcionalidades como `--watch`, `--fuzz` y `--webui` mientras el build system no paraba de engordar. Cada feature nueva hacía `zig build` más lento para todos, incluso para quien no la usaba.
+
+## La solución: dos procesos, dos modos de compilación
+
+La rama mergeada separa el trabajo en dos procesos independientes:
+
+### El configurador (configurer)
+
+Es un proceso pequeño que solo contiene tu `build.zig`. Se compila en **modo Debug** —porque el cuello de botella aquí no es la velocidad de ejecución, sino la velocidad de compilación—. Su trabajo es construir el grafo de dependencias en memoria y serializarlo a un archivo binario de configuración.
+
+El `zig build` padre vigila ese archivo y lo cachea. Si la configuración no ha cambiado (por ejemplo, solo has añadido `-freference-trace` a la línea de comandos), el configurador **ni siquiera se ejecuta**. Se usa la caché y punto.
+
+### El ejecutor (maker)
+
+Mientras el configurador hace su trabajo, Zig compila **en paralelo y en modo Release** el proceso que va a ejecutar el grafo de compilación. Este binario se cachea globalmente: solo se compila una vez por versión de Zig, independientemente de cuántos proyectos tengas.
+
+Cuando el archivo de configuración está listo y el maker está compilado, se lanza el maker con el archivo de configuración como entrada. Y ahora sí, todo el trabajo pesado —compilar, enlazar, generar binarios— corre con optimizaciones de release.
+
+## Los números no mienten
+
+El benchmark que publicó Kelley compara `zig build --help` antes y después del cambio:
+
+```
+Benchmark 1 (34 ejecuciones): master/zig build -h
+  wall_time           150ms ± 5.52ms
+  peak_rss           84.8MB ±  275KB
+  cpu_cycles          593M ± 4.01M
+  instructions        995M ± 52.5K
+
+Benchmark 2 (348 ejecuciones): branch/zig build -h
+  wall_time          14.3ms ±  744us   ⚡ -90.4%
+  peak_rss           78.5MB ±  562KB   ⚡ -7.4%
+  cpu_cycles         24.1M ±  821K     ⚡ -95.9%
+  instructions       43.7M ± 23.8K     ⚡ -95.6%
+  cache_references   1.46M ± 14.6K     ⚡ -94.3%
+  cache_misses        142K ± 4.87K     ⚡ -78.1%
+  branch_misses       126K ± 1.37K     ⚡ -86.3%
+```
+
+Casi **todas** las métricas mejoran en un orden de magnitud. 995 millones de instrucciones bajan a 43 millones. 593 millones de ciclos de CPU bajan a 24 millones. Y la mejora en wall time es de 150ms a 14ms.
+
+¿El motivo principal? Antes, `zig build --help` ejecutaba tu `build.zig` cada vez. Ahora usa la configuración cacheada y solo ejecuta el maker, que ya está compilado en release y listo en la caché global.
+
+## Lo que se rompe (y por qué merece la pena)
+
+El cambio de API más relevante es este:
+
+```zig
+// Antes: podías inspeccionar los argumentos y pasarlos manualmente
+if (b.args) |args| {
+    run_cmd.addArgs(args);
+}
+
+// Ahora: usas addPassthruArgs, que los pasa sin inspeccionarlos
+run_cmd.addPassthruArgs();
+```
+
+La diferencia es sutil pero importante. Antes podías leer `b.args` dentro de tu `build.zig`, lo que significaba que cualquier cambio en los argumentos de línea de comandos obligaba a recompilar el configurador. Ahora `addPassthruArgs()` simplemente le dice al maker "pásale a este comando lo que venga por CLI", sin que el configurador necesite saber qué son.
+
+Esto elimina una capacidad de los build scripts —ya no puedes inspeccionar los argumentos desde `build.zig`— pero a cambio ganas que cambiar argumentos no fuerce una recompilación del configurador.
+
+Si tu proyecto usaba `b.args`, toca migrar. Si no, probablemente ni te enteres del cambio.
+
+## Qué significa esto para el ecosistema
+
+Hay tres consecuencias que van más allá de la velocidad:
+
+**Primero**, las herramientas externas salen ganando. ZLS (el language server de Zig) y otros toolings de terceros ahora pueden consumir el archivo de configuración serializado directamente, en lugar de mantener su propio fork del build runner. Menos duplicación, menos bugs.
+
+**Segundo**, el build system puede crecer sin penalizar a nadie. `--watch`, `--fuzz`, `--webui` y lo que venga después pueden añadir complejidad interna sin que tu `zig build` tarde más. El configurador solo contiene tu lógica, no la de Zig.
+
+**Tercero**, la caché global del maker abre la puerta a optimizaciones PGO y LTO específicas por máquina. Si el maker se compila una vez y se reutiliza para todos tus proyectos, Zig puede permitirse gastar más tiempo en optimizarlo porque el coste se amortiza.
+
+## Mi opinión
+
+Llevo siguiendo Zig desde hace un par de años y este es el tipo de cambio que me recuerda por qué el lenguaje me parece interesante. No es un parche cosmético ni una feature de sintaxis: es replantearse una arquitectura que llevaba años funcionando "bien" porque Kelley identificó que no iba a escalar.
+
+Separar configurador de ejecutor es un patrón que Go también usa con su sistema de caché de build, pero Zig lo lleva más lejos al compilar el maker en release y cachearlo globalmente. El ahorro del 90% en `--help` es casi un efecto secundario; lo relevante es que el build system ahora está preparado para crecer sin castigar el tiempo de iteración del desarrollador.
+
+La migración de `b.args` a `addPassthruArgs()` puede doler en proyectos grandes con lógica condicional basada en argumentos. Pero el trade-off es claro: sacrificas capacidad de introspección en el configurador a cambio de no recompilarlo cuando los argumentos cambian. Para el 95% de los proyectos, es un win neto.
+
+Zig 0.17.0 llegará en un par de semanas. Si tienes proyectos en Zig, este es buen momento para probar la rama main y reportar bugs. Los que migren pronto tendrán builds más rápidos antes que nadie.
+
+---
+
+**Fuente:** [Zig Devlog — Build System Reworked](https://ziglang.org/devlog/2026/#2026-05-26) por Andrew Kelley · [PR #35428 en Codeberg](https://codeberg.org/ziglang/zig/pulls/35428) · [Discusión en Hacker News](https://news.ycombinator.com/item?id=48334048)
