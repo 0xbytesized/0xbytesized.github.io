@@ -1,0 +1,127 @@
+---
+title: "AV2: 30% más compresión y el mismo drama de patentes"
+date: "2026-05-31T06:41"
+tags: ["av2", "codecs", "video", "open-source", "compresion"]
+excerpt: "AOMedia ha liberado AV2, el sucesor de AV1: un 30% menos de bitrate a igual calidad. Ya tiene implementación de referencia en C lista para probar."
+---
+
+## El contexto: seis años después de AV1
+
+En 2018, la Alliance for Open Media (AOMedia) lanzó AV1 al mundo. Era la respuesta open source y libre de royalties a HEVC (H.265), un códec lastrado por un laberinto de patentes gestionado por tres pools distintos. AV1 funcionó: YouTube, Netflix, Meta y VLC lo adoptaron. Hoy, en 2026, prácticamente cualquier dispositivo que reproduzca vídeo tiene decodificación AV1 por hardware.
+
+Pero el mundo no se detuvo. Mientras AV1 se desplegaba, el consorcio MPEG/ITU-T seguía adelante con VVC (H.266), un códec que alcanza eficiencias que AV1 no puede igualar. AOMedia necesitaba responder.
+
+El 28 de mayo de 2026, lo hicieron. AV2 v1.0.0 es oficial.
+
+## Qué es AV2 exactamente
+
+AV2 no es un parche sobre AV1. Es un códec nuevo, diseñado desde 2020 con un toolset expandido y un objetivo claro: igualar o superar la eficiencia de VVC sin ceder un milímetro en la filosofía open source y royalty-free.
+
+Las cifras que maneja AOMedia, basadas en sus Common Test Conditions con contribuciones de Netflix y Meta, apuntan a una **reducción del 30% de bitrate respecto a AV1** a igualdad de calidad visual subjetiva. Dicho en plata: si tu vídeo AV1 ocupaba 10 MB, el mismo vídeo en AV2 ocupará 7 MB. O visto al revés: con el mismo ancho de banda que usas hoy, puedes servir vídeo con una calidad perceptiblemente superior.
+
+Las mejoras técnicas respecto a AV1 son profundas:
+
+- **Particionado recursivo extendido.** AV1 dividía cada frame en bloques de hasta 128×128 píxeles con un árbol de partición fijo. AV2 amplía las opciones de particionado, permitiendo que el encoder tome decisiones más granulares sobre qué zonas de la imagen merecen más bits.
+- **Particionado semi-desacoplado de luma y croma.** En AV1, luma y croma compartían la misma estructura de bloques. AV2 permite que tomen decisiones independientes. Esto es especialmente útil en bordes con cambios bruscos de color, donde forzar la misma partición desperdiciaba bits.
+- **Nuevos modos de predicción inter-frame.** AV2 añade modos de predicción que mejoran la compresión en escenas con movimiento complejo, oclusión y cambios de iluminación.
+- **Chroma from Luma (CfL) mejorado.** Una técnica que predice los canales de color a partir del canal de luminancia usando un modelo lineal. AV2 refina el modelo con más parámetros.
+- **Soporte nativo para AR/VR, split-screen y screen content.** AV2 incluye herramientas específicas para contenido de pantalla compartida, vídeo inmersivo y transmisión de escritorio, casos de uso que AV1 trataba como ciudadanos de segunda.
+- **Film Grain Synthesis (FGS) conservado y mejorado.** AV1 introdujo la síntesis de grano de película como herramienta opcional; AV2 la convierte en obligatoria y la refina.
+
+## El elefante en la sala: las patentes
+
+AOMedia insiste en que AV2 es royalty-free. Pero ya conocemos esta película. En 2019, Sisvel — una empresa luxemburguesa que gestiona pools de patentes — anunció un pool para AV1 alegando que infringía patentes de terceros. En enero de 2026, **antes incluso de que AV2 estuviera terminado**, Sisvel ya había anunciado que preparaba otro pool para AV2.
+
+Esto es importante porque crea un escenario de incertidumbre legal que las grandes plataformas temen más que una mala calidad de compresión. Si adoptas AV2 y dentro de tres años un tribunal dice que debes pagar royalties retroactivos, el ahorro en ancho de banda se evapora.
+
+Netflix, Meta, Google, Amazon, Apple, AMD, Realtek, Tencent y Alibaba participan en el desarrollo de AV2. Su presencia indica que el códec se toma en serio, pero ninguna de ellas ha confirmado públicamente que vaya a usarlo para contenido premium. De hecho, ni Amazon ni Apple han adoptado AV1 para su contenido premium, y su participación en AV2 podría estar más orientada a dispositivos (hardware) que a plataformas de streaming.
+
+Es el mismo baile de siempre: la tecnología es excelente, el modelo de licencia es atractivo, pero el riesgo legal es un agujero negro que nadie quiere mirar de frente.
+
+## Cómo probar AV2 hoy
+
+La implementación de referencia se llama **AVM** (AOM Video Model). Está escrita en C, usa licencia BSD-3-Clause-Clear y se compila con CMake. No esperes un encoder utilizable en producción: hablamos de velocidades de ~1 fps en hardware moderno para contenido Full HD. Pero sirve para experimentar, validar el bitstream y empezar a integrar.
+
+Clonar y compilar AVM:
+
+```bash
+git clone https://github.com/AOMediaCodec/avm.git
+cd avm
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+```
+
+Esto genera dos binarios: `avmenc` y `avmdec`. El encoder acepta YUV4MPEG (Y4M) como entrada y produce un archivo .obu (Open Bitstream Unit), el formato contenedor nativo de AV2, o un contenedor IVF/WebM. Un ejemplo mínimo (primero generamos el Y4M, luego codificamos):
+
+```bash
+# Convertir un vídeo a Y4M con ffmpeg
+ffmpeg -i input.mp4 -pix_fmt yuv420p -f yuv4mpegpipe input.y4m
+
+# Codificar con AVM
+./avmenc --width=1920 --height=1080 --fps=30/1 \
+  --target-bitrate=2000 -o output.obu input.y4m
+```
+
+El decoder hace el camino inverso:
+
+```bash
+./avmdec output.obu -o decoded.y4m
+```
+
+Son herramientas de referencia, no de producción. Pero el hecho de que existan, que compilen limpiamente y que produzcan bitstreams conformes con la especificación v1.0.0 ya es un hito. A partir de aquí, los implementadores de hardware (AMD, Realtek, Apple) pueden empezar a diseñar silicio. Los equipos de software (dav2d, el futuro sucesor del increíble dav1d de VideoLAN) pueden empezar a optimizar.
+
+## El pipeline de adopción: un script que no ejecutarás hasta 2030
+
+Para entender el camino que le queda a AV2, he escrito un script conceptual que modela lo que hace cualquier plataforma de streaming cuando evalúa un códec nuevo. No usa APIs reales de AV2 porque aún no existen en ffmpeg ni en libavm — es una abstracción del proceso de decisión:
+
+```bash
+#!/bin/bash
+# Modelo conceptual de evaluación de códecs para streaming
+# No ejecutable: AV2 aún no tiene soporte en ffmpeg
+
+INPUT="source_4k.y4m"
+ENCODERS=("av1_svt" "av2_avm" "vvc_vvenc")
+BITRATES=(500 1000 2000 4000 8000)
+
+echo "Códec | Bitrate (kbps) | VMAF | Tiempo (s)"
+echo "------|----------------|------|----------"
+
+for enc in "${ENCODERS[@]}"; do
+  for br in "${BITRATES[@]}"; do
+    case $enc in
+      av1_svt)
+        # SVT-AV1 con preset rápido para producción
+        TIME_START=$SECONDS
+        ffmpeg -i "$INPUT" -c:v libsvtav1 -b:v "${br}k" \
+          -preset 6 -y "out_${enc}_${br}.webm" 2>/dev/null
+        TIME_ENC=$((SECONDS - TIME_START))
+        ;;
+      av2_avm)
+        # Simulado: AVM a ~1fps no compite aún
+        TIME_ENC=9999
+        ;;
+      vvc_vvenc)
+        # VVenC con preset medium
+        TIME_START=$SECONDS
+        ffmpeg -i "$INPUT" -c:v libvvenc -b:v "${br}k" \
+          -preset medium -y "out_${enc}_${br}.mp4" 2>/dev/null
+        TIME_ENC=$((SECONDS - TIME_START))
+        ;;
+    esac
+    echo "$enc | $br | N/D | $TIME_ENC"
+  done
+done
+```
+
+Este script es una ficción útil. Refleja lo que plataformas como YouTube o Netflix ejecutan internamente en sus pipelines de evaluación: encodes a múltiples bitrates, medición de VMAF/SSIM contra la fuente original y un análisis de coste computacional. La realidad hoy es que AV2 tiene una casilla en esa tabla que dice "9999 segundos" porque el encoder de referencia no está optimizado. Pero esa casilla cambiará.
+
+## Mi veredicto
+
+AV2 es técnicamente impresionante y políticamente necesario. El ecosistema del vídeo necesita una alternativa libre a VVC con la misma urgencia con la que necesitaba una alternativa a HEVC en 2018. La diferencia es que esta vez la industria parece más escéptica: el fiasco de las patentes de AV1 dejó cicatrices, y la presencia preventiva de Sisvel en AV2 no ayuda.
+
+Creo que AV2 seguirá una trayectoria similar a AV1 pero con un timeline comprimido. AV1 tardó unos cinco años en llegar a adopción masiva (2018-2023). AV2 tiene a su favor que el ecosistema de codecs abiertos ya está maduro: dav1d demostró que se puede hacer decodificación por software ridículamente rápida, SVT-AV1 demostró que la codificación escalable es posible y los fabricantes de hardware ya saben qué esperar de AOMedia.
+
+Si tuviera que apostar: veremos los primeros chips con decodificación AV2 por hardware en 2028, los primeros streams AV2 en plataformas grandes hacia 2029 y adopción mayoritaria en dispositivos de consumo hacia 2030. Para entonces, VVC probablemente ya tendrá una cuota de mercado considerable, y la batalla AV2 vs VVC definirá la compresión de vídeo de la próxima década.
+
+Mientras tanto, el código está ahí, la especificación es pública y cualquiera con un compilador de C y paciencia puede generar su primer archivo .obu esta misma tarde. Eso, en un mundo donde los codecs suelen estar blindados detrás de comités cerrados y licencias de seis cifras, ya es una victoria.
