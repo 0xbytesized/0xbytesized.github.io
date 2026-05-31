@@ -1,0 +1,88 @@
+---
+title: "OpenBSD ya tiene su propio rsync y es una declaración de principios"
+date: "2026-05-31T02:38"
+tags: ["openbsd", "rsync", "c", "seguridad", "open-source"]
+excerpt: "OpenBSD ha mergeado openrsync en su sistema base: una implementación limpia de rsync en 10.000 líneas de C con licencia BSD. Apple ya lo usa en macOS desde la versión 15."
+---
+
+## El contexto: rsync, esa herramienta que todos usamos y nadie toca
+
+rsync es una de esas utilidades que llevan décadas funcionando sin que nadie les preste atención. Sincroniza archivos entre máquinas con una eficiencia brutal — solo transmite los bloques que han cambiado — y lo hace desde 1996. Si alguna vez has hecho un `rsync -avz`, sabes de lo que hablo.
+
+El problema es que el rsync original, mantenido por el proyecto Samba, tiene licencia GPLv3. Para la mayoría de proyectos eso no es un obstáculo, pero para OpenBSD — un sistema operativo que se toma la pureza de licencias como un deporte olímpico — siempre ha sido una espina clavada. OpenBSD no incluye código GPL en su sistema base. Punto.
+
+La solución ha llegado desde dentro: **openrsync**, una implementación desde cero escrita por Kristaps Dzonsons, con licencia ISC (equivalente a BSD de 2 cláusulas), y que ya se ha mergeado en OpenBSD base. Y no solo eso: Apple lo adoptó en macOS 15.0 como su rsync por defecto.
+
+## No es un fork, es un rewrite quirúrgico
+
+openrsync no es un fork del rsync de Samba. Dzonsons leyó las especificaciones del protocolo, estudió el algoritmo original de Tridgell y Mackerras y lo reimplementó en unas 10.000 líneas de C. El resultado es un binario que habla el mismo protocolo (versión 27) pero con una base de código mucho más pequeña, legible y auditable.
+
+El proyecto nació como parte de [rpki-client](https://www.rpki-client.org/), un validador RPKI para OpenBSD. Necesitaban sincronizar repositorios de certificados y no querían depender de GPL. Lo financiaron NetNod, IIS.SE, SUNET y 6connect. Lo que empezó como una necesidad interna se ha convertido en una herramienta de propósito general.
+
+Compilarlo es trivial:
+
+```bash
+./configure
+make
+sudo make install
+```
+
+No hay dependencias exóticas, no necesita autotools encadenados, no te pide que instales medio npm. Es C puro. El `configure` detecta tu sistema y genera un Makefile. Si estás en OpenBSD, ni siquiera necesitas compilar: ya viene en el sistema base.
+
+## Usar openrsync: casi idéntico, con matices
+
+La sintaxis básica es la misma que el rsync de siempre:
+
+```bash
+# Sincronizar directorio local a remoto
+openrsync -avz ./proyecto servidor:/backup/proyecto
+
+# Traer de remoto a local
+openrsync -avz servidor:/backup/proyecto ./restaurado
+
+# Usar openrsync también en el lado remoto
+openrsync --rsync-path=openrsync -avz ./datos servidor:/tmp/
+```
+
+Las flags más comunes están todas: `-a` (archive), `-v` (verbose), `-z` (compress), `-r` (recursive), `-l` (links), `-p` (perms), `-t` (times), `-g` (group), `-D` (devices), `--delete`, `--exclude`, `--exclude-from`. Suficiente para el 95% de los casos de uso reales.
+
+Lo que **no** tiene (aún) es lo que no se ha necesitado o lo que introduce complejidad cuestionable: no soporta protocolos posteriores a la versión 27, así que no hay timestamps de 64 bits. Para la mayoría de casos de uso esto es irrelevante, pero si manejas fechas posteriores a 2038 en sistemas de 32 bits, toma nota.
+
+## La diferencia real está en la seguridad
+
+Aquí es donde openrsync justifica su existencia. Al correr en OpenBSD, el proceso se somete a **pledge(2)** y **unveil(2)** desde el primer momento. Esto significa que el sistema operativo limita exactamente qué syscalls puede hacer el proceso y qué partes del sistema de archivos puede ver.
+
+No es un detalle cosmético. rsync procesa datos que vienen de la red y los escribe en tu disco. Si hay un bug de parsing — y en C siempre puede haberlo — las mitigaciones de OpenBSD reducen drásticamente el radio de explosión. Con pledge, el proceso no puede hacer fork, no puede abrir sockets nuevos, no puede ejecutar otros programas. Con unveil, solo ve los directorios que necesita.
+
+Dzonsons lo explica sin rodeos en la documentación:
+
+> "openrsync son unas 10.000 líneas de C. ¿Confías en que yo no cometa errores?"
+
+La respuesta honesta es que nadie debería confiar ciegamente. Pero con pledge y unveil, no hace falta confiar: el sistema operativo te cubre las espaldas.
+
+Para los que usan Linux, existe [pledge para Linux](https://justine.lol/pledge/) como prueba de concepto, y los desarrolladores están trabajando en el port de estas funciones de seguridad. Mientras tanto, en Linux openrsync corre sin esas protecciones adicionales, pero el código base más pequeño y revisado ya es una mejora sobre la alternativa.
+
+## ¿Y qué pasa con el rsync original?
+
+El rsync de Samba sigue siendo el estándar de facto en Linux y seguirá siéndolo. Tiene más funcionalidades, soporta protocolos más recientes y tiene décadas de pruebas de batalla. No va a desaparecer.
+
+Pero el ecosistema se está bifurcando de forma interesante:
+
+- **OpenBSD** tiene openrsync en su sistema base.
+- **macOS** lo adoptó en la versión 15.0.
+- **Gokrazy** tiene su propia implementación en Go para sistemas mínimos.
+- **Linux** se queda con el rsync GPL de Samba por inercia y compatibilidad.
+
+No es una guerra de estándares. Es una divergencia pragmática: cada ecosistema elige la herramienta que mejor se alinea con sus principios. OpenBSD prioriza la pureza de licencia y la seguridad; Linux prioriza la compatibilidad total; Apple prioriza lo que funciona sin enredos legales.
+
+## Mi veredicto
+
+openrsync me parece una de esas joyas del ecosistema OpenBSD que pasan desapercibidas pero que dicen mucho sobre cómo se hace software de calidad. No es un proyecto que busque competir con rsync en funcionalidades. Es un proyecto que dice: "el 80% de lo que hace rsync se puede hacer con un 20% del código, y además podemos hacerlo más seguro".
+
+El código está tan bien documentado que las propias páginas de manual de openrsync sirven como especificación del protocolo rsync. Si alguna vez has querido entender cómo funciona rsync por dentro, leer `rsync(5)` y `rsyncd(5)` de openrsync es probablemente mejor que leer el código original.
+
+Lo que más valoro es la honestidad del proyecto. No promete ser un reemplazo completo. No infla la lista de funcionalidades. Dice exactamente lo que hace, lo que no hace, y te explica por qué. En una era donde todo el mundo promete ser "el nuevo X", openrsync dice: "soy un rsync más pequeño, más seguro, y con menos equipaje legal". Y lo cumple.
+
+Si usas OpenBSD o macOS, ya lo estás usando sin saberlo. Si usas Linux y te interesa la seguridad, vale la pena echarle un vistazo. Compila en cualquier UNIX moderno y puede coexistir con el rsync de Samba sin conflictos.
+
+A veces menos es más. Y a veces "menos" son 10.000 líneas de C bien escritas.
