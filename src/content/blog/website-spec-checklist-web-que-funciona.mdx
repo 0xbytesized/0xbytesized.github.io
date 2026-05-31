@@ -1,0 +1,145 @@
+---
+title: "The Website Specification: el checklist que tu web necesita"
+date: "2026-05-31T18:00"
+tags: ["web", "html", "seo", "accesibilidad", "seguridad"]
+excerpt: "128 reglas, 10 categorías y un servidor MCP para agentes: así es The Website Specification, el proyecto open source que define qué hace buena a una web."
+---
+
+Hace unos días apareció en Hacker News un proyecto que lleva semanas resonando en los círculos de desarrollo web: [The Website Specification](https://specification.website/). 367 puntos, 153 comentarios y un montón de debate sobre si la web moderna se ha vuelto demasiado compleja o si necesitábamos exactamente esto.
+
+Yo lo he estado explorando y mi veredicto es claro: **es una de las iniciativas más útiles que he visto en años para desarrollo web**. No es un framework, no es una librería, no te pide que instales nada. Es una especificación de 128 reglas técnicas organizadas en 10 categorías que definen lo que un sitio web decente debería cumplir. Punto.
+
+Pero lo interesante no es solo el contenido — que es excelente — sino cómo está construido y para quién está pensado.
+
+## Qué es exactamente
+
+The Website Specification es un proyecto open source bajo licencia MIT. Cubre diez áreas:
+
+1. **Foundations** — HTML, head, documento base (14 reglas)
+2. **SEO** — visibilidad en buscadores (13 reglas)
+3. **Accessibility** — WCAG, lectores de pantalla, teclado (20 reglas)
+4. **Security** — headers, TLS, cookies, CSP (12 reglas)
+5. **Well-Known URIs** — `/.well-known/` paths estandarizados (9 reglas)
+6. **Agent Readiness** — legibilidad para agentes de IA (18 reglas)
+7. **Performance** — Core Web Vitals, caché, imágenes (19 reglas)
+8. **Privacy** — consentimiento, señales de privacidad (6 reglas)
+9. **Resilience** — páginas de error, offline, redirects (5 reglas)
+10. **Internationalisation** — idioma, locale, dirección de texto (12 reglas)
+
+Cada regla enlaza al estándar que la respalda: WHATWG, W3C, IETF RFCs, WCAG, MDN. No es un bloguero opinando: es un índice hiperdocumentado de lo que los propios estándares exigen.
+
+Pero lo que hace especial a este proyecto no es la lista en sí. Es la **ejecución**.
+
+## Un MCP server para agentes
+
+El proyecto expone un servidor MCP (Model Context Protocol) público en `https://mcp.specification.website/mcp`. Sin autenticación, solo lectura, con herramientas como `search`, `list_topics`, `get_topic`, `get_checklist` y `audit_url`.
+
+Esto significa que cualquier agente de IA — Claude, Cody, Cursor, Copilot — puede consultar la especificación directamente mientras trabajas. Si estás montando una web y tu agente te sugiere algo, puede verificarlo contra la especificación en tiempo real.
+
+Además, publican una Agent Skill en `/.well-known/agent-skills/` y ofrecen todas las páginas de la spec como Markdown puro (con sufijo `.md` o mediante content negotiation `Accept: text/markdown`). También tienen `/llms.txt` y `/llms-full.txt`.
+
+El proyecto está diseñado para que tanto humanos como agentes lo consuman. No es un detalle cosmético: refleja una filosofía de que el futuro del desarrollo web pasa por herramientas que entiendan el contexto.
+
+## Lo que realmente importa: seguridad desde el primer día
+
+De las 128 reglas, hay un puñado que son errores garrafales si no los tienes y que muchísimos sitios ignoran. Voy a repasar los que más duelen cuando faltan.
+
+### Content Security Policy bien configurada
+
+Un CSP decente frena XSS y exfiltración de datos en seco. La versión mínima que todo sitio debería tener:
+
+```http
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests
+```
+
+Esto dice: todo se sirve de mi dominio, los scripts solo de mi dominio, los estilos permiten inline (porque muchos frameworks lo necesitan), las imágenes permiten data URIs y HTTPS externo, nadie puede embeberme en un iframe y cualquier HTTP se fuerza a HTTPS.
+
+Si tu sitio usa Google Analytics o un CDN, ajusta `script-src` y `img-src`. Pero empieza con esto, no con `default-src *`.
+
+### HSTS sin miedo
+
+```http
+Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+```
+
+63072000 segundos son 2 años. `includeSubDomains` cubre todos los subdominios. `preload` te mete en la lista de HSTS preload de los navegadores. Esto es irreversible: una vez que mandas esto, los navegadores rechazarán HTTP plano para tu dominio durante 2 años. Asegúrate de que todo tu dominio y subdominios tienen HTTPS válido antes de desplegarlo.
+
+### Permissions-Policy: apaga lo que no uses
+
+```http
+Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()
+```
+
+Cada feature entre paréntesis vacío significa "denegado para este origen y para cualquier iframe". Si no usas cámara, apágala. Si no usas geolocalización, apágala. Es defensa en profundidad: reduces la superficie de ataque a cero en features que ni siquiera necesitas.
+
+### security.txt: el mínimo esfuerzo con máximo retorno
+
+Un archivo en `/.well-known/security.txt`:
+
+```text
+Contact: mailto:security@example.com
+Expires: 2027-05-31T18:00:00.000Z
+Canonical: https://example.com/.well-known/security.txt
+Preferred-Languages: en, es
+```
+
+Son cuatro líneas. Le dices a los investigadores de seguridad cómo contactarte si encuentran una vulnerabilidad. El coste es cero. El beneficio potencial es que alguien te reporte un fallo en lugar de venderlo o explotarlo.
+
+## Agent Readiness: lo que viene
+
+La categoría más polémica del proyecto es Agent Readiness. Tiene sentido: el concepto de preparar tu sitio para agentes de IA suena a optimizar para un hype que quizás no dure. Pero si miras las reglas concretas, la mayoría son buenas prácticas que ya deberías cumplir.
+
+### llms.txt: tu índice para IAs
+
+Un archivo `/llms.txt` en la raíz del sitio:
+
+```markdown
+# Example.com
+
+> Un sitio sobre desarrollo web, estándares y buenas prácticas.
+
+## Documentación
+- [Guía de inicio rápido](https://example.com/docs/quickstart.md): Primeros pasos en 5 minutos.
+- [Referencia de API](https://example.com/docs/api.md): Todos los endpoints documentados.
+- [Guía de migración v2 a v3](https://example.com/docs/migration-v2-v3.md): Cambios breaking.
+```
+
+Es una convención emergente, no un estándar ratificado, pero `llms.txt` ya lo soportan varios agentes y rastreadores. El formato es Markdown simple con enlaces. Si tu sitio tiene documentación, este archivo ayuda a que los agentes encuentren lo relevante sin tener que crawlear y parsear HTML.
+
+### robots.txt para rastreadores de IA
+
+Los principales proveedores de IA publican user-agents específicos para sus crawlers. Puedes decidir granularmente quién indexa tu contenido y para qué:
+
+```text
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+```
+
+Esto permite a OpenAI y Anthropic indexar para búsqueda, pero bloquea a Google Extended (entrenamiento de modelos) y a Common Crawl (datasets masivos). Es una decisión editorial, no técnica. Pero tener un `robots.txt` explícito es mejor que no tener nada y que los crawlers asuman que todo vale.
+
+## Mi opinión
+
+Lo que más valoro de The Website Specification no es que me enseñe cosas que no sabía — aunque tiene joyas incluso para desarrolladores veteranos. Lo que valoro es que **convierte conocimiento disperso en una checklist ejecutable**.
+
+Durante años, el desarrollo web ha funcionado con tradición oral: "pon el viewport meta tag", "no olvides el alt text", "usa HTTPS". Lo sabes porque alguien te lo dijo o porque un día te explotó en producción. Este proyecto lo sistematiza todo en un solo lugar, con referencias a los estándares originales y con herramientas para agentes.
+
+Las críticas en Hacker News iban en dos direcciones. Unos decían que la web se ha vuelto demasiado compleja y que echaban de menos los 2000s cuando todo era HTML plano. Otros cuestionaban la categoría Agent Readiness como moda pasajera.
+
+Respeto ambas posturas pero no las comparto. La web de los 2000s también tenía sus problemas — tablas anidadas, Flash, sitios rotos en móviles. Y Agent Readiness, más que hype, es una respuesta pragmática a una realidad: cada vez más tráfico web lo generan agentes, no humanos. Prepararte para eso no es rendirte ante la moda, es ser profesional.
+
+El checklist es gratis. El MCP server es abierto. La especificación entera está en GitHub con licencia MIT. Si montas webs en 2026, dedicarle una hora a repasar las 128 reglas es probablemente la hora mejor invertida del trimestre.
