@@ -1,0 +1,151 @@
+---
+title: "Renderizar cualquier diff como si no pesara nada"
+date: "2026-05-31T12:50"
+tags:
+  - javascript
+  - rendering
+  - performance
+  - virtualization
+  - open-source
+excerpt: "Pierre lanza CodeView: renderiza el diff de Linux v6→v7 (700 MB) en el navegador sin sudar. La magia está en un truco CSS que llaman Inverse Sticky."
+---
+
+## El problema que todos hemos sufrido
+
+Abre un pull request de 50 archivos generado por un agente de IA con tests, snapshots y fixtures. El navegador se arrastra. GitHub te muestra un archivo cada vez. La review se convierte en un ejercicio de paciencia.
+
+Esto es exactamente lo que [Pierre Computer Company](https://pierre.computer) se propuso resolver con `@pierre/diffs`, su librería de renderizado de código y diffs para la web. Llevan seis meses iterando sobre el problema y acaban de publicar [CodeView](https://pierre.computer/writing/on-rendering-diffs), un componente que persigue un objetivo deliberadamente absurdo: **que puedas renderizar cualquier diff, sin importar su tamaño**.
+
+Y lo han conseguido. El diff entre Linux v6 y v7 —700 MB de parche— se renderiza en el navegador. Lo he probado en [DiffsHub.com](https://diffshub.com) y la experiencia es inmediata.
+
+## Por qué es difícil
+
+Renderizar un diff no es solo pintar texto. Necesitas:
+
+- Syntax highlighting por lenguaje
+- Números de línea
+- Layout unificado y split
+- Comentarios inline
+- Tema claro/oscuro
+- Scroll suave
+
+Todo esto multiplicado por cientos de archivos. El DOM explota, la memoria se dispara y el thread principal se ahoga. Pierre divide el problema en tres frentes: **renderizado**, **procesamiento** y **memoria**. CodeView ataca los tres a la vez.
+
+## Inverse Sticky: el truco CSS que lo cambia todo
+
+La virtualización clásica renderiza solo lo que está en el viewport. El problema es el *blanking*: cuando haces scroll rápido, JavaScript no llega a tiempo y ves zonas en blanco. Las soluciones habituales son:
+
+- **Buffer grande**: más DOM = menos ahorro.
+- **`requestAnimationFrame`**: Safari lo capa a 60 Hz en pantallas de 120 Hz+.
+- **Scroll falso**: pierdes el scroll nativo, la accesibilidad y el feeling del SO.
+
+La técnica de Pierre es ingeniosa. En vez de anclar el *top* del contenido visible al *top* del viewport (como harías con un `position: sticky; top: 0`), **invierten el sticky**: el borde inferior de la región renderizada se pega al fondo del viewport cuando haces scroll hacia abajo y el borde superior se pega al *top* cuando vuelves.
+
+```css
+/* El truco: offsets negativos en top y bottom */
+.virtualized-content {
+  position: sticky;
+  top: calc((contentHeight - viewportHeight) * -1);
+  bottom: calc((contentHeight - viewportHeight) * -1);
+}
+```
+
+Esto preserva el scroll nativo. Si JavaScript se retrasa, el contenido se queda pegado a un borde en vez de desaparecer. El blanking es imposible porque nunca puedes hacer scroll más allá del contenido renderizado: el sticky te frena antes.
+
+## Estimación rápida, ajuste diferido
+
+Calcular la altura exacta de cada línea antes de renderizar es carísimo. CodeView hace una estimación barata basada en el ancho del viewport y la longitud del texto. Después, cuando la línea ya está en el DOM, mide la diferencia real y la almacena como delta.
+
+Esto permite que el primer layout sea rápido (estimación) y que los siguientes sean precisos (medición real corregida). Para diffs de cientos de miles de líneas, la diferencia entre estimar y medir todo de antemano es la diferencia entre que funcione y que no.
+
+## Anclaje de scroll propio
+
+Los navegadores tienen *scroll anchoring* nativo: si el contenido sobre tu posición de scroll cambia de altura, el navegador ajusta para que no te salte lo que estabas viendo. Pero con virtualización esto se rompe: el DOM montado cambia constantemente y el navegador no sabe a qué anclarse.
+
+CodeView desactiva el anchoring nativo con `overflow-anchor: none` y lo implementa por su cuenta:
+
+```javascript
+// Pseudocódigo del ciclo de renderizado con anchoring propio
+function renderFrame(scrollPosition) {
+  // 1. Guardar la primera línea visible como ancla
+  const anchor = findFirstVisibleLine(scrollPosition);
+  const anchorOffset = anchor.getBoundingClientRect().top;
+
+  // 2. Montar el nuevo rango de líneas en el DOM
+  commitNewRenderedRange(scrollPosition);
+
+  // 3. Reconciliar diferencias de altura medidas
+  reconcileHeightDeltas();
+
+  // 4. Si el ancla se movió, restaurar
+  const newOffset = anchor.getBoundingClientRect().top;
+  if (newOffset !== anchorOffset) {
+    window.scrollBy(0, newOffset - anchorOffset);
+  }
+}
+```
+
+El resultado es un scroll que se siente nativo incluso cuando el DOM está en plena cirugía.
+
+## Memoria: cómo pasar de 2.4 GB a 1.15 GB
+
+El diff Linux v6→v7 ocupa 700 MB en texto plano. Al parsearlo, las estructuras de datos inflaban la memoria hasta 2.4 GB. El problema estaba en cómo JavaScript maneja las subcadenas: un string pequeño puede retener una referencia al string gigante del que vino.
+
+```javascript
+// Problema: line mantiene viva la referencia a hugePatch
+const hugePatch = readFileSync("linux-v6-to-v7.patch"); // 700 MB
+const line = hugePatch.substring(0, 80);
+
+// Solución: forzar la copia para romper la referencia
+const line = String(hugePatch.substring(0, 80));
+```
+
+Al forzar la copia de cada línea parseada, el *garbage collector* puede liberar el string original. Memoria: **de 2.4 GB a 1.15 GB**. Tiempo de parseo: **80% más rápido**.
+
+## Pool de DOM, opciones compartidas y highlighting diferido
+
+Tres optimizaciones más que suman:
+
+**Pool de elementos DOM**: en vez de crear y destruir wrappers (con Shadow DOM, hojas de estilo y atlas de iconos SVG) cada vez que un archivo entra o sale del viewport, se reutilizan. Solo se limpia el contenido específico.
+
+**Estado compartido para opciones**: antes, cada `File` o `FileDiff` tenía su propio objeto de configuración. Cambiar un flag implicaba recorrer decenas de miles de instancias. Ahora, CodeView tiene un único objeto fuente con getters; los items leen de ahí. 20-30 MB menos de memoria en el diff de Linux.
+
+**Syntax highlighting diferido con workers**: Shiki resalta en Web Workers. El código se renderiza primero como texto plano y el highlighting llega después, de forma progresiva. Una caché LRU evita repetir trabajo cuando el código vuelve a entrar en el viewport.
+
+```javascript
+// Flujo conceptual del highlighting diferido
+class HighlightManager {
+  constructor() {
+    this.workers = new WorkerPool(navigator.hardwareConcurrency);
+    this.cache = new LRUCache({ max: 200 });
+  }
+
+  async highlight(code, lang) {
+    const key = `${lang}:${hash(code)}`;
+    if (this.cache.has(key)) return this.cache.get(key);
+
+    // El worker tiene su propia instancia de Shiki
+    const result = await this.workers.run({ code, lang });
+    this.cache.set(key, result);
+    return result;
+  }
+}
+```
+
+## Lo que todavía falla
+
+Pierre es honesto sobre los puntos débiles:
+
+- **CSS**: en scroll agresivo, layout y paint pueden dominar el frame budget. Han tirado *agentic research loops* al problema y no han encontrado solución.
+- **Serialización**: mandar el highlighting de un archivo de 10.000 líneas a través del pool de workers tiene un coste de serialización no trivial. Probablemente necesite un enfoque server-side con streaming.
+- **Líneas muy largas**: no virtualizan horizontalmente. Una línea minificada de JS puede generar un hit de DOM considerable.
+
+Y una nota sobre Safari: el *Inverse Sticky* puede seguir mostrando blanking bajo scroll agresivo en WebKit, las devtools dificultan trazar problemas de rendimiento y `requestAnimationFrame` sigue capeado a 60 Hz.
+
+## Mi veredicto
+
+Me flipa este tipo de trabajo. No es una librería más de componentes React; es ingeniería de verdad sobre las tripas del navegador, con mediciones reales y soluciones creativas. La técnica del *Inverse Sticky* es de esas ideas que parecen obvias una vez que alguien las explica, pero a nadie se le habían ocurrido antes.
+
+El timing es perfecto además. Con los agentes de código generando PRs cada vez más grandes, tener un visor de diffs que no se ahogue es pasar de «reviso esto en tres horas» a «lo veo en diez minutos». La diferencia entre revisar y no revisar.
+
+`@pierre/diffs` está en npm, la [documentación de CodeView](https://pierre.computer/docs/diffs/codeview) es sólida y [DiffsHub.com](https://diffshub.com) te deja probarlo con cualquier diff público de GitHub cambiando `github` por `diffshub` en la URL. Pruébalo con un PR grande. La diferencia se nota en el primer scroll.
