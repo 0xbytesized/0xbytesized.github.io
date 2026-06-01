@@ -1,0 +1,140 @@
+---
+title: "Rseq: la syscall oculta que jubila los mutex en Linux"
+date: "2026-06-01T07:30"
+tags: ["linux", "kernel", "concurrencia", "rendimiento", "c"]
+excerpt: "Las secuencias reiniciables de Linux permiten escribir estructuras de datos concurrentes sin locks ni atómicos y en CPUs de 96 núcleos la diferencia es brutal."
+---
+
+Imagina que tienes un contador de visitas en tu blog. Cada petición incrementa un número. Simple, ¿no? Si tu blog tiene una sola hebra, basta con `contador++`. Pero si tienes 96 núcleos sirviendo peticiones en paralelo y pones un mutex alrededor de ese incremento, acabas de crear un cuello de botella que convierte tu Threadripper de 17.000 dólares en poco más que un pisapapeles muy caro.
+
+Justine Tunney —sí, la creadora de Cosmopolitan y de los ejecutables "αcτµαlly pδrταblε"— acaba de publicar un tutorial brutal sobre una feature del kernel Linux que lleva disponible desde 2018 y que casi nadie usa fuera de glibc, jemalloc y tcmalloc: las **secuencias reiniciables** o `rseq`.
+
+## El problema: los locks no escalan
+
+El enfoque ingenuo para proteger una estructura de datos compartida entre hebras es un mutex:
+
+```c
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static long contador = 0;
+
+void incrementar(void) {
+    pthread_mutex_lock(&lock);
+    contador++;
+    pthread_mutex_unlock(&lock);
+}
+```
+
+En un sistema con 4 núcleos esto funciona. En uno con 96 núcleos, todas las hebras hacen cola para tocar la misma variable. El mutex se convierte en un embudo donde solo pasa una hebra a la vez. La contención se dispara y el rendimiento se desploma.
+
+Podrías pensar: "uso atómicos y me olvido del mutex". Algo como:
+
+```c
+#include <stdatomic.h>
+
+static _Atomic long contador = 0;
+
+void incrementar(void) {
+    atomic_fetch_add(&contador, 1);
+}
+```
+
+Esto es mejor, pero sigue teniendo un problema sutil: todas las hebras compiten por la misma línea de caché. La CPU, internamente, resuelve esa contención con su propio mecanismo de coherencia —que en la práctica funciona como un mutex hardware y no uno especialmente bueno.
+
+## Sharding: repartir para reinar
+
+La solución clásica es dividir el problema. En lugar de un contador global, tienes uno por CPU:
+
+```c
+#define MAX_CPUS 1024
+
+static struct {
+    alignas(64) long contador;  // 64 bytes = una línea de caché
+} shards[MAX_CPUS];
+
+void incrementar(void) {
+    int cpu = sched_getcpu();
+    shards[cpu].contador++;
+}
+
+long leer_total(void) {
+    long total = 0;
+    for (int i = 0; i < MAX_CPUS; i++)
+        total += shards[i].contador;
+    return total;
+}
+```
+
+El `alignas(64)` no es capricho: garantiza que cada contador ocupe su propia línea de caché, eliminando el _false sharing_. Y al indexar por CPU, cada núcleo trabaja sobre su trozo privado sin molestar a los demás. En benchmarks, esto es entre 10x y 100x más rápido que el mutex.
+
+**Pero hay una trampa.**
+
+Entre la llamada a `sched_getcpu()` y la escritura en `shards[cpu].contador`, el kernel puede decidir mover tu hebra a otra CPU. Si eso ocurre, escribes en el contador equivocado. Para protegerse de este caso —que es raro, pero posible— necesitas volver a poner un mutex por shard. Y aunque un mutex sin contención cuesta solo ~15 nanosegundos, sigue siendo 15 veces más que un acceso thread-local puro, que ronda 1 nanosegundo.
+
+Aquí es donde entran las secuencias reiniciables.
+
+## Cómo funciona rseq
+
+El mecanismo es elegantísimo. Cuando una hebra se crea en Linux moderno (4.18+), puede emitir la syscall `rseq()` para registrar 32 bytes de almacenamiento TLS (Thread-Local Storage) que el kernel usará:
+
+1. **Campo `cpu_id`**: el kernel lo actualiza cada vez que la hebra se reubica en otra CPU. Leer el número de CPU ahora cuesta 1 nanosegundo (un `mov` relajado) en lugar del microsegundo que tardaba la syscall `getcpu()`.
+
+2. **Campo `rseq_cs`**: la hebra puede escribir aquí un puntero a una "sección crítica" —un intervalo de instrucciones assembly— que quiere proteger. Si el kernel precave la hebra *mientras está dentro de ese intervalo*, no la reubica sin más: salta al _abort handler_ que la hebra ha especificado, que típicamente reinicia la secuencia desde el principio.
+
+Es como una micro-transacción de base de datos, pero a nivel de hardware y kernel. La secuencia tiene que ser corta —10 instrucciones assembly como mucho— y la última instrucción debe ser la que modifica la estructura de datos visible para otras hebras.
+
+El resultado es que puedes eliminar tanto el mutex como los atómicos, manteniendo el sharding y el kernel se encarga del caso rarísimo de que te expropien a mitad de camino.
+
+## El ejemplo canónico: contador de visitas
+
+Tunney publicó benchmarks comparando cinco estrategias para incrementar un contador en una máquina con 96 núcleos (AMD Threadripper Pro 7995WX):
+
+| Estrategia | ops/segundo | Tiempo de CPU |
+|---|---|---|
+| Mutex (glibc) | 30 millones | 11.744 seg |
+| Mutex (cosmopolitan) | 65 millones | 34 ms |
+| Atómicos | 82 millones | 4.366 ms |
+| Sharding con mutex | 3.535 millones | 93 ms |
+| **rseq** | **96.000 millones** | **1,2 ms** |
+| Afinidad (threads fijadas a CPU) | 274.285 millones | 0 ms |
+
+La diferencia entre el mutex de glibc y rseq es de **tres órdenes de magnitud** en wall time. En tiempo de CPU, rseq es un millón de veces más eficiente. No es una errata.
+
+Las cifras en ARM con el Ampere Altra de 128 núcleos cuentan una historia similar: rseq alcanza 32.000 millones de ops/segundo frente a los 6.000 millones del mutex de cosmopolitan y los patéticos 5,8 millones del mutex de glibc.
+
+## Cómo se usa en la práctica
+
+No es algo que escribas a mano en tu día a día. rseq requiere instrucciones assembly específicas y un manejo cuidadoso de los offsets en la estructura TLS. De hecho, la propia Tunney advierte que los LLMs actuales no son capaces de generar secuencias reiniciables correctamente.
+
+Pero las bibliotecas que usas sí lo implementan. jemalloc usa rseq para su allocator per-CPU. glibc lo usa internamente para acelerar ciertas operaciones. El runtime Cosmopolitan lo integra en su `malloc()` y reporta mejoras de **34x en ARM de 128 núcleos** y **43x en Threadripper de 96 núcleos** frente a la versión portable con sharding.
+
+La API de Linux para rseq es directa pero de bajo nivel:
+
+```c
+#include <linux/rseq.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+// Registrar rseq para esta hebra
+struct rseq rseq_area alignas(32) = {0};
+
+int inicializar_rseq(void) {
+    return syscall(SYS_rseq, &rseq_area, sizeof(rseq_area), 0, RSEQ_SIG);
+}
+
+// Ahora rseq_area.cpu_id contiene el núcleo actual
+// y rseq_area.rseq_cs puede apuntar a secciones críticas
+```
+
+El campo `RSEQ_SIG` es una firma que el kernel verifica antes de manipular la estructura, como protección básica contra corrupción de memoria.
+
+## Mi veredicto
+
+Lo brillante de rseq no es tanto el rendimiento —que es obsceno— sino el modelo mental que propone. En lugar de luchar contra el scheduler del sistema operativo con afinidades manuales o RTOS, **cooperas con él**. Le dices al kernel: "oye, si me interrumpes en estas tres instrucciones, simplemente reiníciame". Y el kernel dice "vale".
+
+Es el tipo de decisión de diseño que separa los sistemas que escalan de los que no. En lugar de añadir capas de complejidad para controlar el hardware, le das al kernel la información que necesita para tomar mejores decisiones.
+
+Ahora bien, hay que ser realistas. rseq solo funciona en Linux 4.18+. No existe en macOS, FreeBSD o Windows. Si escribes bibliotecas portables, necesitas un fallback con sharding tradicional y mutexes. Pero como optimización para el camino feliz en servidores Linux modernos, es imbatible.
+
+La predicción de Tunney es ambiciosa: cree que todos los sistemas operativos acabarán adoptando algo similar y que los lenguajes de sistemas evolucionarán para expresar secuencias reiniciables de forma nativa, igual que C11 introdujo APIs de compilador para atómicos. No sé si llegará tan lejos, pero viendo las cifras, desde luego debería.
+
+Si trabajas con sistemas concurrentes en Linux y aún no habías oído hablar de rseq, este es el momento de prestar atención. Los 128 núcleos ya están aquí y no van a dejar de multiplicarse.
