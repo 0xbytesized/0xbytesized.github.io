@@ -1,0 +1,118 @@
+---
+title: "Roto: scripting compilado y tipado para Rust"
+date: "2026-06-01T01:00"
+tags: ["rust", "scripting", "roto", "nlnetlabs", "lenguajes"]
+excerpt: "NLnet Labs publica Roto v0.11.0, un lenguaje de scripting para Rust con tipos estáticos, compilación JIT e integración nativa que ya se usa en producción."
+---
+
+## El problema: ¿con qué scripteas una app en Rust?
+
+Si estás escribiendo una aplicación en Rust y necesitas un lenguaje de scripting para que tus usuarios puedan extenderla, las opciones siempre han sido un compromiso. Lua es lo más común: ligero, rápido y con bindings decentes gracias a crates como mlua o rlua. Pero Lua es dinámicamente tipado y eso choca con la filosofía de Rust. Pasas objetos con `Any`, casteas a ciegas y rezas para que el script no te explote en runtime con un error de tipos.
+
+Rhai es otra alternativa popular. Sintaxis parecida a Rust, interpretado, sin dependencias pesadas. Pero es interpretado: si tu script necesita iterar sobre miles de elementos o hacer algo computacionalmente denso, el rendimiento se resiente.
+
+Y luego está Python embebido vía PyO3. Funciona, pero introduces un runtime enorme y un modelo de memoria completamente ajeno al de Rust.
+
+Ninguna de estas opciones ofrece tipos estáticos, compilación JIT e integración idiomática con Rust al mismo tiempo. Hasta ahora.
+
+## Roto: compilado, tipado y diseñado para Rust
+
+Hace justo un año, NLnet Labs — los mismos que mantienen Unbound y NSD, dos pilares del DNS en internet — [anunciaron Roto](https://blog.nlnetlabs.nl/introducing-roto-a-compiled-scripting-language-for-rust/). La idea: un lenguaje de scripting que se integrara tan bien con Rust que registrar funciones y tipos desde el host fuera tan natural como escribir un `impl` block.
+
+Esta semana han publicado [Roto v0.11.0](https://community.nlnetlabs.nl/t/release-roto-0-11-0/3394) junto con un [artículo repasando el primer año de vida del proyecto](https://blog.nlnetlabs.nl/one-year-of-roto-the-compiled-scripting-language-for-rust/). Doce meses, seis versiones, charlas en EuroRust y FOSDEM. Y lo más importante: adopción externa real.
+
+Estas son las características que lo diferencian:
+
+- **Tipado estático** con inferencia. No hay `Any`, no hay casteos mágicos.
+- **Compilación JIT** vía Cranelift (el mismo backend que usa Wasmtime). No es interpretado.
+- **Integración nativa con Rust** mediante el macro `library!`. Los tipos de Rust se exponen a Roto con sintaxis de `impl` blocks.
+- **Sintaxis familiar**: `fn` en vez de `function`, `//` para comentarios, f-strings, `for...in`, `while`, `enum`, `List[T]`.
+
+Aquí tienes un script Roto real para hacerte una idea de la sintaxis:
+
+```roto
+const CIUDADES: List[String] = [
+    "Madrid",
+    "Barcelona",
+    "Valencia",
+    "Sevilla",
+];
+
+fn clasificar_ciudad(nombre: String) -> String {
+    for ciudad in CIUDADES {
+        if nombre == ciudad {
+            return f"{nombre} está en el top 4 de España";
+        }
+    }
+    f"{nombre} no está en la lista principal"
+}
+```
+
+Fíjate en los detalles: `List[String]` con tipos paramétricos, `for...in` sobre listas, f-strings con interpolación y constantes globales con `const`. Nada de `local`, nada de `nil`, nada de sorpresas en tiempo de ejecución.
+
+## El macro `library!`: registrar tipos sin ceremonia
+
+La joya de la integración con Rust es el macro `library!`. Antes de la versión 0.10, registrar un tipo requería llamadas imperativas al runtime. Algo así:
+
+```rust
+// API antigua (pre-0.10): verbosa y propensa a errores
+runtime.register_clone_type::<Ruta>("Una ruta de archivo")?;
+
+#[roto_method(runtime, Ruta)]
+fn contiene(ruta: &Ruta, segmento: &str) -> bool {
+    ruta.segmentos.contains(&segmento.to_string())
+}
+```
+
+Con el macro `library!` introducido en v0.10, el mismo registro se convierte en esto:
+
+```rust
+// API moderna con library!: declarativa e idiomática
+let lib = library! {
+    /// Una ruta de archivo en el sistema
+    type Ruta = Val<Ruta>;
+
+    impl Val<Ruta> {
+        fn contiene(self, segmento: String) -> bool {
+            self.segmentos.contains(&segmento)
+        }
+    }
+};
+
+let runtime = Runtime::from_lib(lib)?;
+```
+
+El cambio es significativo. Pasas de registrar tipos y métodos con llamadas separadas a definir un bloque declarativo que parece Rust estándar: docstrings con `///`, `impl` blocks, `self` como receptor. El runtime se construye desde la librería con `Runtime::from_lib()`. Menos boilerplate, menos sitios donde equivocarte, más legible.
+
+## ¿Quién lo está usando ya?
+
+NLnet Labs creó Roto para [Rotonda](https://nlnetlabs.nl/projects/routing/rotonda/), su propio router BGP en Rust. Pero lo interesante es que ya hay adopción externa.
+
+[Iocaine](https://iocaine.madhouse-project.org/), un proxy que defiende servidores web contra crawlers de IA sirviéndoles basura generada, permite ser scripteado con Lua, Fennel o Roto. Los scripts por defecto están escritos en Roto y, según su autor, Algernon, Roto ofrece el mejor rendimiento de los tres. No es una opinión académica: es el resultado de usarlo en producción contra tráfico real.
+
+Esto valida la tesis de Roto: un lenguaje de scripting compilado y tipado no es un capricho académico, es una ventaja medible cuando el script se ejecuta miles de veces por minuto.
+
+Además, el uso por parte de Iocaine ha sido un campo de pruebas brutal. Bugs reales, casos extremos, peticiones de features con fundamento. Roto ha madurado a golpe de issues bien reportados.
+
+## Lo que le falta
+
+Roto v0.11.0 no es un producto terminado. El equipo de NLnet Labs es transparente sobre lo que aún no existe:
+
+- **Hashmaps**: las listas son el único tipo de colección por ahora.
+- **Funciones genéricas**: puedes parametrizar tipos pero no escribir `fn map<T, U>(lista: List[T], f: fn(T) -> U) -> List[U]`.
+- **Tooling**: hay syntax highlighting para algunos editores, pero no existe formatter ni LSP todavía.
+- **Estado mutable definido por el usuario**: los scripts son mayormente funciones puras que operan sobre datos que el host les pasa.
+
+Son ausencias importantes, pero también son el tipo de cosas que un proyecto con tracción real va tachando iteración a iteración.
+
+## Mi veredicto
+
+Roto me parece uno de esos proyectos que no van a salir en portadas pero que resuelven un problema muy concreto y lo resuelven bien. El espacio de los lenguajes de scripting para Rust ha estado dominado por Lua durante años y aunque Lua es excelente en su nicho, el desajuste de tipos con Rust siempre ha dolido.
+
+La decisión de usar Cranelift como backend JIT es inteligente: es el mismo compilador que usa Wasmtime, está mantenido por la Bytecode Alliance y genera código máquina de calidad decente sin la complejidad de LLVM. No vas a batir récords de velocidad con Cranelift, pero para un lenguaje de scripting embebido es más que suficiente.
+
+El macro `library!` es el tipo de API que te hace pensar "así debería haberse hecho desde el principio". Es declarativa, aprovecha la sintaxis de Rust que ya conoces y el compilador te da errores con números de línea en vez de mensajes crípticos de una macro personalizada.
+
+Lo que más me convence es que NLnet Labs tiene piel en el juego. No es un proyecto de fin de semana ni un experimento académico: necesitan que Roto funcione para Rotonda, su router BGP. Eso significa que el lenguaje va a seguir recibiendo mantenimiento y mejoras porque su propio producto depende de él.
+
+Si tienes una aplicación en Rust que necesita scripting y estás cansado de lidiar con `Any`, vale la pena dedicarle una tarde a probar Roto. No está terminado, pero lo que hay ya funciona y la dirección es la correcta.
