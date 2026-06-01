@@ -1,0 +1,137 @@
+---
+title: "Dav2d: VideoLAN lanza el decoder que hará viable AV2"
+date: "2026-06-01T13:22"
+tags: ["av2", "video", "codecs", "open-source", "videolan", "asm"]
+excerpt: "VideoLAN anuncia dav2d, un decoder ultrarrápido para AV2 con optimizaciones AVX2, NEON y RISC-V. El códec es 5× más complejo que AV1 pero ya tienen respuesta."
+---
+
+El sábado pasado Jean-Baptiste Kempf —el presidente de VideoLAN, la organización detrás de VLC— publicó un anuncio que pasó desapercibido para muchos pero que es enorme para cualquiera que trabaje con vídeo: **dav2d ya está aquí**. Y no es un README con buenas intenciones: es un decoder funcional, con soporte 8-bit y 10-bit y con código assembly optimizado para x86, ARM y RISC-V desde el día uno.
+
+## El problema: AV2 es un monstruo
+
+AV2 es el nuevo códec de vídeo de la Alliance for Open Media, el mismo consorcio que nos trajo AV1. La mejora en compresión ronda el 25% respecto a AV1, que ya era brutalmente eficiente. Pero hay una trampa: **decodificar AV2 es unas cinco veces más costoso en CPU que AV1**.
+
+Para que te hagas una idea: cuando AV1 salió en 2018, el hardware de la época sudaba para reproducirlo en tiempo real. Ahora imagina multiplicar ese requisito por cinco. Sin una implementación de software agresivamente optimizada, AV2 sería papel mojado durante años.
+
+Kempf lo resume con una frase que debería ir grabada en todo proyecto de estándares:
+
+> A codec does not really exist until everyone can decode it.
+
+Y tiene razón. Puedes tener el mejor algoritmo del mundo, pero si no hay un decoder que funcione en un portátil normal, en un navegador, en un televisor, no existe.
+
+## De dav1d a dav2d: la experiencia manda
+
+VideoLAN ya hizo esto antes. En 2018, cuando AV1 estaba a punto de congelarse, mucha gente en la AOM pensaba que los decoders por hardware y la implementación de referencia serían suficientes. El equipo de VideoLAN dijo que no, que hacía falta un decoder software rápido y lo construyeron.
+
+El resultado fue **dav1d**, que hoy es el decoder de AV1 más desplegado del mundo. Está en VLC, FFmpeg, mpv, Firefox, Chrome, Safari, Android, Windows y Linux. Cuando abres un vídeo AV1 en prácticamente cualquier sitio, lo más probable es que dav1d esté haciendo el trabajo pesado.
+
+Ahora están aplicando la misma receta pero con ventaja: no empiezan de cero. AV2 comparte muchos conceptos con AV1, y dav1d ya resolvió problemas arquitectónicos gordos: threading, organización del SIMD, tests, portabilidad y diseño de API. Como dice Kempf:
+
+> A lot of the experience accumulated over years of dav1d development transfers directly to dav2d.
+
+## Qué tiene ya dav2d
+
+El repositorio no es un esqueleto. El árbol actual ya contiene:
+
+- Un decoder **completo** para AVM v15 (la referencia de AV2), con soporte 8-bit y 10-bit
+- Parsing de bitstream y cabeceras
+- Decodificación de entropía
+- Predicción intra e inter
+- Transformadas, CCTX, CfL
+- Filtros: deblocking, CDEF, Wiener y film grain
+
+Y en cuanto a optimizaciones por arquitectura:
+
+- **x86**: código AVX2 para varias transformadas inversas, CCTX, deblock e intra prediction
+- **ARM**: NEON para decodificación de entropía, SAD, intra prediction, predictores DC y smooth, motion compensation
+- **RISC-V**: trabajo inicial en intra prediction y motion compensation
+
+No está mal para un proyecto que lleva apenas unas semanas en público.
+
+## Cómo encaja dav2d en la cadena de vídeo
+
+Si alguna vez has trabajado con FFmpeg, el flujo es así:
+
+```bash
+# Con dav1d (AV1) — así se ha hecho durante años
+ffmpeg -c:v libdav1d -i video.av1 -c:v libx264 output.mp4
+
+# Con dav2d (AV2) — cuando se integre en FFmpeg será igual de directo
+ffmpeg -c:v libdav2d -i video.av2 -c:v libx264 output.mp4
+```
+
+A nivel de API, el patrón de cualquier decoder de vídeo moderno sigue esta estructura:
+
+```c
+// Patrón típico de decoder por frames — así funcionan dav1d y dav2d
+// (pseudocódigo representativo, no API literal de dav2d)
+
+void* decoder = decoder_open(&config);
+uint8_t* bitstream_data = read_file("video.av2");
+
+decoder_send_data(decoder, bitstream_data, data_size);
+
+DecodedFrame frame;
+while (decoder_get_frame(decoder, &frame) == OK) {
+    render_frame(&frame);
+    decoder_release_frame(decoder, &frame);
+}
+
+decoder_close(decoder);
+```
+
+La magia no está en la API —que es deliberadamente simple— sino en lo que pasa dentro de `decoder_get_frame`. Ahí es donde entran los miles de líneas de assembly escrito a mano que exprimen cada ciclo de CPU.
+
+## El arma secreta: checkasm
+
+Una de las razones por las que dav2d avanza mucho más rápido que dav1d en su día es **checkasm**, una herramienta que el equipo creó durante el desarrollo de dav1d.
+
+Checkasm resuelve un problema endiabladamente común cuando optimizas con SIMD: ¿cómo sabes que tu versión ultraoptimizada en AVX2 produce exactamente el mismo resultado que la implementación C de referencia? La respuesta es: comparándolas automáticamente con datos aleatorios.
+
+```c
+// Patrón checkasm: comparar C de referencia vs asm optimizado
+
+void check_inverse_transform_8x8(void) {
+    // Datos de entrada aleatorios pero deterministas
+    int16_t input[64], ref_output[64], opt_output[64];
+
+    randomize_coefficients(input);
+
+    // Referencia C (lenta, correcta)
+    inv_txfm_c(ref_output, input, 8, 8, bitdepth);
+
+    // Versión AVX2 (rápida, ¿correcta?)
+    inv_txfm_avx2(opt_output, input, 8, 8, bitdepth);
+
+    // Si difieren, checkasm te dice exactamente dónde
+    for (int i = 0; i < 64; i++) {
+        if (abs(ref_output[i] - opt_output[i]) > tolerance) {
+            fail_at_position(i, ref_output[i], opt_output[i]);
+        }
+    }
+}
+```
+
+Cada vez que alguien escribe una rutina nueva en assembly, checkasm la valida contra la referencia C. Si falla, sabes el píxel exacto donde los valores divergen. Esto elimina el 90% del debugging a ciegas y permite iterar muchísimo más rápido.
+
+El árbol actual de dav2d ya tiene cobertura de checkasm para transformadas inversas, motion compensation, film grain, CfL y reference motion vectors. Esto significa que cada nueva optimización se puede verificar en segundos, no en horas.
+
+## Por qué esto importa aunque no toques vídeo
+
+El patrón dav1d → dav2d es una clase magistral de ingeniería de software aplicada a un problema real:
+
+1. **Empieza antes de que el estándar esté cerrado**. Para cuando AV2 se congele del todo, dav2d ya tendrá años de optimización encima.
+
+2. **Invierte en tooling desde el principio**. Checkasm no es sexy, pero es lo que permite que 20 personas colaboren en assembly para 3 arquitecturas sin volverse locos.
+
+3. **El código abierto como ventaja estratégica**. Al liberar el decoder bajo licencia BSD desde el día uno, VideoLAN garantiza que dav2d se integrará en todas partes igual que dav1d: navegadores, reproductores, sistemas operativos, herramientas de testing.
+
+4. **No delegues en el hardware**. Kempf ya se equivocó una vez confiando en que los decoders hardware llegarían rápido. No va a cometer el mismo error dos veces.
+
+## Mi veredicto
+
+Dav2d es de esos proyectos que no ganan titulares pero que afectan a cómo consumes contenido todos los días. Cada vez que ves un vídeo en internet, hay un decoder software trabajando. Que ese decoder sea rápido, libre y portable no es un detalle técnico: es la diferencia entre que un nuevo códec se adopte en meses o en una década.
+
+El equipo de VideoLAN ya demostró con dav1d que saben lo que hacen. Ahora tienen mejor tooling, más experiencia y han empezado antes. Si la historia se repite —y todo apunta a que sí— dav2d será lo que haga que AV2 sea usable en el mundo real mucho antes de que llegue el silicio especializado.
+
+Y todo ello con una licencia BSD que permite que cualquiera lo integre donde quiera. Así se construye infraestructura digital que dura.
