@@ -1,0 +1,127 @@
+---
+title: "El gusano que infectó 30 paquetes npm de Red Hat"
+date: "2026-06-01T19:30"
+tags: ["npm", "supply-chain", "seguridad", "Red Hat", "malware"]
+excerpt: "Un ataque a la cadena de suministro comprometió 30+ paquetes del scope @redhat-cloud-services con malware que se auto-propaga, roba secretos y burla la 2FA."
+---
+
+El 1 de junio de 2026, StepSecurity detectó que más de 30 paquetes del scope `@redhat-cloud-services` en npm estaban distribuyendo malware. No fue un typosquatting cualquiera ni un paquete falso con nombre parecido: los paquetes legítimos de Red Hat, publicados desde su propio pipeline de CI/CD, contenían un implante de 4.2 MB que se ejecutaba automáticamente en cada `npm install`.
+
+El payload es un recolector de credenciales multi-etapa que barre secretos de GitHub Actions, tokens de AWS, GCP, Azure, Kubernetes, HashiCorp Vault, npm y CircleCI. Y lo más inquietante: es un gusano. Usa los tokens de npm que roba para republicar versiones infectadas de otros paquetes, incluso en cuentas con autenticación de dos factores activada.
+
+## El vector de entrada: preinstall
+
+Todo empieza con una línea en el `package.json` de cada paquete comprometido:
+
+```json
+{
+  "scripts": {
+    "preinstall": "node index.js"
+  }
+}
+```
+
+El hook `preinstall` de npm es una característica legítima: permite ejecutar comandos antes de que el paquete se instale. El problema es que se ejecuta **antes de cualquier código de la aplicación**, sin que el desarrollador vea nada raro. No hay warning, no hay prompt. Solo un `node index.js` que se lanza en cuanto npm procesa el paquete.
+
+Lo que debería ser un archivo de unos pocos kilobytes pesaba 4.2 MB. Ese tamaño es la primera señal de alarma, pero npm no valida el peso de los scripts de instalación.
+
+## Cuatro capas de ofuscación
+
+El malware no es un script obvio que puedas leer abriendo el archivo. Está envuelto en cuatro capas diseñadas para burlar distintos tipos de análisis:
+
+### Capa 1: ROT-21
+
+La superficie es un `try { eval(...) } catch(e) {}` que envuelve todo el payload. El contenido está codificado con ROT-21, un cifrado César con desplazamiento 21. Los caracteres se almacenan como un array numérico enorme reconstruido con `String.fromCharCode`. El bloque `catch` vacío asegura que nada explote en la consola del desarrollador pase lo que pase.
+
+```javascript
+// Conceptualmente, ROT-21 funciona así:
+function rot21(str) {
+  return str.replace(/[a-zA-Z]/g, function(c) {
+    const base = c <= 'Z' ? 65 : 97;
+    return String.fromCharCode(((c.charCodeAt(0) - base + 21) % 26) + base);
+  });
+}
+// 'hello' se convierte en 'czggj'
+```
+
+El ROT-21 por sí solo no es cifrado — es un desplazamiento trivial. Pero combinado con el array de char codes de 4.2 MB, derrota a cualquier herramienta que solo mire el AST superficial del archivo.
+
+### Capa 2: AES-128-GCM
+
+Al decodificar la capa ROT-21 aparece un archivo JavaScript de 1.27 MB con dos blobs cifrados: `_b` (el descargador del runtime Bun) y `_p` (el implante principal). Ambos se descifran en memoria con AES-128-GCM usando claves e IVs hardcodeados. El cifrado autenticado (GCM) no solo oculta el contenido: también impide que un analista modifique el payload sin romper la integridad.
+
+### Capa 3: obfuscator.io
+
+Un alfabeto base64 personalizado con las minúsculas antes que las mayúsculas (al revés del estándar) y una tabla de 2.219 strings rotada 284 posiciones mediante un bucle IIFE de push/shift. Si intentas extraer las strings estáticamente sin simular la rotación, obtienes mapeos completamente erróneos.
+
+### Capa 4: cifrado B5
+
+PBKDF2 + Fisher-Yates personalizado. Todas las strings sensibles —dominios de comando y control, endpoints, rutas de exfiltración— están cifradas con esta capa final. No se revelan hasta que el malware está en ejecución.
+
+La progresión es deliberada: cada capa derrota una familia distinta de herramientas. ROT-21 burla escáneres de patrones simples. AES-128-GCM burla el análisis estático de strings. obfuscator.io burla los deobfuscadores genéricos. B5 obliga al análisis dinámico.
+
+## Qué roba el implante
+
+Una vez desplegado, el malware hace un barrido sistemático del entorno:
+
+- **GitHub Actions**: secrets del workflow, tokens de acceso
+- **AWS**: credenciales de la metadata service y variables de entorno
+- **GCP y Azure**: service account tokens y managed identity endpoints
+- **Kubernetes**: service account tokens montados en `/var/run/secrets`
+- **HashiCorp Vault**: tokens de los helpers de autenticación
+- **npm**: tokens del archivo `.npmrc` local
+- **CircleCI**: tokens de API del entorno de build
+
+No es un ataque dirigido a un tipo de infraestructura concreta: es una red barredera. Si tu pipeline toca algo cloud, probablemente el malware tiene un extractor para ello.
+
+## El gusano: auto-propagación sin intervención humana
+
+La parte más inquietante es el mecanismo de propagación. El malware usa los tokens de npm que roba para **republicar versiones infectadas de otros paquetes**, usando el parámetro `bypass_2fa` de la API de npm.
+
+```bash
+# Ejemplo conceptual de cómo npm permite saltarse la 2FA por API
+npm publish --//registry.npmjs.org/:_authToken=TOKEN_ROBADO
+```
+
+El parámetro `bypass_2fa` existe para entornos de CI/CD donde no hay un humano para introducir el código de autenticación. Es una necesidad operativa real, pero en manos de un malware se convierte en un multiplicador de fuerza: cada máquina infectada puede sembrar la siguiente ola sin que el atacante mueva un dedo.
+
+El vector gusano + bypass_2fa + CI/CD comprometido crea un bucle peligroso: el pipeline infectado publica paquetes maliciosos, que infectan otros pipelines, que roban más tokens, que publican más paquetes maliciosos.
+
+## El origen: el pipeline de CI/CD
+
+StepSecurity determinó que todos los paquetes afectados se publicaron mediante GitHub Actions OIDC desde el repositorio `RedHatInsights/javascript-clients`. Esto significa que el atacante no robó credenciales de un desarrollador individual: **comprometió el pipeline de CI/CD upstream**.
+
+La diferencia es fundamental. Si un developer pierde su token, el alcance es su cuenta. Si el pipeline estándar de la organización está infectado, todo lo que pasa por él sale contaminado. Y en el ecosistema de `@redhat-cloud-services`, eso incluye clientes de API para compliance, RBAC, inventario de hosts, notificaciones, parches, vulnerabilidades, integrations y fuentes. Prácticamente toda la superficie de gestión cloud de Red Hat.
+
+## Cómo protegerte
+
+Si tienes algún paquete del scope `@redhat-cloud-services` en tu `package.json`, revisa las versiones instaladas inmediatamente. Las versiones maliciosas siguen un patrón reconocible: tres versiones consecutivas por paquete con un salto en el número de patch.
+
+Si has instalado alguna de las versiones afectadas en un entorno de CI/CD, asume que ese entorno está comprometido y rota todas las credenciales expuestas.
+
+Más allá de este incidente concreto, hay medidas que cualquier equipo puede tomar:
+
+```javascript
+// Usa --ignore-scripts en CI/CD cuando no necesites hooks de instalación
+// npm install --ignore-scripts
+
+// En tu .npmrc de CI, sé explícito sobre qué scripts permites:
+// ignore-scripts=true
+
+// Si necesitas scripts, audita qué paquetes los ejecutan:
+// npm ls | grep -E "preinstall|postinstall"
+```
+
+## Mi veredicto
+
+Llevamos años hablando de supply chain en abstracto, con diapositivas y whitepapers y cada pocos meses aparece un caso que demuestra que el problema es peor de lo que creíamos. Este ataque a Red Hat es particularmente grave por tres razones.
+
+Primero, **no es un paquete oscuro de un maintainer solitario**. Es el scope oficial de una de las empresas de software empresarial más grandes del mundo, publicado desde su propio CI/CD.
+
+Segundo, **la auto-propagación cambia las reglas**. No necesitas que mil developers instalen el paquete malicioso: el propio malware se encarga de distribuirse. Es un gusano de verdad, no un ataque pasivo de "a ver quién pica".
+
+Tercero, **la ofuscación en cuatro capas es señal de profesionalización**. Esto no es un script kiddie probando suerte. ROT-21 + AES-128-GCM + obfuscator.io + PBKDF2/Fisher-Yates es un esfuerzo de ingeniería serio, diseñado para burlar las tres generaciones de herramientas de análisis que usa la industria.
+
+El ecosistema npm tiene una vulnerabilidad estructural: los hooks de instalación se ejecutan con los mismos privilegios que tu código de build, antes de que puedas inspeccionar nada y sin un sandbox que limite lo que pueden tocar. Mientras `preinstall` y `postinstall` sigan siendo vectores de ejecución no controlados, esto va a seguir pasando. La pregunta no es si habrá otro ataque así, sino cuándo y contra quién.
+
+Mientras tanto, si usas npm en CI/CD, desactiva los scripts de instalación que no necesites. Hoy.
