@@ -1,0 +1,99 @@
+---
+title: "GHC aprendió de los biólogos a compilar Haskell más rápido"
+date: "2026-06-02T01:40"
+tags: ["haskell", "ghc", "compiladores", "algoritmos", "optimización"]
+excerpt: "El algoritmo que pliega ARN es el mismo que acelera la compilación de Haskell. Un ingeniero optimizó GHC y encontró la respuesta en un paper de 1978."
+---
+
+Imagina que tienes un bloque `do` en Haskell con dos llamadas a una API que son completamente independientes:
+
+```haskell
+numCommonFriends x y = do
+  fx <- friendsOf x
+  fy <- friendsOf y
+  return (length (intersect fx fy))
+```
+
+Por defecto, GHC traduce esto a binds secuenciales con `>>=`. La segunda llamada no empieza hasta que la primera termina. Dos round-trips de red, uno detrás de otro, aunque `fy` no depende de `fx` en absoluto.
+
+Con `ApplicativeDo`, el compilador detecta la independencia y lo reagrupa con `<*>`, permitiendo que librerías como Haxl ejecuten ambas llamadas en paralelo. Un solo viaje a la base de datos en vez de dos.
+
+El problema es que encontrar la agrupación **óptima** es un algoritmo O(n³). En el paper original que introdujo la feature, un bloque `do` de 1000 statements tardaba 55 segundos en compilarse con la versión óptima, frente a menos de dos segundos con la heurística greedy. Por eso el flag `-foptimal-applicative-do` lleva años apagado por defecto.
+
+Ian Duncan, un ingeniero de estabilidad en los Países Bajos, vio esto y pensó: «un algoritmo correcto pero demasiado lento para usarse suena a bug». Lo que no sabía es que pasaría meses persiguiendo una solución que lo llevaría directo a un paper de biología computacional de 1978.
+
+## El problema de fondo
+
+El compilador construye un árbol sobre los statements sin reordenarlos. Cada nodo es secuencial (`Seq`) o paralelo (`Par`). `Par` solo es legal si no hay dependencias entre las dos ramas:
+
+```haskell
+data Tree = Leaf Stmt | Seq Tree Tree | Par Tree Tree
+
+cost (Leaf _) = 1
+cost (Seq l r) = cost l + cost r
+cost (Par l r) = max (cost l) (cost r)
+```
+
+El objetivo es encontrar el árbol legal de coste mínimo. La recurrencia opera sobre un span de statements de `i` a `j`. La complejidad O(n³) viene de que para cada uno de los O(n²) spans, el algoritmo prueba O(n) puntos de corte.
+
+El paper original ya metió una primera optimización: en un "blob enredado" (tangled), solo necesitas mirar los dos cortes extremos —pelar el primer statement o el último—. Si no empatan, uno de los dos es el óptimo. Esto baja la parte no-trivial a O(1) por span… excepto cuando empatan.
+
+## El empate que lo rompe todo
+
+Cuando los dos cortes extremos empatan, hay que buscar más adentro. El caso patológico que causaba los 55 segundos es una cadena pura donde cada statement depende del anterior, con cero paralelismo posible. En una cadena así, **todos** los spans empatan y el algoritmo ingenuo prueba O(n) cortes en cada uno.
+
+La observación clave de Duncan: en un empate, la respuesta solo puede ser `c` o `c+1`. Y la cadena más larga a través del span es una cota inferior. Si la cadena más larga ya es `c+1`, sabes la respuesta sin buscar más:
+
+```
+-- en un empate, con la respuesta limitada a c o c+1:
+if longestChain[i, j] == c + 1 then c + 1
+```
+
+Para una cadena pura, esto dispara en **todos** los empates. El trabajo por span colapsa de O(n) a O(1) y el coste total pasa de O(n³) a O(n²). Los números hablan solos:
+
+| Input | Cortes naive | Cortes optimizado |
+|-------|-------------|-------------------|
+| Cadena de 100 | 166.650 | 4.950 |
+| Cadena de 200 | 1.333.300 | 19.900 |
+| Bloque realista de 200 | 47.471 | 3.583 |
+
+## Nussinov, 1978: el algoritmo que pliega ARN
+
+Aquí viene el giro que hace que esta historia sea especial. Duncan se dio cuenta de que el problema es estructuralmente idéntico a la predicción de estructura secundaria del ARN.
+
+El ARN es una cadena simple de bases (A, U, G, C). Sin una segunda hebra con la que emparejarse, la cadena se pliega sobre sí misma: tramos complementarios se doblan y se unen formando tallos y horquillas. La estructura resultante es la de menor energía libre —básicamente, la que maximiza los pares complementarios—.
+
+Predecir este pliegue es un problema de optimización resuelto por el **algoritmo de Nussinov** (1978). Opera sobre una tabla triangular, con complejidad O(n³), usando exactamente la misma recurrencia de combine-sobre-punto-de-corte que el coste de ApplicativeDo:
+
+```
+best[i,j] = max sobre k de (dentro + fuera)
+```
+
+La equivalencia es profunda:
+
+- Los statements de un bloque `do` son residuos a lo largo de una cadena.
+- Las flechas de dependencia son enlaces que restringen el pliegue.
+- Los binds monádicos son tramos rígidos; los grupos aplicativos son dominios que se pliegan independientemente.
+- La regla de no-reordenar statements equivale a la regla de no-cruce de enlaces en ARN (los pseudonudos hacen el problema NP-hard en ambos casos).
+
+No es una metáfora vaga. Es la misma prohibición matemática — nesting sin entrecruzamiento — la que colapsa un espacio de búsqueda exponencial en uno polinomial en ambos dominios.
+
+## De Valiant a Bringmann: la conexión con parsing
+
+En 1975, Leslie Valiant demostró que el parsing de gramáticas libres de contexto (el algoritmo CYK, O(n³)) podía reducirse a multiplicación booleana de matrices, rompiendo la barrera cúbica. Durante décadas quedó abierta la pregunta de si el mismo truco funcionaba para problemas de optimización que usan (min, +) en vez de booleanos.
+
+El algoritmo de Bringmann et al. (FOCS 2016) —con el glorioso título *Truly Sub-cubic Algorithms for Language Edit Distance and RNA Folding via Fast Bounded-Difference Min-Plus Product*— lo consiguió. Es esencialmente el parser de Valiant para semianillos tropicales y funciona porque la propiedad de diferencia acotada impide que los números crezcan demasiado.
+
+Para ApplicativeDo, esto se traduce en una complejidad de Õ(n^2.8244) aleatorizada. Pero hay una pega: las constantes son enormes. La multiplicación rápida de matrices rectangulares tiene un overhead tal que el punto de cruce donde n^2.82 vence a un n³ bien tuneado está muy por encima de cualquier bloque `do` que un humano vaya a escribir jamás.
+
+## Mi veredicto
+
+Esta historia me parece brillante por tres razones.
+
+Primero, es un recordatorio de que los problemas de optimización en compiladores no son "aburridos". Un flag que lleva años apagado por defecto esconde una estructura computacional que conecta Haskell con la biología molecular y el parsing de lenguajes.
+
+Segundo, la solución práctica —acotar con la cadena más larga + cortes extremos— es elegantísima. No necesitas el cañón subcúbico de Bringmann para que el algoritmo sea usable. Basta con entender por qué empatan los cortes y resolver el empate con una cota que ya tenías calculada. La optimización real no está en bajar el exponente teórico, sino en eliminar el caso patológico que dispara la búsqueda.
+
+Tercero, me encanta que un ingeniero se encuentre esto por curiosidad pura. Duncan vio un flag desactivado, pensó "eso suena a bug" y pasó meses persiguiéndolo hasta dar con Nussinov y Bringmann. No estaba en su job description. Nadie le pidió que optimizara GHC. Es el tipo de hallazgo que ocurre cuando tratas el software como un objeto de estudio y no solo como una herramienta de producción.
+
+La lección más amplia: los problemas difíciles en sistemas reales rara vez son nuevos. Casi siempre hay alguien en otro campo —biología, lingüística, teoría de grafos— que ya resolvió algo estructuralmente idéntico. La parte difícil no es encontrar la solución, es reconocer el isomorfismo.
