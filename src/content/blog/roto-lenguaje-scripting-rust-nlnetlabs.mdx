@@ -52,10 +52,10 @@ Fíjate en los detalles: `List[String]` con tipos paramétricos, `for...in` sobr
 
 ## El macro `library!`: registrar tipos sin ceremonia
 
-La joya de la integración con Rust es el macro `library!`. Antes de la versión 0.10, registrar un tipo requería llamadas imperativas al runtime. Algo así:
+La joya de la integración con Rust es el macro `library!`. Antes de la versión 0.8, registrar un tipo requería llamadas imperativas al runtime. Algo así:
 
 ```rust
-// API antigua (pre-0.10): verbosa y propensa a errores
+// API antigua (pre-0.8): verbosa y propensa a errores
 runtime.register_clone_type::<Ruta>("Una ruta de archivo")?;
 
 #[roto_method(runtime, Ruta)]
@@ -64,7 +64,7 @@ fn contiene(ruta: &Ruta, segmento: &str) -> bool {
 }
 ```
 
-Con el macro `library!` introducido en v0.10, el mismo registro se convierte en esto:
+Con el macro `library!` introducido en v0.8, el mismo registro se convierte en esto:
 
 ```rust
 // API moderna con library!: declarativa e idiomática
