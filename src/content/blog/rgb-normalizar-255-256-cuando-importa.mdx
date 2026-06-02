@@ -1,0 +1,132 @@
+---
+title: "RGB: ¿255 o 256? El dilema de normalizar píxeles"
+date: "2026-06-02T09:00"
+tags: ["gráficos", "procesamiento de imágenes", "python", "matemáticas", "rendering"]
+excerpt: "Normalizar colores dividiendo entre 255 es casi un reflejo. Pero hay quien jura que entre 256 es mejor. Analizo ambas opciones con código y cuantizadores."
+---
+
+Supón que estás escribiendo un programa de procesamiento de imágenes. Cargas un PNG, conviertes los píxeles de enteros 8-bit a float, aplicas algún filtro y guardas el resultado. Es el pan de cada día en _computer graphics_.
+
+Y ahí surge la pregunta: ¿divides entre 255 o entre 256?
+
+Parece una tontería. Pero resulta que esconde cuantizadores mid-riser, distribuciones no uniformes y un debate que resurge cada pocos años en foros de gráficos. Esta semana el artículo de Pekka Väänänen en [30fps.net](https://30fps.net/pages/255-vs-256-division/) ha vuelto a encender la mecha en Hacker News (252 puntos), así que he decidido meterme a fondo.
+
+## Las dos fórmulas
+
+Aquí tienes las dos opciones enfrentadas, en Python puro y numpy:
+
+```python
+import numpy as np
+
+def cargar_estandar(img: np.ndarray) -> np.ndarray:
+    """División clásica: enteros 0-255 mapean a floats 0.0-1.0"""
+    return img / 255.0
+
+def guardar_estandar(floats: np.ndarray) -> np.ndarray:
+    """Reconstrucción estándar con redondeo"""
+    return np.trunc(floats * 255 + 0.5).clip(0, 255).astype(np.uint8)
+
+def cargar_alternativa(img: np.ndarray) -> np.ndarray:
+    """División alternativa: bias +0.5, divisor 256"""
+    return (img + 0.5) / 256.0
+
+def guardar_alternativa(floats: np.ndarray) -> np.ndarray:
+    """Reconstrucción alternativa: truncado directo tras multiplicar por 256"""
+    return np.trunc(floats * 256).clip(0, 255).astype(np.uint8)
+```
+
+La diferencia visual parece irrelevante. Pero mira qué pasa con los valores extremos:
+
+```python
+# La fórmula estándar mapea 0 → 0.0 y 255 → 1.0
+# La alternativa mapea 0 → 0.001953 y 255 → 0.998047
+
+# Esto tiene consecuencias: en la alternativa, el negro puro
+# (0, 0, 0) NO es 0.0 en coma flotante. Cualquier código que
+# haga `if pixel == 0.0: es_negro = True` fallará.
+```
+
+Para que veas el efecto en la distribución, genera ruido uniforme y observa la frecuencia de cada valor:
+
+```python
+import matplotlib.pyplot as plt
+
+ruido = np.random.uniform(0, 1, 1_000_000)
+
+# Reconstrucción estándar
+salida_estandar = np.trunc(ruido * 255 + 0.5).clip(0, 255).astype(np.uint8)
+
+# Reconstrucción alternativa
+salida_alternativa = np.trunc(ruido * 256).clip(0, 255).astype(np.uint8)
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+ax1.hist(salida_estandar, bins=256, range=(0, 255), color='steelblue', alpha=0.8)
+ax1.set_title("Estándar (÷ 255): los extremos aparecen la mitad")
+ax1.set_xlabel("Valor del píxel (8-bit)")
+ax1.set_ylabel("Frecuencia")
+
+ax2.hist(salida_alternativa, bins=256, range=(0, 255), color='darkorange', alpha=0.8)
+ax2.set_title("Alternativa (÷ 256): distribución uniforme")
+ax2.set_xlabel("Valor del píxel (8-bit)")
+
+plt.tight_layout()
+plt.savefig("histograma_rgb.png", dpi=150)
+```
+
+El histograma de la izquierda (÷255) muestra los bins 0 y 255 a la mitad de altura que el resto. La fórmula estándar estira los extremos fuera del rango [0,1], así que al reconstruir con ruido uniforme, los valores 0 y 255 ocurren con la mitad de frecuencia. La alternativa (÷256) produce una distribución perfectamente plana.
+
+## Cuantizadores mid-riser y mid-tread
+
+El artículo de Väänänen conecta esto con la teoría de cuantización clásica, sacada de un paper de 1977 de Allen Gresho en el IEEE Communications Society Magazine:
+
+- **Mid-riser** (estándar, ÷255): el cero cae sobre un «escalón» (riser) del cuantizador. La reconstrucción asigna el cero a 0.0. Los bins extremos se salen del rango.
+- **Mid-tread** (alternativa, ÷256): el cero cae sobre un «peldaño» (tread). La reconstrucción sitúa el cero en el punto medio entre dos enteros (0.5/256). Los bins son simétricos y uniformes.
+
+Visto como fórmulas:
+
+| Tipo       | Clasificar (encode)            | Reconstruir (decode)   |
+|------------|-------------------------------|------------------------|
+| Mid-riser  | `k = trunc(x * L)`            | `y = (k + 0.5) / L`   |
+| Mid-tread  | `k = trunc(x * L + 0.5)`      | `y = k / L`            |
+
+La aproximación estándar es rara: es un mid-riser (pensado para datos con signo) aplicado a enteros sin signo con `L=255`. No es la elección «natural» para inputs de 8 bits.
+
+## ¿Importa el error de reconstrucción?
+
+En teoría, la alternativa tiene menos error. Si partes de floats uniformes en [0,1], los cuantizas a 8-bit y los reconstruyes, el error absoluto medio es 1/1024 (÷256) frente a 1/1020 (÷255). Una diferencia de 0.00038 por píxel.
+
+Pero aquí está el matiz importante: cuando cargas imágenes de otras personas, no controlas cómo se cuantizaron. Si alguien guardó su PNG usando la fórmula estándar (que es lo que hace el 99% del software) y tú cargas con la alternativa, estás introduciendo más error, no menos.
+
+El código para verificarlo es directo:
+
+```python
+# Simula guardar con estándar y cargar con alternativa
+original = np.random.randint(0, 256, (1000, 1000, 3), dtype=np.uint8)
+guardado_floats = cargar_estandar(original)
+reconstruido_std = guardar_estandar(guardado_floats)
+reconstruido_alt = guardar_alternativa(guardado_floats)
+
+error_std = np.mean(np.abs(original.astype(float) - reconstruido_std.astype(float)))
+error_alt = np.mean(np.abs(original.astype(float) - reconstruido_alt.astype(float)))
+print(f"Error al cargar-almacenar con misma fórmula: {error_std:.4f}")
+print(f"Error al mezclar fórmulas:              {error_alt:.4f}")
+# El error al mezclar será mayor. Si usas la fórmula correcta,
+# el round-trip es lossless: error = 0.
+```
+
+## Mi veredicto
+
+Esta pregunta me recuerda a las discusiones sobre `fast-math` en C/C++ o sobre si usar `f32` o `f64` por defecto. Son debates donde la respuesta correcta depende de si estás _generando_ los datos o _consumiéndolos_.
+
+Si procesas imágenes que te llegan de internet, de clientes o de datasets públicos: divide entre 255 y no le des más vueltas. Es lo que espera cualquier pipeline que trabaje en [0,1] y evitas bugs silenciosos como `black_pixel != 0.0`.
+
+Si controlas ambos extremos del pipeline —guardas y cargas tus propias imágenes— entonces dividir entre 256 con el bias de +0.5 es ligeramente más preciso. Pero la ganancia es tan pequeña (4 millonésimas en error absoluto por píxel) que me cuesta imaginar un caso donde marque la diferencia.
+
+Lo realmente valioso del artículo de Väänänen es cómo conecta una pregunta aparentemente trivial con la teoría de cuantización de los años 70. Es el tipo de detalle que separa a quien escribe gráficos de quien _entiende_ gráficos. Y es una excusa perfecta para dibujar histogramas con matplotlib un martes cualquiera.
+
+---
+
+La moraleja real: nunca mezcles el encode de una fórmula con el decode de la otra. Eso sí que es código roto.
+
+_Fuente: [Should you normalize RGB values by 255 or 256?](https://30fps.net/pages/255-vs-256-division/) por Pekka Väänänen. HN #48360054, 252 puntos._
