@@ -1,0 +1,97 @@
+---
+title: "QBE 1.3: el backend ligero que ya corre en Windows"
+date: "2026-06-02T20:05"
+tags: ["compiladores", "qbe", "c", "rendimiento", "open-source"]
+excerpt: "QBE 1.3 estrena un algoritmo de matching de IL, optimizaciones que rozan el 70% de gcc y soporte para Windows. La alternativa ligera a LLVM sigue creciendo."
+---
+
+## El compilador que cabe en tu cabeza
+
+Si alguna vez has mirado el código fuente de LLVM, sabes de lo que hablo: cientos de miles de líneas, abstracciones sobre abstracciones, una build que tarda más que un vuelo transatlántico. No es un problema de LLVM — es un mega-proyecto industrial que alimenta compiladores como Clang, Rust y Swift — pero para quien quiere crear un lenguaje nuevo o experimentar con la generación de código, meterse en ese ecosistema es como pedir una pizza y que te instalen una cocina industrial.
+
+Aquí es donde entra QBE.
+
+QBE (pronunciado "cubee", como el pájaro en inglés) es un backend de compilador creado por Quentin Carbonneaux con una premisa casi provocadora: **el 70% del rendimiento de compiladores industriales como GCC, en el 10% del código**. Su codebase en C está pensado para ser "hobby-scale": lo suficientemente pequeño como para que una persona pueda entenderlo entero, hackearlo un fin de semana y llevarse una idea clara de cómo funciona cada fase.
+
+Y ahora, con la versión 1.3, QBE acaba de dar el salto más grande desde su lanzamiento inicial.
+
+## ¿Qué hay de nuevo en 1.3?
+
+El propio Carbonneaux lo resume con tres palabras en las release notes: *Faster, Smarter, Nicer*. Desglosemos cada una.
+
+### Más rápido (con ayuda de Roland)
+
+La mosca de QBE — es una broma recurrente del autor, no me la he inventado — picó a Roland Paterson-Jones. Roland propuso usar el benchmark CoreMark como campo de pruebas. La primera medición con QBE 1.2 fue un jarro de agua fría: un 40% del rendimiento de `gcc -O2`, lejos del objetivo del 70%.
+
+El análisis de perfiles reveló algo interesante y un pelín frustrante: el cuello de botella no estaba en fallos generales de optimización, sino en dos funciones concretas del benchmark: `ee_isdigit` y `crcku8`. La primera usaba `&&` en vez de `&` y se beneficiaba de inline manual. La segunda (CRC) es mucho más rápida con una tabla precalculada. Ninguna de las dos funciones es "C idiomático" — son código de benchmark, no código real.
+
+Aun así, el equipo implementó varias optimizaciones nuevas:
+
+- **GVN/GCM** (Global Value Numbering / Global Code Motion)
+- **Optimización de bucles**
+- **Eliminación de ifs redundantes**
+- **Simplificación del CFG** (Control Flow Graph)
+
+Tras probar y cribar, se quedaron con un subconjunto de pases que llevaron a QBE al **63% de `gcc -O2` en CoreMark sin modificar**. Y con ajustes manuales mínimos al benchmark (inlinear `ee_isdigit` y una CRC sin ramas), QBE alcanza el esquivo 70%.
+
+El beneficio no se limita a benchmarks sintéticos: la suite de tests del lenguaje Hare se ejecuta un **33% más rápido** con QBE 1.3 frente a 1.2 (1.7s vs 2.6s).
+
+### Más listo: mgen, el generador de matchers
+
+Esta es, para mí, la joya de la release. Desde sus inicios, QBE usaba un algoritmo de numeración de árboles bottom-up inspirado en el compilador de C de Plan 9 de Ken Thompson. Funciona, pero manejar la asociatividad y conmutatividad de operadores aritméticos era delicado y requería lógica escrita a mano.
+
+Carbonneaux llevaba tiempo queriendo resolver esto con metaprogramación. Y en 1.3 lo ha hecho.
+
+**mgen** es una herramienta escrita en OCaml que toma patrones de IL (lenguaje intermedio) en una sintaxis Lispy y genera código C idiomático que los empareja. Así funciona:
+
+```c
+// Antes (1.2): lógica de matching escrita a mano
+// para cada patrón en isel.c, con sutilezas
+// de conmutatividad gestionadas manualmente
+
+// Ahora (1.3): mgen lee bloques como este
+/* %a =w add %x, %y
+   @generated_matcher_code */
+// y genera el código C de matching automáticamente
+```
+
+El flujo es así: los DAGs de instrucciones se numeran (herencia de Thompson), luego mgen asigna a cada número un bitset que indica qué patrones de alto nivel emparejan con el nodo actual. El patrón más adecuado se selecciona con lógica escrita a mano (por ahora). Los patrones pueden contener variables, que se recolectan ejecutando un pequeño programa en bytecode — también generado por mgen — mediante la función `runmatch()`.
+
+Carbonneaux sugiere que en el futuro mgen podría usarse para simplificar la selección de instrucciones en más backends e incluso para reconocer patrones de IL como rotaciones de bits durante pases de optimización. Es una dirección fascinante: en vez de escribir matchers a mano para cada arquitectura, escribes el *qué* (patrones declarativos) y una herramienta te da el *cómo* (código C eficiente).
+
+### Más amigable: Windows y código compartido
+
+Dos contribuciones que amplían el alcance práctico de QBE:
+
+**Windows ABI.** Scott Graham hizo upstream de su implementación del ABI de Windows para amd64, originalmente desarrollada en un fork paralelo. Compilar para Windows ahora es tan simple como:
+
+```bash
+qbe -t amd64_win programa.ssa -o programa.s
+# Luego ensamblar con mingw
+```
+
+El ensamblado generado sigue en sintaxis AT&T y se recomienda usar el ensamblador de MinGW. Carbonneaux admite que no lo ha probado personalmente en Windows — y ese nivel de honestidad es parte del encanto de QBE.
+
+**Código independiente de posición (PIC).** La gran traba hasta ahora era que QBE no podía generar shared objects porque le faltaba acceso indirecto a globales (la tabla GOT en ELF). Esto se resuelve con un nuevo flag `DYNCONST` ("dynamic constant") en la especificación del IL:
+
+```
+function w $load() {
+@start
+    %v =w load extern $dlvar
+    ret %v
+}
+```
+
+El oxímoron "constante dinámica" está bien elegido: el símbolo es constante durante la ejecución del programa (no cambia), pero su valor solo se conoce en tiempo de ejecución porque lo asigna el dynamic linker. Con esto QBE puede enlazar con — y producir — librerías compartidas en Linux y macOS.
+
+## Mi opinión
+
+Hay algo profundamente refrescante en proyectos como QBE. En un ecosistema donde todo tiende a crecer sin freno — más dependencias, más abstracciones, más *build time*, más megabytes de binario — QBE planta bandera en lo contrario. Su IL cabe en tu cabeza. Su código fuente puedes leerlo entero una tarde. Y aún así produce binarios decentes.
+
+No va a reemplazar a LLVM ni a GCC. No lo pretende. Pero para quien está creando un lenguaje de juguete, un DSL compilado, o simplemente quiere entender cómo funciona un backend de compilador sin ahogarse en complejidad industrial, QBE es el punto de entrada perfecto.
+
+La aparición de mgen me parece especialmente interesante porque resuelve un problema real — escribir matchers de patrones a mano es tedioso y propenso a errores — sin sucumbir a la tentación de añadir un DSL de miles de líneas. Es una herramienta auxiliar en OCaml que genera C. Pragmatismo puro.
+
+El soporte para Windows abre la puerta a que lenguajes como Hare se planteen targets más allá de Linux. Y el PIC resuelve una limitación que para muchos proyectos era un *dealbreaker*. Con cada release, QBE deja de ser "el backend para juguetes" y se acerca a "el backend para cosas serias que no quieren pagar el precio de entrada de LLVM".
+
+Si te gustan los compiladores, los lenguajes o el software que hace mucho con poco, QBE 1.3 merece tu atención.
