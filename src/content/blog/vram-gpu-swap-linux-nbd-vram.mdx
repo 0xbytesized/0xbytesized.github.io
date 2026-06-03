@@ -1,0 +1,142 @@
+---
+title: "Convierte la VRAM de tu GPU en swap en Linux"
+date: "2026-06-03T14:30"
+tags: ["linux", "gpu", "nvidia", "swap", "memoria"]
+excerpt: "nbd-vram expone la VRAM de tu GPU como swap en Linux con NBD y CUDA. 27 veces menos latencia que un NVMe y sin módulos del kernel."
+---
+
+Hace unos días me topé con un proyecto que me hizo sonreír. Se llama **nbd-vram** y es de esas ideas que son tan obvias _en retrospectiva_ que te preguntas por qué nadie lo hizo antes. La premisa: si tienes un portátil con gráfica NVIDIA y RAM soldada sin posibilidad de ampliación, esa VRAM está ahí muerta de risa el 90% del tiempo. ¿Y si la usas como swap?
+
+El autor, Sean Lobjoit ([c0dejedi](https://github.com/c0dejedi)), lo resume así: portátiles con gráfica híbrida (AMD integrada + NVIDIA dedicada) donde la pantalla usa la integrada y la NVIDIA se rasca la barriga. 8 GB de VRAM sin tocar mientras el sistema se arrastra haciendo swap al SSD. La solución: un demonio que asigna VRAM con CUDA y la sirve como dispositivo de bloque por NBD. Sin módulo del kernel, sin símbolos propietarios de NVIDIA, sin recompilar nada.
+
+El resultado: 46 GB de memoria direccionable total partiendo de 16 GB de RAM física, con una latencia de swap **27 veces mejor** que un NVMe en acceso esporádico. Nada mal para un script de 300 líneas.
+
+## Cómo funciona
+
+El truco es elegantísimo. En lugar de pelear con el kernel o con APIs privadas, nbd-vram usa dos piezas estándar que ya tienes en tu sistema:
+
+1. **CUDA Driver API** (`libcuda.so.1`) para asignar un bloque de VRAM
+2. **NBD** (Network Block Device), el protocolo que permite exportar un dispositivo de bloque por red — o en este caso, por un socket Unix local
+
+El flujo es:
+
+```
+Kernel → /dev/nbdX → nbd driver → Unix socket → nbd-vram daemon → cuMemcpyHtoD/DtoH → GPU VRAM
+```
+
+Cuando el kernel necesita hacer swap de una página de 4K, el driver `nbd` envía la solicitud por el socket Unix al demonio, que ejecuta `cuMemcpyHtoD` (escritura) o `cuMemcpyDtoH` (lectura) contra la VRAM reservada. Fin.
+
+El código conceptual sería algo así:
+
+```c
+// Asignación de VRAM (simplificado del código real)
+CUdeviceptr vram_ptr;
+size_t vram_size = 7ULL * 1024 * 1024 * 1024; // 7 GB
+
+cuInit(0);
+cuDeviceGet(&dev, 0);
+cuCtxCreate(&ctx, 0, dev);
+cuMemAlloc(&vram_ptr, vram_size);
+```
+
+Luego, para cada operación de lectura que llega por NBD:
+
+```c
+// Leer un bloque de VRAM a RAM del sistema
+char bounce_buffer[4096];
+cuMemcpyDtoH(bounce_buffer, vram_ptr + offset, 4096);
+write(nbd_socket, bounce_buffer, 4096);
+```
+
+Y para escritura:
+
+```c
+// Escribir un bloque de RAM a VRAM
+char bounce_buffer[4096];
+read(nbd_socket, bounce_buffer, 4096);
+cuMemcpyHtoD(vram_ptr + offset, bounce_buffer, 4096);
+```
+
+Lo genial es que `cuMemcpyHtoD` y `cuMemcpyDtoH` funcionan en _cualquier_ GPU CUDA, sea una GeForce de consumo o una Quadro de 10.000€. No necesitas permisos especiales ni licencias de datacenter.
+
+## Por qué el enfoque "obvio" no funciona
+
+El camino que todo el mundo intenta primero es la API **NVIDIA P2P** (`nvidia_p2p_get_pages_persistent`). Esta API fija páginas de VRAM en BAR1 (la ventana de memoria de la GPU visible desde la CPU) para que el kernel pueda acceder directamente con `ioremap_wc`. Sin copias intermedias, sin demonios userspace, latencia mínima.
+
+Suena perfecto. Y falla.
+
+NVIDIA restringe P2P a GPUs Quadro y datacenter. En cualquier GeForce (RTX 3070, 4090, da igual), tanto la variante persistente como la no persistente devuelven `EINVAL`. El gating está a nivel de Resource Manager en el driver, no es un flag que puedas tocar.
+
+El otro atajo — mapear BAR1 directamente con `ioremap_wc` sin pasar por P2P — tampoco funciona. Las tablas de páginas internas de la GPU solo mapean ~16 MiB de BAR1 (el framebuffer de pantalla). Leer más allá devuelve ceros. Aparentemente `mkswap` funciona, pero `swapon` falla porque la cabecera de swap nunca llegó a escribirse.
+
+Todo esto está documentado en el README sin aspavientos. El tipo lo intentó, se dio de bruces contra la realidad y encontró una alternativa que funciona.
+
+## Los números que importan
+
+El proyecto incluye benchmarks comparando VRAM-swap contra swap cifrado en NVMe (PCIe 4.0) en una RTX 3070 Laptop. Todos los tests usan O_DIRECT para saltarse la page cache.
+
+**Rendimiento secuencial** (el que menos importa, porque el kernel swapea páginas de 4K, no streams de gigabytes):
+
+| Dispositivo | Escritura | Lectura |
+|-------------|-----------|---------|
+| NVMe | 2.7 GB/s | 2.9 GB/s |
+| VRAM (nbd) | 1.1 GB/s | 2.3 GB/s |
+
+Aquí gana el NVMe. El cuello de botella es el round-trip userspace: cada bloque cruza un socket Unix y una llamada `cuMemcpy`, cosa que el NVMe evita al ir por la vía directa del bloque en kernel. Pero insisto: el swap no son streams de 2 GB.
+
+**IOPS aleatorias 4K** (más realista, pero todavía sostenido):
+
+| Dispositivo | Read IOPS | Write IOPS | Latencia media |
+|-------------|-----------|------------|----------------|
+| NVMe | 45.4k | 45.3k | 343 µs |
+| VRAM (nbd) | 28.7k | 28.7k | 550 µs |
+
+El NVMe mantiene ventaja en carga sostenida porque puede tener 32 peticiones en vuelo simultáneas con `iodepth=32`. El demonio NBD serializa por su socket Unix, así que el paralelismo se pierde.
+
+Ahora el dato que de verdad importa:
+
+**Latencia por operación** (ioping, lecturas 4K, 1 petición/segundo):
+
+| Dispositivo | Mín | Media | Máx |
+|-------------|-----|-------|-----|
+| NVMe | 120 µs | 9.05 ms | 10.1 ms |
+| VRAM (nbd) | 134 µs | 335 µs | 490 µs |
+
+**27 veces menos latencia media.** ¿Por qué pasa esto? Porque los NVMe modernos usan APST (Autonomous Power State Transitions) para ahorrar energía. Entre petición y petición, el disco se duerme. Cuando llega la siguiente lectura un segundo después, se despierta en frío y paga ~9 ms de penalización cada vez.
+
+La VRAM no tiene estados de sueño. Responde en 133-490 µs siempre, pase lo que pase.
+
+Y este escenario — accesos esporádicos de 4K con segundos de separación — es exactamente cómo funciona el swap en la práctica. La presión de memoria en un portátil rara vez es un torrente de GB/s. Son páginas sueltas que fallan de una en una y cada fallo de página se para en seco esperando al dispositivo de swap. A 9 ms lo notas. A 335 µs no.
+
+## Instalación en 3 comandos
+
+Si tienes un portátil con NVIDIA cumpliendo los requisitos (GPU CUDA, driver con `libcuda.so.1`, kernel 3.0+), la instalación es:
+
+```bash
+git clone https://github.com/c0dejedi/nbd-vram
+cd nbd-vram
+sudo ./install.sh
+sudo systemctl start vram-swap-nbd
+```
+
+Verificación:
+
+```bash
+swapon --show
+# NAME       TYPE      SIZE USED PRIO
+# /dev/nbd0  partition   7G   0B 1500
+```
+
+La prioridad 1500 es más alta que el swap en SSD típico (-2 o 1), así que el kernel usará VRAM primero, luego zram y solo si todo está hasta arriba tocará el SSD. El instalador pregunta si quieres gestión de batería: el servicio se para al desconectar el cargador y se reactiva al enchufarlo.
+
+## Mi veredicto
+
+nbd-vram es el tipo de proyecto que me encanta: resuelve un problema real, no requiere permisos especiales y está implementado con piezas que ya tienes. No es un kernel module que necesites recompilar con cada actualización. No depende de APIs restringidas. Es NBD, CUDA y un socket Unix. Punto.
+
+Las limitaciones son honestas: si tu carga de swap es un torrente continuo de gigabytes, el NVMe sigue siendo más rápido. Pero si lo que te machaca es ese momento en el que abres una pestaña de más en el navegador y todo se congela 200 ms mientras el SSD se despierta — esto lo arregla.
+
+El verdadero valor está en el análisis del problema. La documentación explica por qué falló cada alternativa, con detalles técnicos que delatan a alguien que se ha peleado de verdad con el driver de NVIDIA. No es el típico README de "hice esto y funciona". Es "intenté A, B y C, aquí está por qué fallaron y aquí está D que sí funciona".
+
+¿Lo usaría en producción? No. ¿Lo instalaría en mi portátil personal con RAM soldada? Absolutamente. Sobre todo porque el `install.sh` tiene smoke tests que validan la integridad de los datos antes de activar el swap y el `uninstall.sh` limpia hasta el último rastro.
+
+Un proyecto de 291 estrellas en 4 días que probablemente acabe en mis dotfiles.
