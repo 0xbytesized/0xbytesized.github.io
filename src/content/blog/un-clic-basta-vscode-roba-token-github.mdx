@@ -1,0 +1,122 @@
+---
+title: "Un clic basta: así roba VSCode tu token de GitHub"
+date: "2026-06-03T08:00"
+tags: ["vscode", "seguridad", "github", "sandbox", "webview"]
+excerpt: "Un solo clic basta para robar tu token de GitHub y acceder a todos tus repos, privados incluidos. Ammar Askar desmenuza el fallo en los webviews de VSCode."
+---
+
+El 2 de junio de 2026, el investigador de seguridad **Ammar Askar** publicó un análisis demoledor: basta con hacer clic en un enlace para que un atacante robe tu token de GitHub y tenga acceso de lectura y escritura a **todos tus repositorios**, incluidos los privados. Sin contraseñas. Sin phishing sofisticado. Un clic.
+
+El fallo no está en GitHub en sí, sino en **VSCode** — concretamente en su versión web (github.dev) y en cómo gestiona los eventos de teclado dentro de los webviews. Lleva años ahí, esperando a que alguien conectara los puntos.
+
+## Cómo funciona github.dev (y por qué es un objetivo tan goloso)
+
+Cuando pulsas el punto en cualquier repo de GitHub o cambias `github.com` por `github.dev` en la URL, se abre una versión ligera de VSCode que corre completamente en el navegador. Desde ahí puedes ver archivos, hacer commits y enviar pull requests.
+
+Para que esto funcione, github.com hace un POST con un **token OAuth** hacia github.dev. Ese token no está limitado al repositorio desde el que vienes: tiene acceso completo a todo lo que tu cuenta puede tocar. Si un atacante consigue ese token, tiene las llaves del reino.
+
+Y VSCode, siendo una aplicación de millones de líneas de TypeScript que originalmente nació como app de escritorio con Electron, tiene una superficie de ataque enorme cuando se traslada al navegador.
+
+## El modelo de seguridad de los webviews
+
+VSCode usa webviews para renderizar contenido como previsualizaciones de Markdown o notebooks de Jupyter. Para aislarlos del resto de la aplicación, los mete dentro de un `<iframe>` con un origen distinto (`vscode-webview://...`). En teoría, el código que se ejecuta dentro de ese iframe no puede tocar las APIs de VSCode ni las de Node.js.
+
+Hasta aquí, todo correcto. El problema viene con la **comunicación entre el webview y la ventana principal**.
+
+Como el mismo origen cruzado que protege al iframe también impide que la ventana principal interactúe con su DOM, VSCode usa `Window.postMessage()` para pasar mensajes de un lado a otro. Esto permite cosas como que la previsualización de Markdown se actualice en tiempo real mientras editas o que los atajos de teclado sigan funcionando cuando el foco está dentro del webview.
+
+Y aquí está la grieta.
+
+## El bug: los eventos de teclado no son de fiar
+
+Cuando cargas un webview, VSCode ejecuta algo parecido a esto dentro del iframe:
+
+```javascript
+// Así registra VSCode los eventos de teclado en el webview
+contentWindow.addEventListener("keydown", (e) => {
+  hostMessaging.postMessage("did-keydown", {
+    key: e.key,
+    code: e.code,
+    ctrlKey: e.ctrlKey,
+    shiftKey: e.shiftKey,
+    altKey: e.altKey,
+    metaKey: e.metaKey,
+  });
+});
+```
+
+La idea es noble: que `Ctrl+Shift+P` abra la paleta de comandos aunque estés mirando un notebook. Pero hay un detalle que lo cambia todo: **nada impide que un script dentro del webview genere eventos de teclado falsos**.
+
+El constructor `KeyboardEvent` es una API estándar del navegador. Cualquier JavaScript puede hacer esto:
+
+```javascript
+// Simular Ctrl+Shift+A como si el usuario lo hubiera pulsado
+window.dispatchEvent(
+  new KeyboardEvent("keydown", {
+    key: "a",
+    code: "KeyA",
+    keyCode: 65,
+    ctrlKey: true,
+    shiftKey: true,
+  })
+);
+```
+
+VSCode recibe esos eventos y los procesa como si vinieran del usuario real. Acabas de abrir una puerta que no debería existir.
+
+## La cadena de explotación: de un clic a ejecución arbitraria
+
+Askar tuvo que encadenar varios mecanismos para convertir esa capacidad de simular teclas en un robo efectivo del token. No fue trivial, pero el resultado es devastador:
+
+1. **El cebo**: Un repositorio malicioso con un notebook de Jupyter. El notebook contiene una celda Markdown con un `<img>` que tiene un atributo `onerror` con código JavaScript. En cuanto github.dev renderiza el notebook, el JS se ejecuta dentro del webview.
+
+2. **Instalación silenciosa de extensión**: El JS simula `Ctrl+Shift+A`, el atajo que acepta la notificación principal de VSCode. Si el repositorio tiene un archivo `.vscode/extensions.json` recomendando una extensión, VSCode muestra una notificación preguntando si quieres instalarla. `Ctrl+Shift+A` pulsa "Sí" por ti.
+
+3. **Bypass del diálogo de confianza**: Desde la versión 1.97, VSCode pide confirmación al instalar extensiones de publishers nuevos. Pero hay un camino alternativo: las extensiones locales de workspace, que se instalan desde `.vscode/extensions/` y heredan la confianza del workspace. Como github.dev siempre considera los workspaces como confiables, este check se salta.
+
+4. **El keybind trampa**: La extensión local instala un keybind personalizado que llama a `workbench.extensions.installExtension` con `skipPublisherTrust: true`. Al simular ese keybind (`Ctrl+F1` en el PoC), el atacante fuerza la instalación de su extensión maliciosa sin ningún diálogo.
+
+5. **Robo del token**: La extensión ya instalada tiene acceso completo a las APIs de VSCode. Lo primero que hace es leer el token de GitHub y exfiltrarlo.
+
+```javascript
+// Conceptual: así obtiene el token una extensión de VSCode
+// El token está disponible a través de la sesión de autenticación
+const session = await vscode.authentication.getSession(
+  "github",
+  ["repo", "user"],
+  { createIfNone: false }
+);
+// session.accessToken contiene el token OAuth con acceso total
+```
+
+Todo esto ocurre en menos de dos segundos tras hacer clic en un enlace.
+
+## El contexto: por qué fue full disclosure
+
+Ammar Askar no reportó este bug a Microsoft de forma privada. Lo publicó directamente con PoC completo. ¿El motivo? En sus propias palabras, su experiencia anterior con el MSRC (Microsoft Security Response Center) fue "horrible": Microsoft arregló un bug que él reportó sin darle crédito y encima lo marcó como "sin impacto de seguridad".
+
+No es un caso aislado. Starlabs reportó recientemente un XSS en VSCode y recibió la misma respuesta: inelegible, severidad baja. El patrón es claro: Microsoft no trata los bugs de VSCode con la seriedad que merecen y los investigadores han decidido que la única forma de forzar una respuesta es la transparencia total.
+
+## Mi opinión
+
+Esto me parece un ejemplo de libro de cómo **las decisiones de UX pueden convertirse en vulnerabilidades de seguridad**. La gente de VSCode quería que los atajos de teclado funcionaran bien dentro de los webviews. Es una decisión razonable: a nadie le gusta que `Ctrl+F` deje de funcionar porque el foco está en un notebook. Pero al implementarlo reenviando eventos de teclado sin verificar su origen, crearon un canal de confianza donde no debería haberlo.
+
+El fallo real está en la arquitectura: un `<iframe>` diseñado para ser un sandbox que, por comodidad, tiene un agujero por el que salen todos los eventos de teclado hacia la ventana principal. La solución no es trivial porque afecta a cómo los usuarios interactúan con los webviews, pero es necesaria.
+
+También creo que Microsoft se está cavando su propia tumba con el MSRC. Si tratas a los investigadores de seguridad como una molestia en lugar de como aliados, acabas recibiendo full disclosures públicos en lugar de reports coordinados. Es una lección que Google aprendió con Project Zero y que Microsoft parece empeñada en ignorar.
+
+## Cómo protegerte
+
+Mientras Microsoft publica un fix (si es que lo hace), esto es lo que puedes hacer:
+
+1. **Limpia los datos de github.dev**: En Chrome, haz clic en el icono del candado en la barra de direcciones cuando estés en github.dev, ve a Cookies y datos del sitio y elimina todos los datos. Esto reinstaura el diálogo inicial que te da una oportunidad de cancelar.
+
+2. **No hagas clic en enlaces a github.dev** de fuentes que no conozcas. El ataque solo necesita que aterrices en un notebook malicioso.
+
+3. **Revoca tus tokens de GitHub periódicamente** desde Settings → Applications → Authorized OAuth Apps.
+
+Si nunca has usado github.dev, tienes suerte: el diálogo inicial te protege. Si lo has usado aunque sea una vez y no has limpiado los datos del sitio, el ataque funciona sin ninguna interacción adicional.
+
+---
+
+El bug ya está reportado en el [issue tracker de VSCode](https://github.com/microsoft/vscode/issues/). Puedes leer el análisis completo de Ammar Askar en [su blog](https://blog.ammaraskar.com/github-token-stealing/) y el código del PoC en [GitHub](https://github.com/ammaraskar/github-dev-token-steal-poc).
