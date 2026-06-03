@@ -1,0 +1,132 @@
+---
+title: "Elixir 1.20: ahora con tipado gradual y sin anotaciones"
+date: "2026-06-03T20:38"
+tags: ["elixir", "tipado", "lenguajes", "beam", "open-source"]
+excerpt: "Elixir v1.20 introduce tipado gradual basado en conjuntos que encuentra bugs verificables sin una sola anotación. José Valim lo ha conseguido."
+---
+
+El 3 de junio de 2026, José Valim anunció Elixir v1.20. Llevaban trabajando en esto desde 2022, con un paper premiado en 2023 y por fin el primer hito de desarrollo está aquí: Elixir ahora puede inferir tipos y hacer _type checking_ gradual en cualquier programa sin que escribas una sola anotación de tipos.
+
+Y no es cosmético. El compilador encuentra **bugs verificables**: violaciones de tipos que _garantizan_ un fallo en tiempo de ejecución si esa rama de código se ejecuta. Y lo hace con un ratio de falsos positivos extremadamente bajo.
+
+## ¿Por qué es diferente?
+
+Los sistemas de tipado gradual tradicionales (TypeScript, Python con mypy, etc.) usan un tipo `any` que básicamente le dice al compilador «aquí no mires, aquí todo vale». Es un agujero negro para el type checker. Si tu código pasa por `any`, pierdes toda la información de tipos.
+
+Elixir toma otro camino. Su tipo gradual se llama `dynamic()` y tiene dos propiedades clave:
+
+1. **Compatibilidad**: solo emite una violación cuando los tipos son _disjuntos_ — es decir, cuando no hay ninguna posibilidad de que el valor suministrado coincida con el tipo esperado.
+2. **Estrechamiento** (_narrowing_): `dynamic()` actúa como un rango que se va refinando a medida que usas la variable. El sistema afina el tipo según cómo lo utilizas, en lugar de descartar información.
+
+Esto es sutil pero potente. Veámoslo con código.
+
+## dynamic() en acción
+
+Imagina esta función que recibe datos sin tipar y opera sobre ellos:
+
+```elixir
+def sumar_coordenadas(punto) do
+  punto.x + punto.y
+end
+```
+
+Aquí `punto` empieza como `dynamic()`. Pero en cuanto accedes a `.x` y usas el operador `+`, Elixir estrecha el tipo a `%{..., x: number(), y: number()}` — un mapa con al menos los campos `x` e `y` numéricos. Los `...` indican que puede tener otros campos.
+
+Ahora imagina que metes la pata:
+
+```elixir
+def sumar_mal(punto) do
+  punto.x + punto
+end
+```
+
+En este caso, `punto` se estrecha primero a `%{..., x: number()}` al acceder a `.x`, pero luego intentas usarlo como si fuera un número en la suma. El compilador detecta que los tipos son disjuntos — un mapa no es un número — y emite una violación verificable. **Esto fallará en runtime sí o sí**, no es un falso positivo.
+
+## Guards que el compilador entiende de verdad
+
+Las guardas en Elixir siempre han sido potentes, pero el compilador ahora _razona_ sobre ellas. Mira este ejemplo:
+
+```elixir
+def procesar(mensaje) when is_binary(mensaje) or is_list(mensaje) do
+  case mensaje do
+    texto when is_binary(texto) ->
+      String.upcase(texto)
+
+    lista when is_list(lista) ->
+      Enum.join(lista, ", ")
+  end
+end
+```
+
+El compilador infiere que dentro del primer `case`, `texto` es `binary()`; dentro del segundo, `lista` es `list()`. No hay ambigüedad. Y si dentro del primer caso intentaras llamar a `Enum.join(texto, ", ")`, el compilador te lo señalaría porque `binary()` y `list()` son disjuntos para `Enum.join/2`.
+
+Las guardas con `not` también funcionan:
+
+```elixir
+def sin_clave(mapa) when not is_map_key(mapa, :secreto) do
+  # El compilador sabe que mapa NO tiene la clave :secreto
+  # mapa.secreto aquí generaría una violación
+  Map.get(mapa, :secreto, "valor por defecto")
+end
+```
+
+El tipo inferido es `%{..., secreto: not_set()}`. Si intentas acceder a `mapa.secreto`, el compilador lo marca como violación porque la clave está explícitamente ausente según la guarda.
+
+## Estrechamiento entre cláusulas
+
+Una de las cosas más elegantes es cómo el sistema usa información de cláusulas anteriores del `case` para refinar las siguientes:
+
+```elixir
+def obtener_config(clave) do
+  case System.get_env(clave) do
+    nil ->
+      {:error, :no_encontrada}
+
+    valor ->
+      {:ok, String.upcase(valor)}
+  end
+end
+```
+
+`System.get_env/1` devuelve `nil` o `binary()`. Como la primera cláusula captura `nil`, el compilador sabe que en la segunda cláusula `valor` ya **no puede ser nil**, así que solo puede ser `binary()`. Por eso `String.upcase(valor)` compila sin violaciones — el tipo se ha estrechado correctamente.
+
+También detecta **cláusulas redundantes**. Si pones un patrón que nunca se alcanzará porque uno anterior ya lo cubre, el compilador te avisa. Es _dead code detection_ gratuito.
+
+## Lo que NO es (todavía)
+
+Conviene aclarar: Elixir v1.20 **no introduce anotaciones de tipos** para que las escribas tú. Eso vendrá en un futuro, cuando resuelvan varios problemas de investigación:
+
+- Tipos recursivos eficientes
+- Tipos paramétricos eficientes
+- Iteración eficiente sobre pares clave-valor de mapas como enumerables
+
+De momento, el sistema trabaja en modo inferencia pura, como si todos los argumentos tuvieran tipo `dynamic()`. Cuando introduzcan las anotaciones, el sistema se comportará como un lenguaje estáticamente tipado siempre que no uses `dynamic()` explícitamente. Y desarrollaron técnicas nuevas para que la transición entre la frontera estática-dinámica sea _sound_ sin necesidad de checks adicionales en runtime.
+
+## Rendimiento de compilación
+
+No todo es el sistema de tipos. v1.20 también mejora los tiempos de compilación, especialmente en máquinas con muchos núcleos. Según benchmarks sintéticos del equipo, la herramienta de build de Elixir es ahora la más rápida entre los lenguajes BEAM.
+
+Además, introducen `:module_definition`, una opción del compilador que permite interpretar las definiciones de módulo en lugar de compilarlas:
+
+```elixir
+# En tu mix.exs
+elixirc_options: [module_definition: :interpreted]
+```
+
+Esto puede acelerar compilaciones en proyectos grandes sin afectar los `.beam` que se escriben a disco — solo cambia cómo se ejecuta el contenido dentro de `defmodule`.
+
+## Mi opinión
+
+Lo que más me convence de este enfoque es la filosofía: **valor desde el día uno sin pedirte nada a cambio**. No tienes que anotar tipos, no tienes que reescribir código, no tienes que aprender una nueva sintaxis. Simplemente compilas tu proyecto con Elixir 1.20 y el compilador te señala bugs reales. _Gratis_.
+
+Esto contrasta con la experiencia de adoptar TypeScript en un proyecto JavaScript grande, donde pasar de `any` a tipos correctos puede ser una migración de meses. Elixir ha conseguido que el primer paso sea indoloro.
+
+El hecho de que usen tipos set-teóricos (uniones, intersecciones, negaciones) en lugar de tipos algebraicos tradicionales también es una decisión de diseño valiente. La mayoría de lenguajes con tipado gradual se apoyan en tipos estructurales o nominales. Elixir apuesta por una base matemática más expresiva y los resultados del benchmark "If T: Benchmark for Type Narrowing" (12 de 13 categorías superadas) sugieren que la apuesta está funcionando.
+
+Dicho esto, la ausencia de anotaciones de tipos es un arma de doble filo. Por un lado, hace la adopción trivial. Por otro, los tipos inferidos no documentan las interfaces de tus funciones. Cuando trabajas en un equipo grande, las anotaciones de tipos son documentación viva. Espero que las futuras versiones encuentren el equilibrio adecuado.
+
+¿Mi veredicto? Si tienes un proyecto Elixir en producción, actualiza a 1.20 hoy mismo. El peor escenario es que no encuentre nada. El mejor: te señala bugs que llevaban meses escondidos en tu código. No hay downgrade posible — es estrictamente mejor que 1.19.
+
+---
+
+**Fuente**: [Elixir v1.20 released: now a gradually typed language](https://elixir-lang.org/blog/2026/06/03/elixir-v1-20-0-released/) — José Valim, 3 de junio de 2026. HN: 215 puntos, 65 comentarios.
