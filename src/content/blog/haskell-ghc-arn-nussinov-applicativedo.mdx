@@ -20,7 +20,7 @@ Con `ApplicativeDo`, el compilador detecta la independencia y lo reagrupa con `<
 
 El problema es que encontrar la agrupación **óptima** es un algoritmo O(n³). En el paper original que introdujo la feature, un bloque `do` de 1000 statements tardaba 55 segundos en compilarse con la versión óptima, frente a menos de dos segundos con la heurística greedy. Por eso el flag `-foptimal-applicative-do` lleva años apagado por defecto.
 
-Ian Duncan, un ingeniero de estabilidad en los Países Bajos, vio esto y pensó: «un algoritmo correcto pero demasiado lento para usarse suena a bug». Lo que no sabía es que pasaría meses persiguiendo una solución que lo llevaría directo a un paper de biología computacional de 1978.
+Ian Duncan, un SRE en los Países Bajos, vio esto y pensó: «un algoritmo correcto pero demasiado lento para usarse suena a bug». Lo que no sabía es que pasaría meses persiguiendo una solución que lo llevaría directo a un paper de biología computacional de 1978.
 
 ## El problema de fondo
 

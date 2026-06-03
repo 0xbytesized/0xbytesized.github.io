@@ -9,7 +9,7 @@ Supón que estás escribiendo un programa de procesamiento de imágenes. Cargas 
 
 Y ahí surge la pregunta: ¿divides entre 255 o entre 256?
 
-Parece una tontería. Pero resulta que esconde cuantizadores mid-riser, distribuciones no uniformes y un debate que resurge cada pocos años en foros de gráficos. Esta semana el artículo de Pekka Väänänen en [30fps.net](https://30fps.net/pages/255-vs-256-division/) ha vuelto a encender la mecha en Hacker News (252 puntos), así que he decidido meterme a fondo.
+Parece una tontería. Pero resulta que esconde cuantizadores mid-riser, distribuciones no uniformes y un debate que resurge cada pocos años en foros de gráficos. Esta semana el artículo de Pekka Väänänen en [30fps.net](https://30fps.net/pages/255-vs-256-division/) ha vuelto a encender la mecha en Hacker News, así que he decidido meterme a fondo.
 
 ## Las dos fórmulas
 
@@ -78,7 +78,7 @@ El histograma de la izquierda (÷255) muestra los bins 0 y 255 a la mitad de alt
 
 ## Cuantizadores mid-riser y mid-tread
 
-El artículo de Väänänen conecta esto con la teoría de cuantización clásica, sacada de un paper de 1977 de Allen Gresho en el IEEE Communications Society Magazine:
+El artículo de Väänänen conecta esto con la teoría de cuantización clásica, sacada de un paper de 1977 de Allen Gersho en el IEEE Communications Society Magazine:
 
 - **Mid-riser** (estándar, ÷255): el cero cae sobre un «escalón» (riser) del cuantizador. La reconstrucción asigna el cero a 0.0. Los bins extremos se salen del rango.
 - **Mid-tread** (alternativa, ÷256): el cero cae sobre un «peldaño» (tread). La reconstrucción sitúa el cero en el punto medio entre dos enteros (0.5/256). Los bins son simétricos y uniformes.
@@ -129,4 +129,4 @@ Lo realmente valioso del artículo de Väänänen es cómo conecta una pregunta 
 
 La moraleja real: nunca mezcles el encode de una fórmula con el decode de la otra. Eso sí que es código roto.
 
-_Fuente: [Should you normalize RGB values by 255 or 256?](https://30fps.net/pages/255-vs-256-division/) por Pekka Väänänen. HN #48360054, 252 puntos._
+_Fuente: [Should you normalize RGB values by 255 or 256?](https://30fps.net/pages/255-vs-256-division/) por Pekka Väänänen. HN #48360054._
