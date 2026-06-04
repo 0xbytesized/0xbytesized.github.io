@@ -1,0 +1,106 @@
+---
+title: "VoidZero se une a Cloudflare: Vite, la base de Internet"
+date: "2026-06-04T15:00"
+tags: ["vite", "cloudflare", "javascript", "opensource", "voidzero"]
+excerpt: "Evan You lleva Vite, Vitest, Rolldown y Oxc a Cloudflare. Todo sigue siendo open source y MIT. Así cambia el ecosistema JS."
+---
+
+Hoy es un día grande para el ecosistema JavaScript. **VoidZero**, la empresa que Evan You creó para desarrollar Vite, Vitest, Rolldown, Oxc y Vite+, **se une a Cloudflare**. Todo el equipo se va con él.
+
+Y antes de que salte el drama: **nada cambia en cuanto a licencias ni gobernanza**. Vite sigue siendo MIT. Sigue siendo neutral. Sigue funcionando en cualquier plataforma. Cloudflare lo deja claro desde la primera frase del anuncio y creedme que se han esforzado en repetirlo.
+
+He leído el anuncio entero y voy a contarte qué significa esto de verdad, sin el humo corporativo.
+
+## Los números que importan
+
+Vite roza ya los **129 millones de descargas semanales**. El plugin de Cloudflare para Vite (`@cloudflare/vite-plugin`) va por **14 millones semanales**, más del 10% del total de Vite. Hace un año nadie en Cloudflare se lo habría creído.
+
+¿Qué ha pasado? **La IA**. Cada vez más código se genera con agentes, y esos agentes eligen Vite como stack por defecto. Es rápido, los modelos lo conocen bien y el feedback loop es inmediato. Si un agente va a iterar cientos de veces, cada milisegundo cuenta.
+
+Y aquí es donde la jugada de Cloudflare tiene sentido: no están comprando una herramienta de build. Están comprando **la capa de infraestructura sobre la que se está construyendo el software del futuro**, lo escriba un humano o un agente.
+
+## Qué herramientas entran en el paquete
+
+VoidZero no es solo Vite. El ecosistema completo incluye:
+
+- **Vite**: el servidor de desarrollo y bundler que medio Internet usa ya.
+- **Vitest**: el test runner que está desplazando a Jest en proyectos nuevos.
+- **Rolldown**: el bundler escrito en Rust que promete ser el reemplazo de Rollup y esbuild juntos.
+- **Oxc**: el parser, linter y formateador en Rust. Oxlint ya le ahorra días de ingeniería a los codebases de Cloudflare.
+- **Vite+**: la experiencia unificada que junta todas estas piezas bajo un solo CLI y un solo modelo de configuración.
+
+Cada una de estas herramientas es la más rápida en su categoría. Juntas forman una cadena de herramientas que un agente de IA puede ejecutar cientos de veces sin que el desarrollador se duerma esperando.
+
+## Cómo se ve esto en código
+
+El plugin de Cloudflare para Vite se apoya en la **Environment API**, un mecanismo genérico que permite que el código del servidor se ejecute en algo que no es Node.js durante el desarrollo. En el caso de Cloudflare, se ejecuta dentro de `workerd`, el mismo runtime open source que usan los Workers en producción.
+
+Así se configura hoy un proyecto Vite con Cloudflare:
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import cloudflare from "@cloudflare/vite-plugin";
+
+export default defineConfig({
+  plugins: [cloudflare()],
+});
+```
+
+Con estas tres líneas, cuando haces `vite dev` tu código del servidor corre dentro de `workerd`. Durable Objects, D1, KV, R2, Workers AI, Agents, todo disponible en local con el mismo runtime de producción. Sin emuladores, sin polyfills raros.
+
+La Environment API es lo que hace esto posible sin que Cloudflare tenga que construir su propio servidor de desarrollo:
+
+```ts
+// Así define Vite entornos separados para cliente y servidor
+export default defineConfig({
+  environments: {
+    client: {
+      // Código del navegador: HMR, bundling normal
+      resolve: {
+        conditions: ["browser"],
+      },
+    },
+    worker: {
+      // Código del worker: se ejecuta en workerd
+      resolve: {
+        conditions: ["workerd", "worker"],
+      },
+    },
+  },
+});
+```
+
+Cualquier runtime que quiera enchufarse a Vite puede implementar su propio entorno. No es una API de Cloudflare, es de Vite. Eso es diseño neutral bien hecho.
+
+## Cloudflare se reconstruye sobre Vite
+
+Esta es la parte que más me ha sorprendido del anuncio. No es que Vite vaya a convertirse en algo específico de Cloudflare. Es al revés: **Cloudflare va a reconstruir su CLI sobre Vite**.
+
+Han publicado un preview técnico de `cf`, un nuevo CLI unificado para toda la plataforma. La idea es que:
+
+- `cf dev` sea un superset de `vite dev`
+- `cf build` entienda proyectos Vite de forma nativa
+- `cf deploy` sea trivial si ya usas Vite
+
+Sin adaptadores, sin baile de configuraciones. Si tu proyecto usa Vite (y el 90% de los proyectos nuevos lo usan), desplegar en Cloudflare será cambiar `vite` por `cf` en tus comandos.
+
+Para los que ya estamos hasta el gorro de las capas de abstracción entre el entorno local y producción, esto es una bocanada de aire fresco.
+
+## El millón de dólares y Void
+
+Cloudflare también ha comprometido **un millón de dólares** para un fondo del ecosistema Vite, administrado por el core team, para apoyar a maintainers y contribuidores. No es caridad: es asegurarse de que la base sobre la que piensan construir siga siendo sólida y diversa.
+
+Además, planean abrir el código de **Void**, la plataforma de despliegue que VoidZero había estado desarrollando como banco de pruebas para entender qué debe poseer un framework moderno. La abrirán para que cualquiera pueda aprender de ella y construir su propia plataforma sobre Vite.
+
+## Mi opinión
+
+Llevo siguiendo a Evan You desde que Vue era un experimento que alguien compartió en Hacker News. Ha demostrado una brújula ética poco común en este sector. No ha vendido su proyecto a una gran corporación para que lo entierre en un jardín amurallado: ha negociado una adquisición donde **el código abierto es la condición, no la concesión**.
+
+Cloudflare también está jugando bien sus cartas. Podrían haber comprado Vercel o Netlify. En lugar de eso, han comprado la herramienta que usan Vercel, Netlify y todos los demás. Es un movimiento de capa inferior, como cuando Google compró Android en 2005. No compras la tienda, compras los cimientos sobre los que se construyen todas las tiendas.
+
+El riesgo, como siempre, es la captura corporativa a largo plazo. Los anuncios de hoy son impecables, pero el verdadero test será dentro de tres años, cuando las prioridades de negocio de Cloudflare empiecen a tirar en direcciones que no beneficien a los frameworks que compiten con sus propios productos. De momento, el historial con Astro (que Cloudflare también incorporó este año) es positivo: Astro sigue siendo open source, sigue desplegando en todas partes y el equipo sigue ejecutando su propio roadmap.
+
+Si esto sale bien —y tengo razones para ser optimista—, el ecosistema JavaScript gana una base sólida, rápida y bien mantenida que no depende del humor de una sola empresa. Paradójicamente, la forma de conseguir independencia ha sido que una gran empresa ponga dinero y equipos a trabajar en ello sin pedir exclusividad a cambio.
+
+Ojalá más adquisiciones fueran así.
