@@ -1,0 +1,150 @@
+---
+title: "Let's Encrypt ya se blinda contra los ordenadores cuánticos"
+date: "2026-06-04T08:00"
+tags: ["criptografía", "seguridad", "tls", "letsencrypt", "post-cuántica"]
+excerpt: "Let's Encrypt anuncia su plan para proteger HTTPS de los ordenadores cuánticos con Merkle Tree Certificates, una alternativa a los certificados X.509."
+---
+
+El 3 de junio de 2026, Let's Encrypt publicó su hoja de ruta para la era post-cuántica. La idea central: sustituir los certificados X.509 tradicionales por **Merkle Tree Certificates (MTCs)**, un diseño que resuelve de un plumazo dos problemas — las firmas gigantescas de los algoritmos post-cuánticos y la transparencia de emisión. Staging previsto para finales de 2026, producción en 2027.
+
+Suena a futuro lejano, pero el calendario se ha comprimido bastante en el último año. Google quiere migrar sus servicios para 2029. Cloudflare va en paralelo. La NSA tiene a todas las agencias federales de EEUU corriendo hacia algoritmos post-cuánticos desde 2022. Y Go 1.27 ya incluye ML-DSA en su biblioteca estándar. El tren está saliendo.
+
+## El problema: las firmas post-cuánticas son enormes
+
+Para entender por qué Let's Encrypt necesita reinventar los certificados, hay que ver los números. Los algoritmos de firma que usamos hoy en TLS son minúsculos:
+
+- **ECDSA P-256**: 64 bytes la firma, 64 bytes la clave pública.
+- **RSA-2048**: 256 bytes la firma, 256 bytes la clave pública.
+
+El estándar post-cuántico del NIST, **ML-DSA-44**, cambia completamente la ecuación:
+
+- **Firma**: ~2.420 bytes
+- **Clave pública**: ~1.312 bytes
+
+Un handshake TLS típico hoy transporta cinco firmas y dos claves públicas. Si sustituyes todo por ML-DSA, el handshake se va **por encima de los 10 kilobytes**. Cloudflare ya demostró que a ese tamaño un porcentaje significativo de conexiones TLS simplemente falla en redes reales. Las que sobreviven van más lentas. No es aceptable para una web que funciona a escala planetaria.
+
+Aquí tienes una comparación visual de lo que implican estas diferencias:
+
+```python
+# Comparación de tamaños de firma en TLS
+# (valores del anuncio oficial de Let's Encrypt y estándares NIST)
+
+algoritmos = {
+    "ECDSA P-256":     {"firma": 64,   "clave_publica": 64},
+    "RSA-2048":        {"firma": 256,  "clave_publica": 256},
+    "ML-DSA-44":       {"firma": 2420, "clave_publica": 1312},
+}
+
+# Handshake típico: 5 firmas + 2 claves públicas
+for nombre, datos in algoritmos.items():
+    total = (datos["firma"] * 5) + (datos["clave_publica"] * 2)
+    print(f"{nombre:15s} → {total:,} bytes por handshake")
+
+# Salida:
+# ECDSA P-256     → 448 bytes por handshake
+# RSA-2048        → 1,792 bytes por handshake
+# ML-DSA-44       → 14,724 bytes por handshake
+```
+
+Pasar de ~450 bytes a casi 15 KB por handshake no es una optimización pendiente: es una ruptura del protocolo tal como lo conocemos. Y si tu servicio maneja miles de conexiones por segundo, el coste en ancho de banda se multiplica de forma absurda.
+
+## La solución: certificados que viven en un árbol de Merkle
+
+Los MTC atacan el problema desde otro ángulo. En lugar de firmar cada certificado individualmente, la autoridad certificadora (CA) emite certificados **por lotes**, con una sola firma que cubre el lote entero.
+
+El navegador mantiene actualizadas esas firmas de lote (llamadas _landmarks_) fuera del handshake TLS. En el handshake, el servidor envía:
+
+1. Una **firma** (1 en lugar de 5)
+2. Una **clave pública** (1 en lugar de 2)
+3. Una **prueba de inclusión en el árbol** (unos pocos hashes)
+
+El resultado neto es un handshake **más pequeño que el actual con RSA**, incluso usando algoritmos post-cuánticos.
+
+Aquí tienes una implementación conceptual de cómo funciona la prueba de inclusión en un árbol de Merkle:
+
+```python
+import hashlib
+
+def hash_dato(dato: bytes) -> bytes:
+    """Hash SHA-256 de un dato."""
+    return hashlib.sha256(dato).digest()
+
+def hash_par(izq: bytes, der: bytes) -> bytes:
+    """Combina dos nodos del árbol."""
+    return hashlib.sha256(izq + der).digest()
+
+def prueba_inclusion(certificado: bytes, camino: list[tuple[bytes, bool]]) -> bytes:
+    """
+    Verifica que un certificado pertenece a un lote de MTC.
+    
+    - certificado: el hash del certificado (hoja del árbol)
+    - camino: lista de (hash_hermano, es_izquierda) desde la hoja a la raíz
+    
+    Retorna la raíz calculada, que debe coincidir con el landmark.
+    """
+    hash_actual = certificado
+    for hash_hermano, es_izquierda in camino:
+        if es_izquierda:
+            hash_actual = hash_par(hash_hermano, hash_actual)
+        else:
+            hash_actual = hash_par(hash_actual, hash_hermano)
+    return hash_actual
+
+# Ejemplo: un lote de 4 certificados
+hojas = [hash_dato(f"cert-{i}".encode()) for i in range(4)]
+
+# Construcción del árbol (nivel 1: pares, nivel 2: raíz)
+nodo_01 = hash_par(hojas[0], hojas[1])
+nodo_23 = hash_par(hojas[2], hojas[3])
+raiz = hash_par(nodo_01, nodo_23)
+
+# Para el certificado 0, la prueba de inclusión es:
+# [hash(cert-1), derecha] → combinamos con cert-1 a la derecha → nodo 01
+# [nodo_23, derecha] → combinamos con nodo_23 a la derecha → raíz
+camino_cert0 = [(hojas[1], False), (nodo_23, False)]
+assert prueba_inclusion(hojas[0], camino_cert0) == raiz
+print("✓ Certificado 0 verificado contra la raíz del lote")
+```
+
+El concepto es sencillo: con solo log₂(n) hashes puedes demostrar que un certificado concreto pertenece a un lote de tamaño n. Para un lote de un millón de certificados, la prueba de inclusión ocupa apenas 20 hashes — unos 640 bytes. Ridículo comparado con los 2.4 KB de una firma ML-DSA individual.
+
+## Transparencia incorporada, no añadida a posteriori
+
+El otro golpe de genialidad de los MTC es que la transparencia deja de ser un parche. Hoy, Certificate Transparency funciona así: la CA emite un certificado, lo registra en un log de CT independiente y mete una firma extra (SCT) en el handshake TLS para demostrar que lo ha hecho. Son tres sistemas distintos cooperando a base de pegamento criptográfico.
+
+Con MTC, un certificado **no puede existir fuera del árbol de Merkle**. La transparencia es una propiedad estructural del sistema, no un añadido administrativo. Let's Encrypt lleva operando logs de CT (que también son árboles de Merkle) desde 2019, así que conocen el terreno.
+
+## El calendario: no es un simulacro
+
+Las fechas que maneja Let's Encrypt son ambiciosas pero realistas:
+
+- **Finales de 2026**: entorno de staging emitiendo MTCs.
+- **2027**: producción.
+
+Mientras tanto, el ecosistema sigue moviéndose:
+
+- **Chrome** ya ha dicho que los MTC son su camino preferido para certificados post-cuánticos en la web.
+- **Cloudflare y Chrome** están ejecutando un experimento de viabilidad con tráfico real.
+- El grupo **PLANTS de la IETF** está estandarizando el diseño.
+- **Go 1.27** incluye ML-DSA en su biblioteca estándar.
+- El RFC 9881 define firmas ML-DSA en X.509.
+
+Para los que mantenemos servidores, el mensaje inmediato es otro: **activad el intercambio de claves híbrido post-cuántico ya**. Let's Encrypt lo dice explícitamente: el cifrado post-cuántico (X25519MLKEM768) es más urgente que la autenticación, porque un atacante puede estar grabando tráfico hoy para descifrarlo cuando tenga un ordenador cuántico. Los principales navegadores ya lo soportan; solo falta encenderlo en el servidor.
+
+## Qué significa para ti como developer
+
+Si usas Let's Encrypt con certbot o cualquier cliente ACME: **hoy no cambia nada**. Tus certificados se siguen emitiendo y renovando igual.
+
+Pero si mantienes un cliente ACME, un pipeline de certificados, o cualquier infraestructura que dependa de TLS, este es el momento de seguir el grupo PLANTS de la IETF y la lista mtcs@chromium.org. La transición va a requerir cambios en clientes, bibliotecas y navegadores.
+
+Y si tienes un servidor web — Nginx, Apache, Caddy, lo que sea —, el consejo práctico inmediato ya lo di antes: activa X25519MLKEM768 para el intercambio de claves. Es el equivalente a ponerte el cinturón de seguridad mientras diseñan el airbag.
+
+## Mi veredicto
+
+Los MTC me parecen una de esas ideas que, una vez explicadas, resultan obvias. La genialidad está en atacar dos problemas con una sola estructura de datos: reduces el tamaño del handshake **y** eliminas la necesidad de un sistema de transparencia separado. Es ingeniería elegante.
+
+Lo que más me convence es que no es un paper académico flotando en el vacío. Let's Encrypt emite certificados para cientos de millones de dominios. Chrome está alineado. Cloudflare está probando con tráfico real. Hay estándares en camino y fechas concretas. Esto va en serio.
+
+Mi única preocupación es el calendario. Pasar de un sistema de emisión de certificados que lleva una década funcionando a un modelo completamente nuevo en 18 meses es ambicioso. Pero si alguien puede hacerlo, es la organización que ya pasó de cero a ser la CA más grande del mundo en menos de cinco años.
+
+La criptografía post-cuántica lleva años siendo "algo que llegará". Con este anuncio, ha llegado. Y como casi siempre en esta industria, los que se muevan pronto dormirán mejor.
