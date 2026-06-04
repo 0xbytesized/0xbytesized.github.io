@@ -1,0 +1,81 @@
+---
+title: "Gemma 4 12B: Google mete visión y audio directo al LLM"
+date: "2026-06-04T03:00"
+tags: ["gemma", "google", "multimodal", "llm", "open-source"]
+excerpt: "Google lanza Gemma 4 12B con arquitectura unificada sin encoders. Corre en un portátil con 16 GB de RAM y rivaliza con modelos del doble de tamaño."
+---
+
+Google DeepMind acaba de lanzar Gemma 4 12B y trae una decisión de diseño que va a dar que hablar: **han eliminado los encoders multimodales por completo**. Nada de CLIP, nada de Whisper ni de codificadores de audio separados. La imagen y el sonido entran directamente al *backbone* del modelo de lenguaje.
+
+Es un movimiento arriesgado que simplifica la arquitectura de forma radical y tiene consecuencias prácticas inmediatas: menos memoria, menos latencia y la posibilidad de correr un modelo multimodal serio en un portátil normal.
+
+## Arquitectura unificada: fuera encoders
+
+Los modelos multimodales tradicionales funcionan con un esquema de dos pasos. Primero, un encoder especializado —tipo ViT para imágenes o un encoder de audio— transforma la entrada en una representación intermedia. Luego, esa representación se inyecta en el LLM mediante un adaptador o proyección.
+
+Gemma 4 12B tira todo eso a la basura y hace algo mucho más directo:
+
+- **Visión**: una única multiplicación de matrices, más un *positional embedding* y unas normalizaciones. Eso es todo. El *backbone* del LLM asume el procesamiento visual.
+- **Audio**: aún más simple. La señal de audio en bruto se proyecta directamente al mismo espacio dimensional que los tokens de texto. Sin encoder de audio.
+
+El resultado es un modelo con una huella de memoria mucho menor. Según Google, Gemma 4 12B rinde cerca del modelo 26B Mixture of Experts (MoE) de la misma familia, pero ocupa menos de la mitad de memoria total. Con 16 GB de VRAM o memoria unificada puedes correrlo en local.
+
+Para un desarrollador, esto se traduce en poder hacer inferencia multimodal en una GPU de consumo sin tener que alquilar una A100 en la nube.
+
+## Cómo probarlo ya mismo
+
+El modelo está disponible bajo licencia Apache 2.0 en Hugging Face, Kaggle y Ollama. Aquí tienes tres formas de arrancar:
+
+### Con Ollama (la más rápida para probar)
+
+```bash
+# Descargar el modelo
+ollama pull gemma4:12b-mlx
+
+# Inferencia con texto
+ollama run gemma4:12b-mlx "Explica qué es la entropía cruzada como si fuera un postre"
+```
+
+Ollama abstrae toda la configuración de CUDA, cuantización y memoria. En un portátil con 16 GB de RAM unificada (tipo MacBook con M1 o superior), el modelo cabe holgado.
+
+### Con Hugging Face Transformers
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+model_id = "google/gemma-4-12B-it"
+
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.bfloat16,
+    device_map="auto"
+)
+
+inputs = tokenizer("¿Por qué el cielo es azul?", return_tensors="pt").to(model.device)
+outputs = model.generate(**inputs, max_new_tokens=256)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+```
+
+La novedad aquí es que `AutoModelForCausalLM` carga un único modelo que procesa texto, imágenes y audio. No necesitas cargar un procesador de visión aparte ni manejar *tensors* de forma diferente según el tipo de entrada.
+
+Además de Ollama y Hugging Face, el ecosistema de inferencia es amplio: MLX para Apple Silicon, SGLang y vLLM para servidores, y soporte en camino para llama.cpp. Con licencia Apache 2.0, puedes integrarlo donde quieras sin preocuparte por restricciones.
+
+## Multi-Token Prediction: el truco bajo el capó
+
+Gemma 4 12B incorpora una técnica llamada Multi-Token Prediction (MTP). En lugar de predecir un solo token por paso —como hacen casi todos los LLMs—, el modelo predice varios tokens simultáneamente usando *draft heads* auxiliares.
+
+Esto no cambia la calidad de la salida, pero reduce la latencia porque cada paso de inferencia produce más tokens. Es como si el modelo "adelantara" parte del trabajo. Para aplicaciones interactivas o agentes que necesitan responder rápido, la diferencia se nota.
+
+## Mi veredicto
+
+Google está apostando por simplificar. Mientras otros fabricantes añaden capas y más capas de encoders especializados, Gemma 4 12B demuestra que se puede conseguir rendimiento competitivo eliminando componentes enteros del pipeline.
+
+La parte que más me convence es la implicación para el desarrollo local. Poder iterar con un modelo multimodal en tu máquina, sin depender de APIs externas ni de GPUs de 10.000 euros, cambia el flujo de trabajo. Ya no tienes que subir imágenes a un servicio cloud para que un modelo las procese —todo ocurre en local.
+
+Dicho esto, hay preguntas abiertas. ¿Cómo de bien maneja la ausencia de encoder en tareas de visión fina como OCR o detección de objetos pequeños? ¿El procesamiento de audio en bruto sin encoder mantiene la calidad en entornos ruidosos? Los benchmarks que Google publica son favorables, pero habrá que ver cómo se comporta en *wild* con casos extremos.
+
+Lo que está claro es que la dirección es la correcta. Modelos más pequeños, más eficientes y con menos piezas móviles. Gemma 4 12B no es el modelo más potente del mercado, pero es uno de los más pragmáticos que he visto en meses.
+
+Si tienes 16 GB de RAM y curiosidad, ya puedes descargarlo. La licencia es Apache 2.0: sin trampas.
