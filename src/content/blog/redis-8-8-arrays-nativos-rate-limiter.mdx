@@ -1,0 +1,167 @@
+---
+title: "Redis 8.8: arrays nativos y rate limiters sin Lua"
+date: "2026-06-05T15:30"
+tags: ["redis", "bases-de-datos", "backend", "rendimiento"]
+excerpt: "Redis 8.8 trae arrays como estructura nativa, rate limiter integrado sin Lua y XNACK para streams. Las mejoras de rendimiento llegan al 83%."
+---
+
+Redis 8.8 acaba de salir y trae una de esas actualizaciones que te hacen preguntarte "¿cómo es que esto no existía antes?". Tres novedades destacan: un nuevo tipo de dato **array** diseñado desde cero, un **rate limiter nativo** que jubila los scripts Lua y **XNACK** para streams, la pieza que faltaba en el modelo de consumidores. Vamos por partes.
+
+## Array: el nuevo tipo que Redis necesitaba
+
+Redis siempre ha sido un almacén de estructuras de datos. Tienes strings, hashes, listas, sets, sorted sets, streams... y ahora, por fin, **arrays**. Un array en Redis 8.8 es una colección indexada de strings, direccionable por índice numérico y con esteroides.
+
+No es una lista glorificada. Un array puede ser disperso (índices no consecutivos) sin penalización de memoria, puede hacer agregaciones en el servidor, búsquedas con patrones, y actuar como ring buffer con un solo comando.
+
+Los números de rendimiento son contundentes: para acceso aleatorio sobre 100K elementos, los arrays son **5× más rápidos que las listas** y un 8-15% más rápidos que los hashes.
+
+### Ring buffer en un solo comando
+
+El patrón clásico de ring buffer en Redis siempre fue un `RPUSH` seguido de un `LTRIM`:
+
+```bash
+# Antes: dos comandos, dos round-trips
+RPUSH events:sensor "{...}"
+LTRIM events:sensor -1000 -1
+```
+
+Con Redis 8.8 esto se reduce a un solo comando atómico:
+
+```bash
+# Ahora: un comando, el doble de rendimiento
+ARRING events:sensor 1000 "{...}"
+```
+
+`ARRING` inserta el valor y recorta automáticamente al tamaño máximo especificado. Según los benchmarks de Redis, esto duplica el throughput respecto al enfoque con listas (~1.1M inserts/sec vs ~512K para un anillo de 1K elementos).
+
+### Agregaciones en el servidor
+
+Aquí es donde los arrays se ponen interesantes de verdad. Si los valores son numéricos, puedes pedirle a Redis que calcule SUM, MIN o MAX sobre un rango de índices **sin mover los datos al cliente**:
+
+```bash
+# Datos de temperatura de sensores (un valor por minuto)
+ARSET sensor:temp 0 "23.5" "23.8" "24.1" "24.3" "24.0" "23.9"
+
+# Temperatura máxima de todo el periodo
+AROP sensor:temp MAX 0 5
+# → "24.3"
+
+# Media del rango [1..4]
+AROP sensor:temp SUM 1 4
+# → "96.2"  (luego divides por la cuenta en el cliente)
+```
+
+Para flags binarios, `AROP` soporta AND, OR y XOR. Ideal para detectores de anomalías que operan sobre ventanas deslizantes de eventos.
+
+### Búsqueda textual dentro del array
+
+`ARGREP` te permite buscar elementos con coincidencia exacta, parcial, glob o regex:
+
+```bash
+# Guardar un archivo de log línea por línea
+ARSET logs:app 0 "ERROR: timeout db1" "INFO: request /api/users" \
+                    "ERROR: connection refused" "WARN: retry 3/5"
+
+# Buscar líneas que contengan "ERROR"
+ARGREP logs:app MATCH "*ERROR*" 0 -1
+# → índices 0 y 2 con sus valores
+```
+
+Esto abre la puerta a agentes de diagnóstico que consultan logs recientes sin sacar todo el buffer del almacén.
+
+## INCREX: rate limiting sin Lua
+
+Implementar un rate limiter en Redis siempre ha implicado scripts Lua. El patrón típico era algo como:
+
+```lua
+-- El script de siempre: comprobar, incrementar, decidir
+local current = redis.call("INCR", KEYS[1])
+if current == 1 then
+    redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+return current
+```
+
+Funciona, pero tiene fricción: depurar Lua en Redis no es divertido, el rendimiento no es óptimo para tráfico extremo, y la lógica de ventana deslizante o límites con saturación requiere scripts aún más complejos.
+
+Redis 8.8 mete el rate limiter en el motor con `INCREX`:
+
+```bash
+# Ventana fija: 100 peticiones por minuto
+INCREX rate:user:42 EX 60 UBOUND 100 BYINT 1
+# → [counter_value, actual_increment]
+
+# Si counter_value <= 100 → permitir
+# Si counter_value > 100  → rechazar (se aplicó 0 con SATURATE)
+```
+
+Tres capacidades nuevas respecto a la familia `INCR`:
+
+1. **`UBOUND`**: el contador no puede superar el límite. Si lo haría, el incremento se trunca y Redis devuelve el incremento real aplicado (0 si ya estaba al tope).
+2. **`ENX`**: la expiración solo se aplica si la clave no tenía TTL previo. Crítico para ventanas fijas: quieres que el TTL se ajuste al crear la ventana, no que se reinicie con cada petición.
+3. **`SATURATE`**: en lugar de rechazar, acepta parcialmente hasta el límite. Útil cuando quieres ser indulgente con el límite exacto.
+
+Un rate limiter de ventana fija con `INCREX`:
+
+```bash
+# 100 requests por minuto, con saturación
+INCREX ratelimit:api:${user_id} EX 60 UBOUND 100 BYINT 1 SATURATE
+
+# La respuesta te dice cuántos tokens se consumieron realmente.
+# Si devuelve [100, 0] → denegado. Si devuelve [87, 1] → permitido.
+```
+
+La clave está en la respuesta: Redis te dice tanto el nuevo valor del contador como el incremento real aplicado. Con eso decides en una sola operación si la petición pasa o no. Sin Lua, sin pipelines, sin lógica en el cliente más allá de leer dos números.
+
+## XNACK: los streams aprenden a decir "no"
+
+Redis Streams llevaban años con una limitación molesta: un consumidor podía reconocer un mensaje (`XACK`) o dejarlo pendiente, pero no podía **rechazarlo explícitamente**. Si un mensaje era problemático, otros consumidores tenían que esperar a que expirara del PEL y usar `XAUTOCLAIM` para rescatarlo. En sistemas sensibles a latencia, ese retraso duele.
+
+Redis 8.8 introduce `XNACK` con tres modos:
+
+```bash
+# Error transitorio: devolver el mensaje sin penalizar contador
+XNACK mystream mygroup SILENT IDS 1 "1717543200000-0"
+
+# El consumidor no puede procesarlo; que lo intente otro
+XNACK mystream mygroup FAIL IDS 1 "1717543200000-0"
+
+# Mensaje envenenado: marcarlo para dead-letter queue
+XNACK mystream mygroup FATAL IDS 1 "1717543200000-0"
+```
+
+La diferencia práctica entre los modos:
+
+- **SILENT**: el delivery counter se decrementa. El mensaje vuelve a estar disponible como si nunca se hubiera entregado. Ideal para shutdowns graceful o errores transitorios.
+- **FAIL**: el delivery counter no se toca. El mensaje se libera para que otro consumidor lo recoja. Útil si este worker no tiene recursos.
+- **FATAL**: el delivery counter se pone a `LLONG_MAX`. El mensaje queda marcado para siempre, facilitando su ruteo a una dead-letter queue.
+
+Los mensajes en NACK se colocan al frente del PEL, por delante de los pendientes normales. `XREADGROUP` siempre los prioriza. Esto garantiza que un mensaje rechazado no se quede pudriendo mientras otros nuevos pasan por delante.
+
+## Las mejoras de rendimiento
+
+Redis 8.8 no es solo features nuevos. La tabla de mejoras de throughput asusta:
+
+| Operación | Mejora |
+|---|---|
+| `XREADGROUP` (COUNT 100) | +83% |
+| `ZADD`, `ZINCRBY`, `ZRANGEBYSCORE` | +74% |
+| `MGET` con I/O threads | +68% |
+| `HGETALL` (campos masivos) | +25% |
+| Persistencia y replicación | +60% |
+
+Son mejoras de rendimiento "gratis": actualizas Redis y tu código existente va más rápido sin tocar una línea.
+
+## Mi opinión
+
+El array es el movimiento más inteligente que ha hecho Redis en años. No porque sea revolucionario —un array indexado es la estructura más básica que existe— sino porque resuelve patrones reales que los desarrolladores llevaban años implementando con combinaciones incómodas de listas, hashes y sorted sets.
+
+El ring buffer con `ARRING` es el ejemplo perfecto. Todo el mundo ha escrito el `RPUSH` + `LTRIM`. Es uno de esos patrones tan comunes que merecía ser un comando nativo. Redis lo ha entendido y ha entregado algo que dobla el rendimiento y simplifica el código.
+
+El rate limiter con `INCREX` me parece igual de acertado. Los scripts Lua en Redis son una herramienta potente pero con fricción: difícil depuración, imposible de probar fuera de Redis, y una barrera para equipos que no dominan Lua. Meter el rate limiter en el motor es reconocer que el 90% de los scripts Lua que la gente escribe son rate limiters. Bien hecho.
+
+`XNACK` llega tarde pero llega bien. Los streams de Redis se han ido puliendo versión a versión (mensajes idle en 8.4, producción idempotente en 8.6, y ahora NACK en 8.8) hasta convertirse en un sistema de mensajería serio. Los tres modos (SILENT, FAIL, FATAL) cubren los casos reales sin sobreingeniería.
+
+Mi única queja: Redis sigue sin tener un tipo array en su modelo de datos que acepte valores que no sean strings. Si quieres números de verdad, tienes que parsearlos en el cliente. Para agregaciones como SUM/MAX no es grave (el servidor hace el casting), pero tener arrays tipados habría sido el broche de oro.
+
+En resumen: actualiza. Redis 8.8 es una de esas versiones donde las mejoras de rendimiento por sí solas justifican el upgrade, y los features nuevos te quitan código que ya no tendrás que mantener.
