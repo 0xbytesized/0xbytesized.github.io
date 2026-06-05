@@ -60,7 +60,7 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
 La novedad aquí es que `AutoModelForCausalLM` carga un único modelo que procesa texto, imágenes y audio. No necesitas cargar un procesador de visión aparte ni manejar *tensors* de forma diferente según el tipo de entrada.
 
-Además de Ollama y Hugging Face, el ecosistema de inferencia es amplio: MLX para Apple Silicon, SGLang y vLLM para servidores, y soporte en camino para llama.cpp. Con licencia Apache 2.0, puedes integrarlo donde quieras sin preocuparte por restricciones.
+Además de Ollama y Hugging Face, el ecosistema de inferencia es amplio: MLX para Apple Silicon, SGLang y vLLM para servidores y soporte en camino para llama.cpp. Con licencia Apache 2.0, puedes integrarlo donde quieras sin preocuparte por restricciones.
 
 ## Multi-Token Prediction: el truco bajo el capó
 
