@@ -1,0 +1,160 @@
+---
+title: "pg_durable: Microsoft mete workflows durables en PostgreSQL"
+date: "2026-06-05T21:33"
+tags: ["postgresql", "rust", "microsoft", "durable-execution", "workflows"]
+excerpt: "Microsoft libera pg_durable, una extensión PostgreSQL que ejecuta workflows durables dentro de la base de datos. Sin Temporal, sin Redis, sin colas."
+---
+
+Microsoft acaba de liberar [pg_durable](https://github.com/microsoft/pg_durable), una extensión para PostgreSQL que mete la ejecución durable directamente dentro de la base de datos. Escrita en Rust sobre [pgrx](https://github.com/pgcentralfoundation/pgrx), la extensión te permite definir workflows completos —con pasos secuenciales, paralelismo, condiciones, reintentos y scheduling— usando SQL puro. No necesitas Temporal, ni Redis, ni Airflow, ni colas externas.
+
+La idea es simple y potente: si ya tienes tu estado en Postgres, ¿por qué sacar la lógica de tus flujos de trabajo a otro sistema? pg_durable hace que la orquestración viva al lado de los datos.
+
+## ¿Qué es la ejecución durable?
+
+Cuando tienes un proceso largo —una ingesta de datos por lotes, un pipeline de embeddings, una tarea de mantenimiento— y algo falla a mitad de camino, normalmente toca recomenzar desde cero o reconstruir el estado a mano. La ejecución durable resuelve esto haciendo checkpoint después de cada paso: si la base de datos se cae, se reinicia o un paso falla, el workflow continúa exactamente donde se quedó.
+
+Hasta ahora esto se resolvía con sistemas externos como Temporal, AWS Step Functions o Apache Airflow. pg_durable lo mete dentro de PostgreSQL.
+
+## Así se define un workflow
+
+La extensión expone un DSL SQL con operadores composables. El más básico es `~>` (secuencia):
+
+```sql
+-- Procesar documentos pendientes en dos pasos
+SELECT df.start(
+    'SELECT id FROM documents WHERE processed = false LIMIT 100' |=> 'batch'
+    ~> 'UPDATE documents SET processed = true WHERE id = ANY($batch)'
+);
+```
+
+El operador `|=>` da nombre al resultado del primer paso (lo guarda como `$batch`) y `~>` encadena el siguiente paso que usa esa variable. Si el UPDATE falla a mitad de camino, el sistema hace checkpoint tras la SELECT y reintenta solo lo pendiente.
+
+También puedes lanzar pasos en paralelo y juntar resultados:
+
+```sql
+-- Ejecución paralela con join
+SELECT df.start(
+    df.join3(
+        'SELECT count(*) FROM users',
+        'SELECT count(*) FROM orders',
+        'SELECT sum(revenue) FROM sales'
+    ) ~> 'SELECT ''dashboard refreshed'''
+);
+```
+
+Y ejecutar tareas con condiciones, bucles, o compitiendo entre sí:
+
+```sql
+-- Race: el primer paso que termina gana (útil para timeouts)
+SELECT df.start(
+    'SELECT heavy_computation()' | df.sleep(10)
+);
+
+-- Bucle eterno: heartbeat cada 60 segundos
+SELECT df.start(
+    @> ('INSERT INTO heartbeats (ts) VALUES (now())' ~> df.sleep(60)),
+    'heartbeat-job'
+);
+```
+
+## Lo que desaparece de tu arquitectura
+
+El patrón típico para workflows en bases de datos hoy es `pg_cron` + una tabla de jobs + columnas de estado + contadores de reintento + un worker externo que sondea. O directamente Temporal/Step Functions llamando a Postgres desde fuera.
+
+Con pg_durable todo eso puede desaparecer. La definición del workflow se escribe en SQL, el estado y los checkpoints viven en tablas de Postgres y la ejecución la maneja un background worker que corre dentro del propio servidor. La visibilidad operacional la obtienes consultando `df.instances`, usando el mismo modelo de auth y backups que tus datos.
+
+```sql
+-- Ver estado de todas tus instancias
+SELECT * FROM df.list_instances();
+
+-- Cancelar una instancia en ejecución
+SELECT df.cancel('a1b2c3d4', 'Ya no es necesario');
+
+-- Obtener el resultado de una instancia completada
+SELECT df.result('a1b2c3d4');
+```
+
+## HTTP desde SQL, señales y cron
+
+La extensión también permite hacer llamadas HTTP directamente desde un paso del workflow:
+
+```sql
+SELECT df.start(
+    df.http('https://api.openai.com/v1/embeddings', 'POST',
+        '{"input": "texto a embeber", "model": "text-embedding-3-small"}')
+    |=> 'embedding'
+    ~> 'INSERT INTO embeddings (vec) VALUES ($embedding)'
+);
+```
+
+Esto es especialmente interesante para pipelines de embeddings con pgvector: recuperas documentos, llamas a la API de embeddings y guardas el resultado. Todo durables, todo desde SQL.
+
+También soporta esperar señales externas y scheduling con expresiones cron:
+
+```sql
+-- Esperar una señal de aprobación (máximo 1 hora)
+df.wait_for_signal('approval', 3600)
+
+-- Ejecutar cada hora a las :00
+df.wait_for_schedule('0 * * * *')
+```
+
+## Arquitectura: Rust + pgrx + duroxide
+
+pg_durable está construido sobre dos librerías Rust que Microsoft también ha abierto:
+
+- **[duroxide](https://github.com/microsoft/duroxide)**: el runtime de orquestración (replay determinista, checkpoints, timers, sub-orquestraciones).
+- **[duroxide-pg](https://github.com/microsoft/duroxide-pg)**: el backend de estado que persiste el runtime en tablas de PostgreSQL (esquema `duroxide.*`).
+
+La extensión expone un esquema `df.*` con las tablas y funciones del DSL. Un background worker aloja el runtime duroxide dentro del proceso de PostgreSQL. Todo corre in-process, sin servicios externos.
+
+```
+┌──────────────────────────────────────────────────┐
+│                   PostgreSQL                     │
+│  ┌────────────────────────────────────────────┐  │
+│  │          pg_durable (pgrx)                 │  │
+│  │  SQL DSL    'sql' |=> 'name' ~> 'sql2'     │  │
+│  │  df.if()  |  df.join()  |  df.loop()      │  │
+│  │  ┌──────────────────────────────────────┐  │  │
+│  │  │  duroxide (runtime de orquestración) │  │  │
+│  │  │  ┌────────────────────────────────┐  │  │
+│  │  │  │  duroxide-pg (estado en BBDD)  │  │  │
+│  │  │  └────────────────────────────────┘  │  │
+│  │  └──────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────┘  │
+│  schemas: df.* (DSL) + duroxide.* (runtime)      │
+└──────────────────────────────────────────────────┘
+```
+
+Si prefieres escribir workflows en Rust, Python o Node, puedes usar duroxide + duroxide-pg directamente. pg_durable es la capa SQL para quien quiera orquestrar sin salir de la base de datos.
+
+## Aislamiento multi-usuario
+
+Un detalle importante: `CREATE EXTENSION pg_durable` no concede permisos a `PUBLIC`. Después de instalar la extensión, un admin debe otorgar acceso explícitamente:
+
+```sql
+SELECT df.grant_usage('app_role');
+```
+
+El sistema usa Row-Level Security para que cada rol solo vea y gestione sus propias instancias. Las variables (`df.vars`) tienen scoping por usuario. El worker de fondo requiere superusuario porque omite RLS para gestionar instancias de todos los usuarios.
+
+## Limitaciones (y cuándo no usarlo)
+
+El modelo es intencionadamente SQL-shaped. Las limitaciones principales:
+
+- Si un paso necesita código arbitrario que no se mapea bien a SQL, hay que envolverlo en una función SQL o exponerlo como endpoint HTTP para usar `df.http()`.
+- No está pensado para manejo de peticiones síncronas sub-milisegundo.
+- Necesitas poder instalar extensiones y correr un background worker en tu entorno Postgres.
+- Si tu workflow toca muchos sistemas heterogéneos, un orquestrador generalista puede encajar mejor.
+
+El proyecto está en estado **Preview** y usa la [PostgreSQL License](https://github.com/microsoft/pg_durable/blob/main/LICENSE.txt). Soporta PostgreSQL 17 y 18. Microsoft ya lo ofrece dentro de [Azure HorizonDB](https://aka.ms/AzureHorizonDB), su nuevo servicio PostgreSQL en la nube.
+
+## Mi veredicto
+
+pg_durable me parece uno de esos proyectos que, en retrospectiva, era obvio que tenían que existir. Llevamos años montando trabajos en background con pg_cron, colas, workers y tablas de estado cuando en realidad lo único que queríamos era "ejecuta estos pasos en orden y si algo falla, sigue donde estabas". Tener eso como extensión nativa de PostgreSQL, sin infraestructura extra, es un avance real.
+
+La decisión de escribirlo en Rust con pgrx también es acertada. pgrx ha madurado muchísimo y permite construir extensiones que se sienten nativas sin el dolor de C. Y que Microsoft esté contribuyendo esto como open source con licencia PostgreSQL —no con una licencia restrictiva tipo BSL— es una señal más de hacia dónde va la compañía con sus herramientas de datos.
+
+Lo que más me gusta es la filosofía de "compute close to data". Durante años el patrón ha sido sacar los datos de la base de datos para procesarlos en otro sitio. pg_durable invierte eso: mete la lógica dentro, donde ya están los datos, los backups y los permisos. Menos piezas móviles, menos sitios donde algo puede romperse.
+
+Eso sí, el DSL SQL no es para todos los casos. Si tu workflow tiene ramificaciones complejas con lógica de negocio densa, escribir todo en SQL anidado puede volverse ilegible rápido. Para esos casos, duroxide desde Rust/Python/Node es probablemente mejor opción. Pero para el 80% de los pipelines de datos que son "lee esto, transfórmalo, escríbelo allá, avisa si falla", pg_durable es exactamente lo que necesitas.
