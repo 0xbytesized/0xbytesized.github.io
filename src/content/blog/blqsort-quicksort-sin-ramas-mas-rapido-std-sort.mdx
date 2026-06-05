@@ -1,0 +1,127 @@
+---
+title: "blqsort: el Quicksort sin ramas que jubila a std::sort"
+date: "2026-06-05T03:15"
+tags: ["c", "cpp", "algoritmos", "optimizacion", "rendimiento"]
+excerpt: "Un nuevo Quicksort branchless para C y C++ es hasta 3.6× más rápido que std::sort en structs. Un solo header, sin dependencias y con versiones multihilo."
+---
+
+Christof Kaser ha publicado [blqsort](https://github.com/chkas/blqsort), una implementación de Quicksort sin ramas condicionales para C y C++ que deja a `std::sort` y a `pdqsort` mirando el cronómetro con cara de dolor. La librería cabe en un solo header, no tiene dependencias y ofrece versiones single-thread y multithread.
+
+Los números hablan solos. Ordenando 50 millones de `double` en un Apple M1 con Clang y `-O3`:
+
+| Implementación | Apple M1 | AMD Ryzen |
+|---|---|---|
+| `std::sort` | 1.33s | 5.56s |
+| `pdqsort` | 1.33s | 2.81s |
+| **blqsort** (single thread) | **0.97s** | **2.06s** |
+
+Pero donde realmente explota es con structs. Ordenando 50 millones de estructuras `{id, value}` por el campo `id`:
+
+| Implementación | Apple M1 | AMD Ryzen |
+|---|---|---|
+| `std::sort` | 3.46s | 4.75s |
+| `pdqsort` | 3.46s | 4.72s |
+| **blqsort** | **0.96s** | **2.20s** |
+
+3.6 veces más rápido que `std::sort`. Y en la versión multihilo del M1, el autor reporta otro factor de 3× a 4× adicional.
+
+## La clave: decirle adiós a los `if`
+
+El corazón de blqsort es la **partición sin ramas** (_branchless partitioning_). En un Quicksort tradicional, la partición tiene este aspecto:
+
+```c
+// Versión clásica con branch
+for (int i = 0; i < 1000; i++) {
+    if (numbers[i] < pivot) {
+        left_buffer[left_len] = numbers[i];
+        left_len++;
+    }
+}
+```
+
+Cada iteración, la CPU tiene que **predecir** si el `if` se va a cumplir o no. Cuando acierta, todo fluye. Cuando falla, toca vaciar el pipeline y pagar ~15-20 ciclos de penalización. En un array con datos aleatorios, vas a fallar aproximadamente la mitad de las veces.
+
+La versión branchless sustituye la rama por aritmética:
+
+```c
+// Versión sin branch
+for (int i = 0; i < 1000; i++) {
+    left_buffer[left_len] = numbers[i];
+    left_len += (numbers[i] < pivot);
+}
+```
+
+La expresión `(numbers[i] < pivot)` evalúa a 0 o 1. No hay salto condicional. El compilador genera un `SETcc` o un `CMOVcc`, instrucciones que no rompen el pipeline. La CPU respira tranquila.
+
+El precio es que **siempre escribes en el buffer**, incluso cuando el elemento va al lado derecho. Para datos trivialmente copiables (doubles, ints, structs pequeños), esta escritura extra es mucho más barata que un branch mispredict.
+
+## Cómo funciona por dentro
+
+blqsort usa un buffer auxiliar de 1024 elementos **en la pila** (nada de heap). La estrategia:
+
+1. Copia 1024 elementos a un buffer auxiliar para hacer hueco
+2. Alterna bloques de 1024 elementos copiándolos al lado izquierdo o derecho
+3. El puntero izquierdo solo avanza si el elemento es menor que el pivote; si no, avanza el derecho
+4. Todo sin ramas
+
+Para conjuntos pequeños (2-12 elementos) usa **sorting networks** con una primitiva `sort-2` sin ramas. Para pivotes usa mediana de medianas. Si detecta una partición muy desbalanceada, conmuta a heapsort para esa sección para evitar el caso cuadrático. Y comprueba si una partición ya está ordenada antes de procesarla.
+
+Para tipos con coste de copia alto (strings, por ejemplo) usa **BlockQuicksort**, una variante que opera sobre índices en lugar de mover los datos directamente.
+
+## Usarlo es trivial
+
+### C++
+
+```cpp
+#include "blqs.h"
+
+double datos[50000000];
+
+// Single thread
+blqs::sort(datos, datos + 50000000);
+
+// Con multihilo, incluye blqs_thr.h en vez de blqs.h
+// #include "blqs_thr.h"
+// blqs::sort(datos, datos + 50000000);  // misma API
+```
+
+### C
+
+```c
+#define BLQS_CMP(a, b) ((a) < (b))
+#define BLQS_TYPE double
+#include "blqsort.h"
+
+double datos[50000000];
+blqsort(datos, 50000000);
+```
+
+### C con structs personalizados
+
+```c
+struct entrada {
+    int id;
+    int valor;
+};
+
+#define BLQS_CMP(a, b) (((a).id) < ((b).id))
+#define BLQS_TYPE struct entrada
+#include "blqsort.h"
+
+struct entrada datos[50000000];
+blqsort(datos, 50000000);
+```
+
+En C++ ni siquiera necesitas macros: basta con definir `operator<` en tu struct.
+
+## Mi veredicto
+
+blqsort me parece una pequeña joya de la ingeniería de algoritmos. No intenta ser un framework ni una librería de propósito general con mil opciones. Es un header, una idea clara y una ejecución impecable.
+
+Lo que más me gusta es que **no sacrifica usabilidad por rendimiento**. La API es idéntica a `std::sort` en C++. Meterlo en un proyecto existente es cambiar un include y renombrar la llamada. En C, las macros son un poco más verbosas pero el patrón es el mismo que llevamos usando décadas con `qsort`.
+
+Hay que tener los pies en el suelo: la mejora sobre `pdqsort` con doubles es modesta (~27% en M1, ~27% en Ryzen). `pdqsort` ya era muy bueno. El salto gordo está en structs (3.6×) y tiene sentido: mover datos con menos predicciones de salto fallidas es justo donde brilla esta técnica.
+
+¿Lo usaría en producción? Para ordenar arrays grandes de tipos numéricos o structs pequeños, absolutamente. Si tu cuello de botella está en ordenación y trabajas con millones de elementos, es una mejora gratis. Para strings o tipos con constructores de copia caros, el fallback a BlockQuicksort hace que no pierdas nada.
+
+El código está en [github.com/chkas/blqsort](https://github.com/chkas/blqsort) con licencia MIT. 15 estrellas ahora mismo. Me apuesto algo a que no se quedan ahí.
