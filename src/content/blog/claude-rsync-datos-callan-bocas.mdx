@@ -1,0 +1,115 @@
+---
+title: "Claude, rsync y la turba: cuando los datos callan bocas"
+date: "2026-06-06T03:40"
+tags:
+  - ia
+  - open-source
+  - estadística
+  - git
+  - polémica
+excerpt: "Un post en Mastodon acusó a Claude de llenar rsync de bugs. Una persona hizo los números. El resultado: el pánico no sobrevivió al contacto con los datos."
+---
+
+
+A finales de mayo de 2026, un post en Mastodon encendió la mecha. Alguien observó que una versión reciente de rsync — la herramienta que sincroniza medio internet — contenía commits escritos con Claude, y que justo esa versión tenía regresiones. Conexión hecha: "Claude está rompiendo rsync". Sin evidencia, sin números, sin nada más que una correlación espuria capturada en un screenshot.
+
+Lo que vino después fue el ciclo de indignación de internet en estado puro: el post acumuló miles de interacciones, saltó a Hacker News (81 comentarios iniciales) y desembocó en un issue de GitHub titulado ["Please Do Not Vibe Fuck Up This Software"](https://github.com/RsyncProject/rsync/issues/839) con 329 comentarios. La conversación escaló de críticas técnicas a acoso, amenazas veladas y dibujos de My Little Pony estrangulando al maintainer. Internet siendo internet.
+
+Pero aquí está la parte interesante: alguien hizo los números.
+
+## El análisis que nadie pidió pero todos necesitaban
+
+Alexis Purslane, harta del ruido, pasó varios días construyendo un análisis estadístico riguroso. No opiniones, no vibras: datos. Recopiló todos los bugs reportados en 36 releases de rsync (desde v2.4.6 hasta v3.4.3), los cruzó con los commits de cada release y aplicó tests estadísticos para responder una sola pregunta: ¿los releases con commits de Claude son anormalmente buggy?
+
+La métrica: **bugs ponderados por severidad por cada 10 commits** (sev/10c). Cada bug se puntuó de 0 a 100 usando un modelo de lenguaje (Qwen 3 35B) actuando como ingeniero de fiabilidad. Un CVE de ejecución remota = 95. Un typo en la documentación = 15. Un feature request = 0 (no es un bug).
+
+Para los dos releases con commits de Claude:
+
+| Release | sev/10c | Bugs | Commits totales | Commits Claude |
+|---------|---------|------|-----------------|----------------|
+| v3.4.2  | 0.00    | 0    | 50              | 9              |
+| v3.4.3  | 3.29    | 17   | 34              | 28             |
+
+v3.4.2, el primer release con Claude, tuvo **cero bugs**. Cero. v3.4.3 tuvo más, sí — pero la pregunta no es si un release tuvo bugs, sino si es anormal dentro de la distribución histórica.
+
+## El test de permutación: ¿es esto raro o es ruido?
+
+La prueba estadística más potente que aplicó Purslane fue un **test de permutación exacto**. La idea es simple: coges todos los releases históricos, seleccionas aleatoriamente grupos de 2 (porque hay 2 releases con Claude), y miras qué fracción de esos grupos aleatorios tienen una media de bugs igual o peor que la observada.
+
+Vamos a implementar una versión simplificada para entender el concepto:
+
+```python
+import numpy as np
+
+# Datos: sev/10c de los 36 releases (simplificado, con valores tipo)
+historical = np.array([
+    0.0, 0.5, 1.2, 1.5, 1.8, 2.0, 2.1, 2.3, 2.5, 2.7,
+    2.8, 2.9, 3.0, 3.1, 3.2, 3.3, 3.5, 3.7, 3.9, 4.0,
+    4.2, 4.5, 4.8, 5.0, 5.3, 5.5, 5.8, 6.0, 6.5, 7.0,
+    7.5, 8.0, 8.5, 9.0, 10.0, 12.0
+])
+
+# Media observada de los 2 releases Claude
+claude_mean = 1.65  # (0.00 + 3.29) / 2
+
+# Test de permutación
+n_permutations = 100000
+count_worse = 0
+
+for _ in range(n_permutations):
+    sample = np.random.choice(historical, size=2, replace=False)
+    if sample.mean() >= claude_mean:
+        count_worse += 1
+
+p_value = count_worse / n_permutations
+print(f"p-value: {p_value:.2%}")
+print(f"Conclusión: {'NO significativo' if p_value > 0.05 else 'SIGNIFICATIVO'}")
+```
+
+Este código muestra el principio: generas miles de combinaciones aleatorias y mides cuántas son igual o más extremas que tu observación. El resultado real del estudio fue un **p-value del 46%**. En cristiano: coges dos releases al azar del histórico de rsync, y el 46% de las veces son igual o peores que los releases con Claude. No hay señal, solo ruido.
+
+El dato más demoledor: **la media histórica de bugs (2.95 sev/10c) es 1.8 veces mayor que la media de los releases con Claude (1.65 sev/10c)**. O sea, los releases con Claude son *mejores* que la media.
+
+## El arte de no confundir correlación con causalidad
+
+Lo que pasó con rsync es un caso de libro de razonamiento motivado: alguien quería creer que la IA empeora el software, vio dos puntos de datos que parecían confirmarlo, y el resto del ecosistema amplificó la señal sin hacer la más mínima comprobación.
+
+El patrón es predecible:
+
+```bash
+# El "análisis" que hizo internet:
+$ grep -c "Claude" commits.txt && echo "CULPABLE"
+
+# El análisis que hizo Purslane:
+$ python analyze.py --releases 36 --bugs 500+ --permutation-test --severity-weighted
+p-value: 0.46  # ¯\_(°_°)_/¯
+```
+
+El contraste es brutal. Por un lado, un screenshot de Mastodon y 329 comentarios de indignación. Por otro, 36 releases, cientos de bugs puntuados por severidad, tres fuentes de datos (GitHub, Bugzilla, lista de correo), y tests estadísticos con metodología revisada por una estadística profesional.
+
+## Mi opinión
+
+Voy a ser directo: este episodio me parece uno de los momentos más bochornosos de la comunidad open source en 2026. No por el uso de Claude — que, según los datos, no empeoró nada — sino por la respuesta de la comunidad.
+
+Un maintainer voluntario, que lleva años manteniendo una herramienta de la que depende medio planeta, decide usar una herramienta moderna para ser más productivo. La respuesta no es "¿podemos revisar los commits con más cuidado?" o "¿qué métricas objetivas podemos usar?". La respuesta es un issue de GitHub con 329 comentarios que escala hasta dibujos de violencia y acoso personal.
+
+Lo que me preocupa de verdad es el efecto secundario: ¿cuántos maintainers verán esto y pensarán "mejor no uso IA, no quiero este follón"? El resultado neto será menos software mantenido, no más calidad.
+
+Los datos están ahí, el repo de Purslane es [completamente reproducible](https://github.com/alexispurslane/rsync-analysis), y la conclusión es clara: no hay evidencia de que Claude aumentara los bugs en rsync. La turba digital se equivocó. Otra vez.
+
+Y como dijo la autora del análisis: *"Blood begets blood."* Si la acusación es contundente pero vacía, la respuesta con datos también puede serlo.
+
+## Lo que podemos aprender
+
+Este caso deja varias lecciones. La primera y más obvia: **los datos ganan a las vibras**. Siempre. Antes de sumarte a una turba digital, pregúntate si alguien ha hecho los números. Si no, igual eres parte del problema.
+
+La segunda: las herramientas de IA son eso, herramientas. No son ni ángeles ni demonios. Un mal developer puede escribir código horrible con o sin Claude. Un buen developer puede escribir código excelente con o sin Claude. La herramienta no define la calidad; la persona y el proceso sí.
+
+La tercera, y quizás la más importante para quienes mantenemos proyectos open source: si usas IA, documenta tu proceso, sé transparente y ten los datos a mano. Purslane pudo hacer este análisis porque rsync es open source y su desarrollo es público. Esa transparencia es justo lo que permitió refutar la acusación.
+
+---
+
+**Referencias:**
+- [Análisis original de Alexis Purslane](https://alexispurslane.github.io/rsync-analysis/)
+- [Repo reproducible con datos y scripts](https://github.com/alexispurslane/rsync-analysis)
+- [Hilo de Hacker News](https://news.ycombinator.com/item?id=48411635) (337 puntos, 343 comentarios)
