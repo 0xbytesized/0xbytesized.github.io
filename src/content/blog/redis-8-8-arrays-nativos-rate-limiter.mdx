@@ -11,7 +11,7 @@ Redis 8.8 acaba de salir y trae una de esas actualizaciones que te hacen pregunt
 
 Redis siempre ha sido un almacén de estructuras de datos. Tienes strings, hashes, listas, sets, sorted sets, streams... y ahora, por fin, **arrays**. Un array en Redis 8.8 es una colección indexada de strings, direccionable por índice numérico y con esteroides.
 
-No es una lista glorificada. Un array puede ser disperso (índices no consecutivos) sin penalización de memoria, puede hacer agregaciones en el servidor, búsquedas con patrones, y actuar como ring buffer con un solo comando.
+No es una lista glorificada. Un array puede ser disperso (índices no consecutivos) sin penalización de memoria, puede hacer agregaciones en el servidor, búsquedas con patrones y actuar como ring buffer con un solo comando.
 
 Los números de rendimiento son contundentes: para acceso aleatorio sobre 100K elementos, los arrays son **5× más rápidos que las listas** y un 8-15% más rápidos que los hashes.
 
@@ -82,7 +82,7 @@ end
 return current
 ```
 
-Funciona, pero tiene fricción: depurar Lua en Redis no es divertido, el rendimiento no es óptimo para tráfico extremo, y la lógica de ventana deslizante o límites con saturación requiere scripts aún más complejos.
+Funciona, pero tiene fricción: depurar Lua en Redis no es divertido, el rendimiento no es óptimo para tráfico extremo y la lógica de ventana deslizante o límites con saturación requiere scripts aún más complejos.
 
 Redis 8.8 mete el rate limiter en el motor con `INCREX`:
 
@@ -158,10 +158,10 @@ El array es el movimiento más inteligente que ha hecho Redis en años. No porqu
 
 El ring buffer con `ARRING` es el ejemplo perfecto. Todo el mundo ha escrito el `RPUSH` + `LTRIM`. Es uno de esos patrones tan comunes que merecía ser un comando nativo. Redis lo ha entendido y ha entregado algo que dobla el rendimiento y simplifica el código.
 
-El rate limiter con `INCREX` me parece igual de acertado. Los scripts Lua en Redis son una herramienta potente pero con fricción: difícil depuración, imposible de probar fuera de Redis, y una barrera para equipos que no dominan Lua. Meter el rate limiter en el motor es reconocer que el 90% de los scripts Lua que la gente escribe son rate limiters. Bien hecho.
+El rate limiter con `INCREX` me parece igual de acertado. Los scripts Lua en Redis son una herramienta potente pero con fricción: difícil depuración, imposible de probar fuera de Redis y una barrera para equipos que no dominan Lua. Meter el rate limiter en el motor es reconocer que el 90% de los scripts Lua que la gente escribe son rate limiters. Bien hecho.
 
-`XNACK` llega tarde pero llega bien. Los streams de Redis se han ido puliendo versión a versión (mensajes idle en 8.4, producción idempotente en 8.6, y ahora NACK en 8.8) hasta convertirse en un sistema de mensajería serio. Los tres modos (SILENT, FAIL, FATAL) cubren los casos reales sin sobreingeniería.
+`XNACK` llega tarde pero llega bien. Los streams de Redis se han ido puliendo versión a versión (mensajes idle en 8.4, producción idempotente en 8.6 y ahora NACK en 8.8) hasta convertirse en un sistema de mensajería serio. Los tres modos (SILENT, FAIL, FATAL) cubren los casos reales sin sobreingeniería.
 
 Mi única queja: Redis sigue sin tener un tipo array en su modelo de datos que acepte valores que no sean strings. Si quieres números de verdad, tienes que parsearlos en el cliente. Para agregaciones como SUM/MAX no es grave (el servidor hace el casting), pero tener arrays tipados habría sido el broche de oro.
 
-En resumen: actualiza. Redis 8.8 es una de esas versiones donde las mejoras de rendimiento por sí solas justifican el upgrade, y los features nuevos te quitan código que ya no tendrás que mantener.
+En resumen: actualiza. Redis 8.8 es una de esas versiones donde las mejoras de rendimiento por sí solas justifican el upgrade y los features nuevos te quitan código que ya no tendrás que mantener.
