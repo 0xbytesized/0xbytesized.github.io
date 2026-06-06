@@ -1,0 +1,181 @@
+---
+title: "Alibaba libera su revisor de código: 2 años cazando bugs"
+date: "2026-06-06T09:45"
+tags: ["code-review", "ia", "open-source", "alibaba", "devtools"]
+excerpt: "Dos años detectando millones de bugs después, Alibaba publica Open Code Review: pipelines deterministas y agente LLM que no se saltan archivos."
+---
+
+Alibaba acaba de abrir al público una herramienta que lleva dos años funcionando en sus tripas: **Open Code Review** (OCR), el asistente de revisión de código que han usado decenas de miles de desarrolladores internos y que aseguran haber detectado millones de defectos. El repo saltó a 3000 estrellas en GitHub en cuestión de días y en Hacker News acumuló 265 votos con una recepción mayoritariamente entusiasta.
+
+Lo interesante no es que sea "otro revisor con IA". Lo interesante es la arquitectura.
+
+## El problema de fondo: los agentes genéricos son malos revisando código
+
+Si has probado a usar Claude Code o cualquier agente generalista con un skill de revisión de PRs, sabes de qué va esto:
+
+- **Cobertura incompleta.** El agente revisa tres archivos de quince y hace como que el resto no existen. En *changesets* grandes, tiende a "recortar esquinas".
+- **Líneas fantasma.** Te señala un problema en la línea 247... que no tiene nada que ver. El número de línea deriva, la referencia al fichero es incorrecta.
+- **Calidad errática.** Cambias dos palabras del prompt y la revisión pasa de decente a inútil. Depurar un skill en lenguaje natural es un infierno.
+
+El diagnóstico de Alibaba es certero: una arquitectura puramente basada en lenguaje no tiene restricciones duras sobre el proceso. El modelo alucina, prioriza mal, se distrae.
+
+## La solución: pipelines deterministas + agente LLM
+
+Open Code Review parte de una filosofía clara: **hay partes que no pueden fallar y esas las hace código tradicional, no un modelo de lenguaje.**
+
+El diseño separa responsabilidades en dos capas:
+
+### Capa determinista (la que no puede fallar)
+
+Aquí no hay prompts ni temperature. Reglas de ingeniería puras y duras:
+
+- **Selección precisa de archivos.** Un pipeline determina exactamente qué archivos necesitan revisión y cuáles se filtran. Sin depender de que el modelo "decida" si algo es relevante.
+- **Agrupación inteligente.** Archivos relacionados (como `messages_en.properties` y `messages_es.properties`) se empaquetan juntos en una sola unidad de revisión. Cada paquete se ejecuta como sub-agente con contexto aislado — divide y vencerás que escala en *changesets* enormes.
+- **Emparejamiento de reglas por plantilla.** En lugar de decirle al modelo "revisa este código según estas reglas" y rezar, un motor de plantillas empareja reglas específicas con cada archivo según sus características. El modelo recibe solo lo que necesita, sin ruido.
+- **Módulos externos de posicionamiento y reflexión.** Dos módulos independientes corrigen sistemáticamente la precisión de localización (línea correcta) y la calidad del contenido de cada comentario.
+
+### Capa agente (la que decide dinámicamente)
+
+Donde el LLM sí aporta valor es en la toma de decisiones contextuales:
+
+- **Prompts destilados.** No son prompts genéricos. Están optimizados a partir de datos de producción reales para maximizar eficacia y minimizar consumo de tokens.
+- **Toolset reducido y estable.** Han analizado las trazas de llamadas a herramientas en producción a gran escala — frecuencias, tasas de repetición, impacto de nuevas herramientas en la cadena — y han recortado el toolset a lo esencial. Menos herramientas = menos alucinaciones.
+
+El resultado es un sistema donde el LLM solo interviene donde aporta valor real y todo lo demás está blindado por código determinista.
+
+## Manos a la obra: cómo se usa
+
+La instalación es trivial. OCR se distribuye como paquete npm y como binario precompilado:
+
+```bash
+npm install -g @alibaba-group/open-code-review
+```
+
+Configuras el LLM que quieras usar:
+
+```bash
+ocr config set llm.url https://api.anthropic.com/v1/messages
+ocr config set llm.auth_token tu-api-key
+ocr config set llm.model claude-sonnet-4-5
+ocr config set llm.use_anthropic true
+```
+
+Y revisas. Sin más:
+
+```bash
+# Todos los cambios en el workspace (staged + unstaged + untracked)
+ocr review
+
+# Rango de ramas
+ocr review --from main --to feature/mi-cambio
+
+# Un commit concreto
+ocr review --commit abc123
+
+# Solo previsualizar qué archivos se revisarían (sin gastar tokens)
+ocr review --preview
+```
+
+Para CI/CD, el comando clave es:
+
+```bash
+ocr review --from "origin/main" --to "origin/feature" --format json
+```
+
+Con `--format json` obtienes salida estructurada que puedes parsear en cualquier pipeline.
+
+### Integración en GitHub Actions
+
+Un workflow mínimo para revisar PRs automáticamente:
+
+```yaml
+name: AI Code Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install OCR
+        run: npm install -g @alibaba-group/open-code-review
+
+      - name: Run review
+        env:
+          OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
+          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_TOKEN }}
+          OCR_LLM_MODEL: claude-sonnet-4-5
+          OCR_USE_ANTHROPIC: "true"
+        run: |
+          ocr review \
+            --from "origin/${{ github.base_ref }}" \
+            --to "origin/${{ github.head_ref }}" \
+            --format json > review-results.json
+
+      - name: Post results as PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('review-results.json', 'utf8'));
+            const comment = results.issues
+              .map(i => `- **${i.file}:${i.line}** — ${i.severity}: ${i.message}`)
+              .join('\n');
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: comment || '✅ No se encontraron problemas.'
+            });
+```
+
+### Reglas personalizadas
+
+OCR te deja definir tus propias reglas de revisión en JSON:
+
+```json
+{
+  "rules": [
+    {
+      "id": "no-console-log",
+      "pattern": "**/*.ts",
+      "severity": "warning",
+      "description": "No uses console.log en producción. Usa el logger de la aplicación."
+    },
+    {
+      "id": "sql-injection-check",
+      "pattern": "**/*.java",
+      "severity": "critical",
+      "description": "Verifica que las queries SQL usen PreparedStatement, nunca concatenación de strings."
+    }
+  ]
+}
+```
+
+Y las ejecutas con:
+
+```bash
+ocr review --rule mis-reglas.json
+```
+
+Puedes incluso previsualizar qué regla se aplica a un archivo específico sin ejecutar una revisión completa:
+
+```bash
+ocr rules check src/main/java/com/example/UserService.java
+```
+
+## Mi veredicto
+
+Voy a ser directo: llevo meses viendo herramientas de revisión con IA que son básicamente un wrapper de 50 líneas alrededor de la API de OpenAI con un prompt de "revisa este diff, porfa". Funcionan para PRs de tres líneas y se desmoronan en cuanto el cambio supera las 200.
+
+OCR es distinto porque viene de producción real a escala bestial. No es un proyecto de fin de semana. Son dos años de iteración interna en Alibaba con decenas de miles de desarrolladores usándolo a diario. Eso se nota en decisiones de diseño que un proyecto *hobby* simplemente no toma: los módulos de posicionamiento externo, la agrupación inteligente de archivos, el toolset recortado a propósito.
+
+Lo que más me convence es la filosofía de "el LLM solo donde aporta". Es la dirección correcta. Los modelos de lenguaje son pésimos para garantías duras y son excelentes para razonamiento contextual. Separar ambas responsabilidades con una frontera clara — código determinista para lo que no puede fallar, agente para lo que requiere juicio — me parece el patrón de arquitectura más sensato que he visto en herramientas de este tipo.
+
+¿Qué echo de menos? No he visto benchmarks públicos comparando OCR contra alternativas como CodeRabbit o GitHub Copilot Code Review. Sin datos duros de comparación, la promesa de "lo hemos probado internamente" se queda en anécdota. Pero viniendo de quien viene y con la tracción que está teniendo, le daré el beneficio de la duda.
+
+Si tu equipo ya usa revisiones de código con IA y estáis frustrados con falsos positivos y cobertura parcial, merece una tarde de pruebas. Si no usáis nada, es un punto de entrada sólido.
