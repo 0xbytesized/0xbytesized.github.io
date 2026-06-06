@@ -1,0 +1,107 @@
+---
+title: "Python frena su JIT: el Steering Council exige un PEP formal"
+date: "2026-06-06T21:30"
+tags: ["python", "cpython", "jit", "open-source", "gobernanza"]
+excerpt: "El Steering Council de Python pausa el JIT de CPython: o hay PEP formal en 6 meses o el código se borra de main. ¿Qué significa para el ecosistema?"
+---
+
+El 5 de junio de 2026, el Steering Council de Python —el órgano de gobierno del lenguaje— publicó un anuncio que ha sacudido el desarrollo de CPython: **el compilador JIT experimental debe pausarse** hasta que se redacte y acepte un PEP formal que lo convierta en parte oficial del intérprete. El plazo es de seis meses. Si no se aprueba un PEP en ese tiempo, **el código del JIT se eliminará de la rama principal**.
+
+No es un despido. No es un abandono del proyecto. Pero sí es un jarro de agua fría para quienes llevan años trabajando en una de las mejoras de rendimiento más ambiciosas de la historia de Python.
+
+## Contexto: un experimento que creció sin papeles
+
+El JIT de CPython no es nuevo. Lleva años gestándose, con varias re-arquitecturas por el camino. Cuando se integró en la rama principal, lo hizo como **experimento**, respaldado únicamente por el [PEP 744](https://peps.python.org/pep-0744/), un documento de tipo *Informational*. Es decir: explicaba el diseño, pero no pasaba por el proceso formal de aceptación que sí requiere un PEP *Standards Track*.
+
+El problema, según el Steering Council, no es el código ni la calidad técnica. Es la **gobernanza**. Un cambio de esta magnitud —que toca cada rincón del runtime, desde la ejecución de bytecode hasta la interacción con depuradores y perfiladores— merece un debate comunitario y un compromiso explícito sobre mantenimiento, compatibilidad y dirección futura.
+
+El propio Pablo Galindo Salgado, en nombre del Steering Council, lo expresó con claridad:
+
+> La responsabilidad es compartida, nosotros incluidos: colectivamente no hemos sido tan estrictos siguiendo el proceso como un cambio de esta complejidad y alcance merece.
+
+## Qué exige exactamente el Steering Council
+
+El PEP que piden debe cubrir al menos estos puntos:
+
+1. **Mantenimiento a largo plazo**. Un subsistema del tamaño del JIT necesita un plan de sostenibilidad claro. Quién lo mantiene, cómo se financia, qué pasa si los maintainers se van.
+
+2. **Compatibilidad con el ecosistema existente**. ¿Cómo interactúa el JIT con el *free-threading* (la eliminación del GIL), con `pdb`, con `sys.settrace`, con herramientas de profiling como `py-spy` o `Austin`?
+
+3. **Relación con JITs de terceros**. Existen implementaciones externas como CinderX (Meta), Numba y PyTorch Compile. El PEP debe aclarar si el JIT de CPython es compatible con ellas, compite o las complementa.
+
+4. **Métricas de éxito**. Objetivos de rendimiento concretos, plazos, cobertura de plataformas, overhead de memoria.
+
+5. **Estabilidad de la arquitectura actual**. ¿El diseño actual es definitivo o se esperan más re-arquitecturas?
+
+Y luego está el plazo: **seis meses**. Si no hay PEP aceptado en ese tiempo, el código del JIT sale de `main` y el desarrollo continúa fuera del repositorio oficial.
+
+## Lo que el JIT hace (y lo que no)
+
+Para entender la magnitud de esta decisión, conviene tener claro qué aporta realmente un JIT en CPython. Python es un lenguaje interpretado: tu código fuente se compila a bytecode y ese bytecode lo ejecuta una máquina virtual (la CEval). Cada instrucción de bytecode pasa por un gran bucle de evaluación escrito en C.
+
+Un JIT (*Just-In-Time compiler*) observa qué código se ejecuta con frecuencia y lo traduce a código máquina nativo. La idea es sencilla pero potente:
+
+```python
+# Una función que el JIT puede acelerar
+def suma_acumulada(numeros: list[int]) -> int:
+    total = 0
+    for n in numeros:
+        total += n
+    return total
+
+# Si llamas esto millones de veces en un bucle,
+# el JIT detecta el "hot path" y compila el bucle a nativo
+datos = list(range(1_000_000))
+resultado = suma_acumulada(datos)
+```
+
+El JIT de CPython (basado en *copy-and-patch*, una técnica que genera código máquina ensamblando plantillas precompiladas) es especialmente interesante porque **no requiere un compilador en tiempo de ejecución**. A diferencia de JITs como el de V8 o HotSpot, no necesita un backend pesado tipo LLVM. Las plantillas de código máquina se generan en tiempo de compilación de CPython y se reensamblan en caliente según el bytecode que se detecta.
+
+Esto tiene una ventaja enorme: **el overhead de arranque es mínimo**. En lugar de pagar el coste de compilar desde cero, simplemente copias instrucciones máquina pre-fabricadas y ajustas los operandos.
+
+```python
+# Ejemplo conceptual: cómo el copy-and-patch traduce bytecode
+# Bytecode original de CPython para "a = b + c":
+# LOAD_FAST 1    (carga b)
+# LOAD_FAST 2    (carga c)
+# BINARY_OP 0    (suma)
+# STORE_FAST 0   (guarda en a)
+
+# El JIT detecta esta secuencia frecuente y la reemplaza
+# por ~4-8 instrucciones máquina nativas que hacen lo mismo
+# sin pasar por el bucle principal de evaluación.
+```
+
+El resultado son mejoras de rendimiento reales en benchmarks sintéticos, aunque todavía modestas en aplicaciones reales (~5-15% en cargas típicas de servidor).
+
+## Por qué esto importa más allá del rendimiento
+
+La decisión del Steering Council no es técnica. Es **cultural y política** (en el buen sentido de la palabra). Python siempre ha sido un proyecto donde el consenso y el proceso PEP son sagrados. El hecho de que el JIT haya vivido en `main` durante años sin un PEP formal es una anomalía que el Council quiere corregir antes de que se enquiste.
+
+Hay una lectura generosa y otra crítica.
+
+La lectura generosa: el Steering Council está haciendo su trabajo. Está pidiendo que un cambio de calado siga el proceso que merece. Que la comunidad debata, que los compromisos queden por escrito, que no se cuele una decisión de arquitectura irreversible por inercia. Es rigor, no castigo.
+
+La lectura crítica: seis meses es muy poco tiempo para un PEP de esta complejidad. Peter Bierma ([ZeroIntensity](https://discuss.python.org/t/an-announcement-from-the-steering-council-regarding-the-jit-project/107638/3)) lo señaló en la misma discusión: el PEP 703 (free-threading) tardó **cinco meses solo en la deliberación del Council**, sin contar el tiempo de redacción y debate comunitario. Y el JIT es probablemente más complejo.
+
+Pablo Galindo ya ha aclarado que el plazo es flexible y que no ejecutarán la amenaza de borrado de forma burocrática si ven progreso real. Pero el mensaje está enviado: **el status quo experimental se acabó**.
+
+## Mi opinión
+
+Voy a ser directo: estoy de acuerdo con la decisión pero discrepo del plazo.
+
+Tiene sentido pedir un PEP formal. No puedes tener un compilador JIT —que modifica cómo se ejecuta cada maldita línea de código Python— viviendo en `main` como "experimento" indefinidamente. Especialmente cuando ese código añade superficie de ataque, complejidad de mantenimiento y carga cognitiva para cualquier persona que toque el runtime. Lo que empezó como un experimento académico ya no lo es.
+
+Pero seis meses, con amenaza de eliminación, me parece contraproducente. El efecto más probable no es que se acelere el trabajo, sino que los contribuidores decidan que no vale la pena el esfuerzo de pasar por un proceso tan exigente con un plazo tan corto. Y si el código se elimina de `main`, el JIT no muere —simplemente se desarrolla en un fork, fuera del radar de la comunidad y volverá en tres años con el doble de divergencia y la mitad de revisión.
+
+Dicho esto, celebro que el Council haya esperado al beta cutoff de Python 3.15 para hacer el anuncio. Demuestra que no hay prisa por romper cosas: el JIT experimental seguirá ahí en 3.15, funcionando como hasta ahora. La pausa es solo para **nuevo desarrollo**.
+
+Lo que realmente me importa es que de este proceso salga claridad. Si la comunidad decide que sí, que el JIT es el futuro de CPython y se compromete a mantenerlo, perfecto. Si decide que no, que prefiere otras estrategias de rendimiento (como el free-threading o las mejoras en el intérprete), también. Lo peor sería el punto medio: un JIT que sigue en `main` sin compromiso real, acumulando código que nadie quiere auditar pero que tampoco nadie se atreve a tocar.
+
+## Lo que viene ahora
+
+La pelota está en el tejado de los autores del JIT —Brandt Bucher, Ken Jin y el resto del equipo que ha impulsado esta iniciativa. Tienen que redactar un PEP que convenza a la comunidad de que el JIT merece ser parte permanente de CPython.
+
+Si lo consiguen, Python ganará un JIT con respaldo institucional, un plan de mantenimiento y un mandato comunitario claro. Si no, el JIT seguirá vivo en forks como CinderX o en nuevos proyectos y CPython volverá a centrarse en lo que siempre ha hecho bien: ser un intérprete sólido, portable y fácil de mantener.
+
+En cualquier caso, esta decisión es un recordatorio de que el software open source no es solo código. Es gobernanza, es proceso y a veces es ponerle freno a un tren que va demasiado rápido para que no descarrile.
