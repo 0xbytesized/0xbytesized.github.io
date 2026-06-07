@@ -1,0 +1,129 @@
+---
+title: "IOCCC 2025: un GameBoy en 4 KB de C y otras locuras"
+date: "2026-06-07T10:00"
+tags: ["c", "ioccc", "gameboy", "emulacion", "ofuscacion"]
+excerpt: "Los ganadores del IOCCC 2025 demuestran que el código ilegible puede ser arte: desde un emulador de GameBoy hasta un Pong que se compila a sí mismo."
+---
+
+El [International Obfuscated C Code Contest](https://www.ioccc.org/2025/) acaba de publicar los ganadores de su 29ª edición y el nivel es sencillamente absurdo. 21 entradas ganadoras, tres autores con *hat-trick* (tres premios cada uno) y el debut de Taiwán en el mapa del concurso. Pero lo que importa es el código: programas que parecen ruido de línea de comandos pero esconden emuladores, compresores, juegos y máquinas virtuales completas.
+
+## Un GameBoy en 4096 bytes
+
+Nick Craig-Wood (Reino Unido) se llevó el premio *Best real emulator* con **ncw1**: un emulador de GameBoy completo que cabe en menos de 4 KB de código fuente. Sin comentarios. Sin `#define` para los `return`. Sin piedad.
+
+El código arranca así:
+
+```c
+#define G t[6]
+#define A t[7]
+#define M Z(2,0)
+#define E (G&128)
+#define B (G&16)
+#define O if(y
+#define Y O ==
+#define _(r) (b=I(r++),b|I(r++)<<8)
+#define S _(F)
+
+typedef unsigned char u;
+u w,X,T,D[1<<16],t[]=R,U=255;
+unsigned short J=-2,F=256,H=65280,b;
+```
+
+Lo que ves no es un volcado de memoria aleatorio. Cada macro, cada variable de una letra y cada expresión comprimida está haciendo malabares con los registros de la CPU del GameBoy, el mapa de memoria y la lógica de los opcodes. La función principal es un bucle que lee la ROM desde un file descriptor, ejecuta instrucciones, renderiza sprites a una terminal de 160×72 caracteres y maneja entrada por teclado.
+
+Ejecutarlo es tan simple como:
+
+```bash
+make all
+./prog 3< tetris.gb
+```
+
+Y aparece Tetris. En tu terminal. Renderizado con caracteres Unicode `▀` (half-block) para simular dos píxeles por celda. ¿La paleta de colores? 256 tonos ANSI mapeados a los valores de la PPU del GameBoy. Sin bibliotecas, sin SDL, sin nada. Solo `stdio.h` y `unistd.h`.
+
+El autor incluso invita a contribuir ROMs libres de 32 KB al repositorio. Si tienes una ROM homebrew que funcione, aceptan pull requests.
+
+## Pong que se compila a sí mismo
+
+Si el emulador te pareció heavy, espera a ver **uellenberg** (*Ping pong prize*). Su entrada es un Pong donde cada frame es... el código fuente del siguiente frame.
+
+El flujo es así:
+
+```bash
+./prog | tee prog1.c | cc -xc -o prog1 -
+./prog1 | diff - prog1.c   # no hay diferencias
+```
+
+El programa imprime por stdout su propio código fuente modificado —la pelota se ha movido, las paletas han cambiado de posición— y ese nuevo fuente se compila para generar el siguiente frame. Así, en bucle, 60 veces por segundo si tu CPU aguanta el ritmo.
+
+El código fuente real son 3049 bytes de C que incluyen una versión comprimida de sí mismo como array de strings:
+
+```c
+char*j[]={"\
+#include<stdio.h>'#define$z$else'#define$y$return'#define$x$int'#defin\
+e$w$if('#define$v$putchar('#define$B$v$10);'#define$A$v$92);''/*$IOCCC\
+...
+```
+
+Cada frame, el programa escribe la versión actualizada de ese array con las nuevas posiciones de los objetos y el resto del código permanece idéntico. Es un *quine* mutante: un programa que se reproduce a sí mismo con modificaciones deterministas.
+
+Los jueces advierten: "Por favor, resistid el impulso de escribir 'Quine Doom' para la edición del año que viene".
+
+## 366 bytes que corren Linux y DOOM
+
+Adrian Cable presentó **cable**, una máquina virtual completa en 366 bytes de C. Premio *Best imaginary emulator* y también el programa más pequeño del concurso.
+
+La VM implementa:
+
+- CPU de 32 bits
+- 1.5 GB de RAM direccionable
+- Tarjeta gráfica de 800×512 píxeles
+- Reloj en tiempo real
+- Driver de teclado
+
+Todo con una sola instrucción: `subleq` (subtract and branch if less than or equal). El programa arranca con:
+
+```bash
+./prog < bootimage
+```
+
+Los bootimages incluidos muestran fractales de Mandelbrot y un Pong. Pero la locura viene cuando cargas `vmlinux.bootimage`: arranca un Linux mínimo dentro de la VM y desde ahí puedes ejecutar DOOM. Sí, DOOM corriendo sobre Linux corriendo sobre una VM de una sola instrucción implementada en 366 bytes de C.
+
+El concepto de `subleq` es brillantemente simple: cada instrucción tiene tres operandos (A, B, C). Resta el valor en la dirección A del valor en la dirección B, guarda el resultado en B y si el resultado es negativo o cero, salta a la dirección C. Con eso y 366 bytes de intérprete, tienes una computadora funcional.
+
+## El patch que se parchea a sí mismo
+
+Yusuke Endoh (uno de los tres autores con hat-trick) presentó **endoh3**, un programa que se transforma a través de ~25 iteraciones de auto-parcheo hasta convertirse en... una herramienta de diff unificado.
+
+El proceso es una cadena de quines:
+
+```
+prog.c (herramienta de patch)
+  → se auto-parchea
+prog.c (generador de parches)
+  → genera otro patch, se auto-aplica
+prog.c (generador de git-am patches)
+  → ~25 iteraciones de gcc + git am
+final (herramienta de diff unificado)
+```
+
+Cada iteración pela una línea del mensaje de commit de git y esa línea contiene una porción del código fuente de la herramienta final. Tras dos docenas de ciclos, emerges con un diff tool completo. Los jueces lo llamaron *Most resilient* y cuesta discutirlo.
+
+## Otros highlights que merecen mención
+
+**yang2** (*Most magical word*): un esquema de compresión donde el único token del lenguaje es `zoltraak`. Metes texto por stdin, obtienes código C por stdout, compilas el código C, ejecutas el binario y el binario imprime el texto original. Inspirado en *Frieren*.
+
+**kurdyukov** (*Most likely to count*): 1196 bytes que encuentran la expresión aritmética más corta usando un conjunto de números dados para alcanzar valores objetivo. Le das `7 77 777 0 2025` y te devuelve `(777 / 7 - 7) * (77 + 7) / 7 + 777 = 2025`.
+
+**jhshrvdp**: un quasi-roguelike jugable. **tompng**: un generador procedural de sonido oceánico. **cesmoak**: tarjetas perforadas de Fortran con temática de agujero negro. **howe**: un Space Invaders que cabe en menos que el tweet que lo describe.
+
+## Mi opinión
+
+El IOCCC lleva desde 1984 demostrando que la creatividad no está en los frameworks ni en las buenas prácticas: está en las restricciones. Cuando te limitan a 4096 bytes de C sin comentarios, sin bibliotecas externas y con la obligación de que el código sea un jeroglífico, el ingenio explota.
+
+Lo que más me flipa no es la complejidad técnica —que la tiene— sino la filosofía. Estos programas son lo opuesto al *clean code*. Son código que se enorgullece de ser ilegible y, sin embargo, hacen cosas que la mayoría de proyectos "limpios" no se atreverían a intentar. Un GameBoy en 4 KB no es un ejercicio de ofuscación: es un manifiesto sobre lo que el ser humano puede meter en una cantidad ridícula de bytes cuando se quitan las capas de abstracción.
+
+Hay una lección enterrada aquí para la era de la IA generadora de código. Los modelos producen código correcto, idiomático, con nombres descriptivos y patrones de diseño. Pero no producen un quine que juega al Pong. No producen un emulador que cabe en un tuit. La creatividad que exhiben estos ganadores no es *prompteable*: requiere entender tan profundamente la máquina que puedes doblar sus reglas sin romperlas.
+
+Si escribes C —o cualquier lenguaje, en realidad— mirar el código ganador del IOCCC es el equivalente a ver a un malabarista con siete antorchas encendidas. No vas a programar así en producción, pero sales entendiendo mejor los límites de lo posible.
+
+La edición 30ª abre a finales de 2026. Si alguna vez quisiste probar, es el momento de instalar `gcc` y plantearte cuánta funcionalidad puedes meter en 4 KB de caracteres aparentemente aleatorios.
