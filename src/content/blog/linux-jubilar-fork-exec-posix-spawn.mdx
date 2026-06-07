@@ -1,0 +1,134 @@
+---
+title: "Linux jubila fork(): el fin del patrón más viejo de Unix"
+date: "2026-06-07T16:00"
+tags: ["linux", "kernel", "unix", "procesos", "posix"]
+excerpt: "El kernel de Linux avanza hacia una implementación nativa de posix_spawn() que jubile el combo fork()+exec() tras más de 50 años de servicio."
+---
+
+Si llevas tiempo programando en Linux, seguro que has escrito esto cientos de veces: `fork()` seguido de `exec()`. Es el patrón fundacional de Unix: duplicas tu proceso actual y luego lo sustituyes por otro programa distinto. Lleva funcionando desde los años 70 y está tan arraigado que casi nadie se para a pensar si tiene sentido.
+
+Pero un parche reciente enviado a la lista de desarrollo del kernel de Linux ha reabierto el debate. **Li Chen** propuso añadir "spawn templates" al kernel para acelerar este patrón y lo que empezó como una optimización del 2% ha terminado en una conversación mucho más interesante: ¿y si jubilamos `fork()` del todo?
+
+## Por qué fork()+exec() es un problema
+
+El problema no es nuevo. Cuando llamas a `fork()`, el kernel tiene que copiar todo el estado del proceso padre — memoria, descriptores de archivo, señales, contexto de ejecución — para crear un hijo idéntico. Es una operación cara.
+
+Luego llamas a `exec()` y ese hijo descarta toda la memoria que tan cuidadosamente se copió y carga un programa nuevo desde cero. Es como construir una casa entera para luego demolerla y levantar otra en el mismo solar.
+
+Linux ha intentado parchear esto con optimizaciones como Copy-on-Write (las páginas de memoria no se copian hasta que uno de los procesos las modifica) y `vfork()`, que bloquea al padre mientras el hijo usa su espacio de memoria directamente. Pero el diseño de fondo sigue siendo el mismo: crear un clon para luego tirarlo.
+
+El propio **Mateusz Guzik**, uno de los revisores del parche, lo dijo sin rodeos:
+
+> This problem is dear to my heart and I have been pondering it on and off for some time now. The entire fork + exec idiom is terrible and needs to be retired.
+
+Traducción: fork()+exec es terrible y hay que jubilarlo.
+
+## La propuesta original: spawn templates
+
+Chen propuso una API con dos nuevas llamadas al sistema. Primero, `spawn_template_create()` para precargar la información de un ejecutable que vas a lanzar muchas veces:
+
+```c
+struct spawn_template_create_args {
+    __aligned_u64 flags;
+    __s32 execfd;          // file descriptor del ejecutable
+    __u32 exec_flags;
+    __aligned_u64 filename; // o ruta absoluta (no ambos)
+};
+
+int spawn_template_create(
+    struct spawn_template_create_args *args,
+    size_t args_size
+);
+```
+
+Esto devuelve un file descriptor que representa una *plantilla* del ejecutable con metadatos cacheados por el kernel. Cuando quieres lanzar una instancia concreta del programa, rellenas los argumentos específicos y llamas a `spawn_template_spawn()`:
+
+```c
+struct spawn_template_spawn_args {
+    __aligned_u64 flags;
+    __aligned_u64 pidfd;    // para recibir el PID del hijo
+    __aligned_u64 argv;     // argumentos
+    __aligned_u64 envp;     // variables de entorno
+    __aligned_u64 actions;  // acciones sobre FDs, señales, etc.
+    __aligned_u64 actions_len;
+};
+
+int spawn_template_spawn(
+    int template_fd,
+    struct spawn_template_spawn_args *args,
+    int args_size
+);
+```
+
+Las *actions* permiten especificar qué hacer con los descriptores de archivo (cerrar, duplicar, abrir), cambiar el directorio de trabajo y modificar el manejo de señales, todo sin pasar por el baile de `fork()` + `dup2()` + `close()` + `exec()`.
+
+¿El resultado? Un 2% más rápido. No parece mucho, pero para aplicaciones que lanzan cientos de procesos por segundo (piensa en un servidor web que ejecuta Git para cada consulta), cada punto porcentual cuenta.
+
+## La contrapropuesta: construir sobre pidfd
+
+**Christian Brauner**, maintainer del subsistema de procesos, fue favorable a la idea general pero propuso un camino distinto. Su sugerencia: en lugar de crear una API desde cero específica para spawn, extender la abstracción `pidfd` que ya existe en el kernel desde Linux 5.1.
+
+El plan sería más o menos así:
+
+```c
+// 1. Crear un proceso vacío (sin forkear nada)
+int pidfd = pidfd_open(0, PIDFD_CREATE_EMPTY);
+
+// 2. Configurarlo paso a paso
+pidfd_config(pidfd, PIDFD_CONFIG_SET_EXEC, "/usr/bin/git");
+pidfd_config(pidfd, PIDFD_CONFIG_SET_ARGV, argv);
+pidfd_config(pidfd, PIDFD_CONFIG_SET_ENVP, envp);
+pidfd_config(pidfd, PIDFD_CONFIG_CLOSE_FD, 4);
+
+// 3. Lanzarlo
+pidfd_spawn(pidfd);
+```
+
+Esto es análogo a cómo funciona `fsconfig()` para montar sistemas de archivos: un builder API donde construyes el proceso paso a paso antes de lanzarlo. No hay `fork()`, no hay copia innecesaria, no hay baile de descriptores.
+
+El objetivo final, según Brauner, es que esta API permita implementar `posix_spawn()` directamente en el kernel. Hoy en día, la `posix_spawn()` de glibc es un envoltorio que por dentro sigue llamando a `fork()` + `exec()` (o más exactamente, `clone()` con `CLONE_VM | CLONE_VFORK`). Una implementación nativa sería mucho más limpia y eficiente.
+
+Chen estuvo de acuerdo con el enfoque y dijo que su trabajo futuro irá en esa dirección. Así que las spawn templates como tal no entrarán en el kernel, pero han servido de catalizador para algo mucho más grande.
+
+## Qué significa esto para quienes programamos
+
+Si esto sale adelante, el cambio será profundo pero gradual. Nadie va a eliminar `fork()` — hay demasiado código que depende de él y el caso de uso "crear un worker que comparte memoria con el padre" sigue siendo válido. Pero para el 90% de los casos donde haces `fork()` seguido inmediatamente de `exec()`, `posix_spawn()` será la opción correcta.
+
+En la práctica, escribir código como esto:
+
+```c
+pid_t pid = fork();
+if (pid == 0) {
+    // Estoy en el hijo
+    close(3);
+    dup2(pipefd[1], STDOUT_FILENO);
+    execve("/usr/bin/git", argv, envp);
+    _exit(127); // Solo se llega aquí si exec falla
+}
+// Estoy en el padre
+```
+
+Se convertirá en algo como:
+
+```c
+posix_spawn_file_actions_t actions;
+posix_spawn_file_actions_init(&actions);
+posix_spawn_file_actions_addclose(&actions, 3);
+posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+
+pid_t pid;
+posix_spawn(&pid, "/usr/bin/git", &actions, NULL, argv, envp);
+posix_spawn_file_actions_destroy(&actions);
+```
+
+Menos líneas, menos casos borde, menos `_exit(127)` olvidados que dejan procesos zombis. Y con una implementación nativa en el kernel, más rápido.
+
+## Mi opinión
+
+Me alegra ver que el kernel de Linux se toma en serio jubilar patrones que llevan medio siglo dando servicio. El combo `fork()`+`exec()` es uno de esos diseños que eran brillantes para las máquinas de los 70 (poca memoria, procesos simples) pero que hoy son un lastre.
+
+La metáfora de "crear un proceso vacío y configurarlo" es mucho más limpia conceptualmente que "clonarse a uno mismo y luego borrar tu propia memoria para cargar otra cosa". Es como la diferencia entre construir un coche desde cero y tunear uno que ya existe.
+
+Lo que más me gusta de esta historia es cómo la comunidad del kernel maneja estas cosas. Alguien envía un parche con una solución concreta (`spawn_template`), un revisor dice "el problema es real pero el enfoque es raro", otro propone una API más general basada en infraestructura que ya existe y el autor original dice "vale, tienes razón, voy por ahí". Así es como debería funcionar el desarrollo de software en todas partes.
+
+Si todo va bien, dentro de un par de años escribir `fork()` será como escribir `int main(void)` en lugar de `int main(int argc, char **argv)`: técnicamente válido, pero tus compañeros te mirarán raro.
