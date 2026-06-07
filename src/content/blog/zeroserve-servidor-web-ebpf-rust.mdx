@@ -1,0 +1,140 @@
+---
+title: "zeroserve: programa tu servidor web con eBPF y Rust"
+date: "2026-06-07T04:30"
+tags: ["rust", "ebpf", "web", "devops", "rendimiento"]
+excerpt: "Un servidor HTTPS sin configuración que usa eBPF como lenguaje de scripting y supera a nginx en benchmarks por núcleo. Así funciona zeroserve por dentro."
+---
+
+[zeroserve](https://github.com/losfair/zeroserve) es un servidor HTTPS de configuración cero escrito en Rust por Heyang Zhou. La premisa es simple: le das un tarball con tu sitio web y él lo sirve. Nada de `nginx.conf`, nada de `Caddyfile`, nada de `location` blocks. Pero lo que lo hace distinto no es la simplicidad — es que su "configuración" son programas eBPF que se ejecutan en cada petición.
+
+El proyecto ha llamado la atención en Hacker News (205 puntos, 53 comentarios) y ya acumula 137 estrellas en GitHub. Y los benchmarks tienen algo que ver: por núcleo, zeroserve supera a nginx en casi todos los escenarios.
+
+## Cómo funciona por dentro
+
+zeroserve se apoya en tres pilares técnicos que rara vez se encuentran juntos en un servidor web:
+
+**io_uring para todo.** Cada operación de red y disco pasa por `io_uring` usando el runtime [monoio](https://github.com/bytedance/monoio) de ByteDance. Nada de `epoll` + `read/write`. El event loop es monohilo, y esa es una decisión de diseño deliberada: la unidad de escalado es el proceso, no el thread.
+
+**Tarball como sistema de archivos.** El sitio entero vive en un único `.tar`. zeroserve lo indexa al cargar — construyendo un mapa `path → byte-range` — y sirve los archivos haciendo lecturas por rango de bytes sobre el propio tarball. Nunca desempaqueta nada a disco. Un deploy es reemplazar el tarball y mandar `SIGHUP`:
+
+```bash
+# Empaquetar el sitio
+zeroserve --pack ./public > site.tar
+
+# Servirlo (HTTP + HTTPS)
+zeroserve --addr 0.0.0.0:8080 --tls-addr 0.0.0.0:8443 \
+  --cert cert.pem --key key.pem site.tar
+
+# Hot reload: nuevo tarball, nuevo certificado, cero downtime
+cp nueva-site.tar site.tar && killall -SIGHUP zeroserve
+```
+
+La recarga es atómica: el proceso intercambia el sitio, los scripts y el material TLS sin dejar caer ni una conexión.
+
+**eBPF en userspace.** Cualquier archivo `.c` que coloques en `.zeroserve/scripts/` dentro del tarball se compila a bytecode eBPF al empaquetar (con `clang` y `llc`) y se ejecuta en cada petición. El bytecode corre en userspace — a través de [async-ebpf](https://crates.io/crates/async-ebpf), que a su vez usa [uBPF](https://github.com/iovisor/ubpf) como JIT — así que no necesitas `CAP_BPF` ni tocar el subsistema BPF del kernel.
+
+## Programar el servidor con eBPF
+
+Aquí está la parte más interesante. Un script eBPF para zeroserve es código C corriente que usa las funciones helper del SDK. Los scripts se encadenan en orden alfabético y comparten un mapa de metadatos por petición. Si un script llama a `zs_respond` o `zs_reverse_proxy`, la cadena se corta.
+
+Un endpoint dinámico son diez líneas:
+
+```c
+#include <zeroserve.h>
+
+ZS_ENTRY
+zs_u64 entry(void) {
+  char path[64];
+  zs_req_path(path, sizeof(path));
+
+  if (zs_strcmp(path, "/api/health") != 0) return 0;
+
+  zs_meta_set(ZS_STR("zs.response.header.content-type"),
+              ZS_STR("application/json"));
+  zs_respond(200, ZS_STR("{\"status\":\"ok\"}\n"));
+  return 0;
+}
+```
+
+Y un middleware que enriquece cada respuesta con cabeceras y metadatos para templates:
+
+```c
+#include <zeroserve.h>
+
+ZS_ENTRY
+zs_u64 entry(void) {
+  char peer[64];
+  if (zs_req_peer(peer, sizeof(peer)) <= 0)
+    zs_strcpy(peer, "unknown");
+
+  // Disponible en HTML via <zs-meta>visitor</zs-meta>
+  zs_meta_set(ZS_STR("visitor"), ZS_STR(peer));
+
+  // Cabecera en TODAS las respuestas
+  zs_meta_set(ZS_STR("zs.response.header.x-served-by"),
+              ZS_STR("zeroserve-ebpf"));
+  return 0;
+}
+```
+
+El modelo de seguridad es un *pointer cage*: cada acceso a memoria en el código JITeado se enmascara dentro de la arena del script, así que un acceso errante no puede leer ni escribir fuera. Además, el runtime es completamente expropiativo — un temporizador puede interrumpir código nativo JITeado a mitad de ejecución y devolver el control al event loop.
+
+La superficie de helpers que expone el SDK es amplia: inspección y mutación de peticiones, SHA-256, HMAC, JSON parsing/generación, rate limiting con token buckets, firma AWS SigV4 y hasta un flujo OIDC completo (Authorization Code + PKCE) con cookies selladas en XChaCha20-Poly1305.
+
+## Los números: eBPF vs Lua, zeroserve vs nginx
+
+Zhou publicó benchmarks comparando zeroserve contra nginx 1.26 y Caddy 2.11 sobre HTTPS en un Ryzen 7 3700X, todos pineados a un solo núcleo. Aquí van los highlights:
+
+**Archivos pequeños (174 B)** — el pan de cada día de un sitio estático:
+
+| Servidor   | req/s   | p99    |
+|------------|---------|--------|
+| zeroserve  | 36.681  | 5,4 ms |
+| nginx      | 31.226  | 7,8 ms |
+| Caddy      | 12.830  | 22 ms  |
+
+**Archivos grandes (100 KB):**
+
+| Servidor   | req/s  | throughput | p99    |
+|------------|--------|------------|--------|
+| zeroserve  | 8.000  | 782 MB/s   | 22 ms  |
+| nginx      | 7.600  | 773 MB/s   | 28 ms  |
+| Caddy      | 6.084  | 590 MB/s   | 44 ms  |
+
+El dato interesante es que `sendfile()` — el as bajo la manga de nginx para archivos grandes — no ayuda bajo TLS porque los bytes hay que cifrarlos en userspace de todas formas. El camino `io_uring` de zeroserve simplemente es más eficiente en ese bucle de cifrar-y-escribir.
+
+**Middleware con header injection** (script que se ejecuta, archivo estático que se sirve):
+
+| Motor                   | req/s   | p99    |
+|-------------------------|---------|--------|
+| zeroserve eBPF (10 ms)  | 43.709  | 5,1 ms |
+| nginx Lua (header_filter)| 28.653 | 8,4 ms |
+
+**Respuesta JSON completamente dinámica:**
+
+| Motor                   | req/s   | p99    |
+|-------------------------|---------|--------|
+| zeroserve eBPF (10 ms)  | 46.945  | 4,5 ms |
+| nginx Lua (content_by)  | 41.231  | 6,4 ms |
+
+El truco está en el intervalo de expropiación. Con el valor por defecto (2 ms), la expropiación frecuente lastra el throughput de scripting — baja a 32k req/s, por detrás del LuaJIT de nginx. Pero subiéndolo a 10 ms con `--preempt-timer-interval-ms 10`, el eBPF JITeado lidera en todos los casos.
+
+## Proxy inverso
+
+El otro gran caso de uso de nginx y Caddy. zeroserve lo hace desde un script con `zs_reverse_proxy("http://127.0.0.1:9000")`, manteniendo un pool de conexiones al backend.
+
+Para respuestas pequeñas (174 B), zeroserve lidera: 26.486 req/s contra 21.761 de nginx y 7.683 de Caddy. La diferencia: el camino `io_uring` pooled es más rápido montando y desmontando conexiones TLS para peticiones pequeñas.
+
+Para respuestas grandes (100 KB), nginx recupera el liderazgo: 5.882 req/s contra 3.631 de zeroserve. El buffering de nginx mueve bytes grandes con más eficiencia.
+
+## Mi opinión
+
+Lo que más me gusta de zeroserve no son los benchmarks — es la filosofía. Llevo años escribiendo configs de nginx y siempre acabo en el mismo sitio: la lógica de negocio se desparrama entre `location` blocks, `map` directives, `if` statements que [son malvados](https://www.nginx.com/resources/wiki/start/topics/depth/ifisevil/) y scripts en Lua que viven en un archivo aparte. El resultado es un lío donde el flujo real de una petición solo existe en tu cabeza.
+
+zeroserve colapsa todo eso en un solo programa. No hay archivo de configuración, no hay DSL, no hay dos capas que mantener sincronizadas. El programa eBPF *es* la configuración. Lees el script de arriba a abajo y sabes exactamente qué le pasa a cada petición.
+
+Dicho esto, no voy a migrar mis cosas a zeroserve mañana. Tiene 137 estrellas y lo mantiene una persona. El ecosistema de nginx/Caddy tiene una década de edge cases resueltos, módulos para todo y comunidades enormes. zeroserve es un experimento brillante, pero para producción necesitaría ver más adopción, más tests y más pares de ojos sobre ese pointer cage.
+
+Aun así, me alegra ver a alguien cuestionar el dogma de "archivo de configuración + scripting como complemento". Es un diseño que arrastramos desde Apache 1.3 y nadie se había parado a repensarlo en serio. zeroserve lo hace, y además lo respalda con números.
+
+Si tienes curiosidad, el proyecto está en [github.com/losfair/zeroserve](https://github.com/losfair/zeroserve) bajo licencia MIT. Compila, empaqueta un sitio y pruébalo. Aunque solo sea por la experiencia de ver un servidor web que se programa en C y se ejecuta en eBPF dentro de un proceso Rust.
