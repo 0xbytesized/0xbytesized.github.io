@@ -13,7 +13,7 @@ excerpt: "Un post en Mastodon acusó a Claude de llenar rsync de bugs. Una perso
 
 A finales de mayo de 2026, un post en Mastodon encendió la mecha. Alguien observó que una versión reciente de rsync — la herramienta que sincroniza medio internet — contenía commits escritos con Claude, y que justo esa versión tenía regresiones. Conexión hecha: "Claude está rompiendo rsync". Sin evidencia, sin números, sin nada más que una correlación espuria capturada en un screenshot.
 
-Lo que vino después fue el ciclo de indignación de internet en estado puro: el post acumuló miles de interacciones, saltó a Hacker News (81 comentarios iniciales) y desembocó en un issue de GitHub titulado ["Please Do Not Vibe Fuck Up This Software"](https://github.com/RsyncProject/rsync/issues/839) con 329 comentarios. La conversación escaló de críticas técnicas a acoso, amenazas veladas y dibujos de My Little Pony estrangulando al maintainer. Internet siendo internet.
+Lo que vino después fue el ciclo de indignación de internet en estado puro: el post acumuló miles de interacciones, saltó a Hacker News (81 comentarios iniciales) y desembocó en un issue de GitHub titulado ["Please Do Not Vibe Fuck Up This Software"](https://github.com/RsyncProject/rsync/issues/929) con 347 comentarios. La conversación escaló de críticas técnicas a acoso, amenazas veladas y dibujos de My Little Pony estrangulando al maintainer. Internet siendo internet.
 
 Pero aquí está la parte interesante: alguien hizo los números.
 
@@ -21,7 +21,7 @@ Pero aquí está la parte interesante: alguien hizo los números.
 
 Alexis Purslane, harta del ruido, pasó varios días construyendo un análisis estadístico riguroso. No opiniones, no vibras: datos. Recopiló todos los bugs reportados en 36 releases de rsync (desde v2.4.6 hasta v3.4.3), los cruzó con los commits de cada release y aplicó tests estadísticos para responder una sola pregunta: ¿los releases con commits de Claude son anormalmente buggy?
 
-La métrica: **bugs ponderados por severidad por cada 10 commits** (sev/10c). Cada bug se puntuó de 0 a 100 usando un modelo de lenguaje (Qwen 3 35B) actuando como ingeniero de fiabilidad. Un CVE de ejecución remota = 95. Un typo en la documentación = 15. Un feature request = 0 (no es un bug).
+La métrica: **bugs ponderados por severidad por cada 10 commits** (sev/10c). Cada bug se puntuó de 0 a 100 usando un modelo de lenguaje (Qwen 3.6 35B) actuando como ingeniero de fiabilidad. Un CVE de ejecución remota = 95. Un typo en la documentación = 15. Un feature request = 0 (no es un bug).
 
 Para los dos releases con commits de Claude:
 
@@ -85,7 +85,7 @@ $ python analyze.py --releases 36 --bugs 500+ --permutation-test --severity-weig
 p-value: 0.46  # ¯\_(°_°)_/¯
 ```
 
-El contraste es brutal. Por un lado, un screenshot de Mastodon y 329 comentarios de indignación. Por otro, 36 releases, cientos de bugs puntuados por severidad, tres fuentes de datos (GitHub, Bugzilla, lista de correo), y tests estadísticos con metodología revisada por una estadística profesional.
+El contraste es brutal. Por un lado, un screenshot de Mastodon y 329 comentarios de indignación. Por otro, 36 releases, cientos de bugs puntuados por severidad, tres fuentes de datos (GitHub, Bugzilla, lista de correo) y tests estadísticos con metodología revisada por una estadística profesional.
 
 ## Mi opinión
 
@@ -112,4 +112,4 @@ La tercera, y quizás la más importante para quienes mantenemos proyectos open 
 **Referencias:**
 - [Análisis original de Alexis Purslane](https://alexispurslane.github.io/rsync-analysis/)
 - [Repo reproducible con datos y scripts](https://github.com/alexispurslane/rsync-analysis)
-- [Hilo de Hacker News](https://news.ycombinator.com/item?id=48411635) (337 puntos, 343 comentarios)
+- [Hilo de Hacker News](https://news.ycombinator.com/item?id=48411635) (505 puntos, 524 comentarios)

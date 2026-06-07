@@ -5,7 +5,7 @@ tags: ["linux", "microsoft", "wsl", "dotnet", "contenedores"]
 excerpt: "Wslc, WinUI Reactor, Azure Linux 4.0 y .NET 10: cuatro tecnologías de la Build 2026 unidas para arrancar un escritorio Linux dentro de una ventana de Windows."
 ---
 
-Haydean Barnes, conocido en la comunidad WSL por su trabajo en Azure Linux y el ecosistema .NET, publicó esta semana un experimento que merece atención: **Azure Linux Desktop**, una aplicación Windows que arranca un escritorio Linux completo —XFCE, audio, aceleración GPU, portapapeles compartido— dentro de una ventana. Sin terminal, sin wizard de instalación, sin configuraciones. Abres la app y en unos segundos estás mirando un escritorio Linux.
+Hayden Barnes, conocido en la comunidad WSL por su trabajo en Azure Linux y el ecosistema .NET, publicó esta semana un experimento que merece atención: **Azure Linux Desktop**, una aplicación Windows que arranca un escritorio Linux completo —XFCE, audio, aceleración GPU, portapapeles compartido— dentro de una ventana. Sin terminal, sin wizard de instalación, sin configuraciones. Abres la app y en unos segundos estás mirando un escritorio Linux.
 
 No es un producto oficial de Microsoft. Es un hack de juguete, como él mismo admite. Pero lo interesante no es el resultado final: es **cómo une cuatro piezas presentadas en la Build 2026** que, por separado, ya apuntan a un cambio de fondo en la relación Windows-Linux.
 
@@ -13,17 +13,19 @@ No es un producto oficial de Microsoft. Es un hack de juguete, como él mismo ad
 
 ### 1. wslc: contenedores Linux nativos en Windows, con API y todo
 
-`wslc` es el nuevo runtime de contenedores Linux para Windows. Corre contenedores OCI dentro de una VM Hyper-V dedicada, separada de tus distros WSL 2 habituales. Tiene CLI compatible con Docker, soporte para GPU vía CDI, y —esto es lo relevante para el experimento— **un SDK completo en C/WinRT/C#** que permite a cualquier aplicación Windows crear, gestionar y comunicarse con contenedores Linux.
+`wslc` es el nuevo runtime de contenedores Linux para Windows. Corre contenedores OCI dentro de una VM Hyper-V dedicada, separada de tus distros WSL 2 habituales. Tiene CLI compatible con Docker, soporte para GPU vía CDI y —esto es lo relevante para el experimento— **un SDK completo en C/WinRT/C#** que permite a cualquier aplicación Windows crear, gestionar y comunicarse con contenedores Linux.
 
-La API de wslc es lo que permite a Azure Linux Desktop arrancar la distro sin que el usuario toque una terminal. El flujo conceptual es directo:
+La API de wslc es lo que permite a Azure Linux Desktop arrancar la distro sin que el usuario toque una terminal. Los nombres de clases y métodos que siguen son ilustrativos (la API real usa `Microsoft.WSL.Containers` como namespace y métodos síncronos; consulta el [repositorio de WSL](https://github.com/microsoft/WSL) para la referencia exacta):
 
 ```csharp
-// Flujo conceptual de wslc SDK desde una app .NET
-// La API real está en microsoft/WSL, aún en preview
+// Ilustración conceptual del flujo de wslc.
+// Los nombres de clases, namespaces y métodos son inventados
+// para transmitir la idea. La API real usa Microsoft.WSL.Containers
+// con métodos síncronos. Ver github.com/microsoft/WSL.
 
-using Wslc.Sdk;
+using Wslc.Sdk;  // namespace ilustrativo, el real es Microsoft.WSL.Containers
 
-// 1. Crear una sesión wslc
+// 1. Crear una sesión wslc (ilustrativo; la API real es new Session() + .Start())
 var session = await WslcSession.CreateAsync(new()
 {
     VcpuCount = 2,
@@ -33,15 +35,15 @@ var session = await WslcSession.CreateAsync(new()
 // 2. Cargar la imagen del escritorio
 var imageId = await session.LoadImageAsync("azurelinux-desktop:latest");
 
-// 3. Crear el contenedor con mapeo de puerto para RDP
+// 3. Crear el contenedor (ilustrativo; el real es Session.CreateContainer síncrono)
 var container = await session.CreateContainerAsync(new()
 {
     ImageId = imageId,
     PortMappings = { (3389, 3389) },
-    GpuAccess = GpuAccess.Enabled
+    GpuAccess = GpuAccess.Enabled  // ilustrativo; el real es ContainerFlags.EnableGpu
 });
 
-// 4. Arrancar
+// 4. Arrancar (ilustrativo; el real es Container.Start síncrono)
 await container.StartAsync();
 ```
 
@@ -115,7 +117,7 @@ El audio por RDP también requirió ingeniería extra. Las sesiones de contenedo
 
 ### 4. .NET 10: publicar para x64 y ARM64 con un solo comando
 
-La app targetea .NET 10 y WinUI 3, empaquetada con el Windows App SDK. `dotnet run` la lanza con identidad de paquete, ReadyToRun precompila para arranques más rápidos, y un solo `dotnet publish` produce builds para x64 y ARM64.
+La app targetea .NET 10 y WinUI 3, empaquetada con el Windows App SDK. `dotnet run` la lanza con identidad de paquete, ReadyToRun precompila para arranques más rápidos y un solo `dotnet publish` produce builds para x64 y ARM64.
 
 Todo el proyecto cabe en un `.slnx` que se construye con `dotnet build`. Sin configuraciones complejas, sin pasos manuales. La madurez del tooling de .NET es probablemente la pieza menos llamativa del experimento, pero es la que permite que las otras tres encajen sin fricción.
 
@@ -123,7 +125,7 @@ Todo el proyecto cabe en un `.slnx` que se construye con `dotnet build`. Sin con
 
 Más allá de la arquitectura limpia, el proyecto tiene soluciones ingeniosas donde las piezas no encajaban:
 
-**El RDP no se lleva bien con WinUI.** El control ActiveX de Escritorio Remoto de Windows (`mstscax.dll`) se niega a pintar dentro de un `DesktopChildSiteBridge` y crashea si lo creas oculto o lo redibujas como `layered`. La solución es gloriosamente sucia: el control RDP vive en una ventana WinForms sin bordes, aparcada fuera de pantalla hasta que está lista, y un timer de tracking la pega sobre la ventana principal sincronizando posición y tamaño en cada frame. No es elegante, pero funciona.
+**El RDP no se lleva bien con WinUI.** El control ActiveX de Escritorio Remoto de Windows (`mstscax.dll`) se niega a pintar dentro de un `DesktopChildSiteBridge` y crashea si lo creas oculto o lo redibujas como `layered`. La solución es gloriosamente sucia: el control RDP vive en una ventana WinForms sin bordes, aparcada fuera de pantalla hasta que está lista y un timer de tracking la pega sobre la ventana principal sincronizando posición y tamaño en cada frame. No es elegante, pero funciona.
 
 **La zona horaria del contenedor** se sincroniza convirtiendo el ID de zona horaria de Windows a su equivalente IANA y reescribiendo `/etc/localtime` al arrancar. El reloj del contenedor ya va por Hyper-V time synchronization, así que este paso solo corrige la etiqueta, no la hora en sí.
 
@@ -141,7 +143,7 @@ En 2026, Microsoft tiene:
 
 Cada pieza es potente por separado. Pero juntas permiten que un desarrollador individual —no un equipo de Microsoft— construya en un fin de semana algo que hace cinco años habría requerido un equipo de ingeniería de sistemas y meses de trabajo.
 
-Esa es la historia real aquí. La democratización de la infraestructura. El hecho de que puedas coger cuatro piezas presentadas en una conferencia, combinarlas en un proyecto personal, y terminar con un escritorio Linux arrancando dentro de Windows como si fuera una app cualquiera. Con audio. Con GPU. Con portapapeles.
+Esa es la historia real aquí. La democratización de la infraestructura. El hecho de que puedas coger cuatro piezas presentadas en una conferencia, combinarlas en un proyecto personal y terminar con un escritorio Linux arrancando dentro de Windows como si fuera una app cualquiera. Con audio. Con GPU. Con portapapeles.
 
 El escritorio Linux de Microsoft no es el producto. Es el síntoma de que la línea entre Windows y Linux se ha vuelto irrelevante para quien programa.
 
