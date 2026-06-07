@@ -1,0 +1,180 @@
+---
+title: "Linear o cómo construir la webapp más rápida del mundo"
+date: "2026-06-07T22:00"
+tags: ["rendimiento", "frontend", "arquitectura", "local-first", "javascript"]
+excerpt: "Un desglose técnico de cómo Linear consigue ser tan absurdamente rápida: la base de datos vive en el navegador y la red es el enemigo a batir."
+---
+
+Hay una pregunta que lleva meses rondando los foros de frontend: ¿cómo demonios es Linear tan rápida? Abres un issue, cambias su estado, editas el título y todo ocurre en el mismo instante en que levantas el dedo del teclado. No hay spinner, no hay skeleton, no hay ese medio segundo de angustia que te regala cualquier CRUD tradicional mientras esperas al servidor.
+
+La respuesta no es magia negra ni un framework secreto. Es una decisión arquitectónica tomada en el primer día del proyecto y mantenida con disciplina obsesiva durante años. Dennis Brotzky ha publicado un desglose técnico brillante en performance.dev y voy a contarte lo más interesante con mi propia lectura.
+
+## La base de datos está en tu navegador
+
+Esta es la decisión fundacional: **la UI de Linear no lee de PostgreSQL, lee de IndexedDB**. Todos los datos de tu workspace viven en local, dentro de tu navegador.
+
+Cuando haces cualquier mutación — cambiar un título, mover una tarea, asignar un responsable — pasan tres cosas casi a la vez:
+
+1. El observable de MobX se actualiza y la UI se repinta al instante
+2. La mutación se escribe en una cola de transacciones durables en IndexedDB
+3. Se encola para enviar al servidor... **en segundo plano**
+
+El usuario nunca espera una respuesta HTTP para ver su propio cambio. La red no se toca hasta que todo lo local está resuelto.
+
+```js
+// Cómo lo haría una app tradicional
+async function actualizarIssue(issue) {
+  mostrarSpinner();
+  const res = await fetch(`/api/issues/${issue.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ titulo: issue.titulo }),
+  });
+  const actualizado = await res.json();
+  setIssue(actualizado);
+  ocultarSpinner();
+}
+
+// Cómo lo hace Linear
+issue.titulo = "Arranque más rápido";
+issue.save(); // encola, no espera
+```
+
+La diferencia es que la primera versión bloquea la UI durante cientos de milisegundos mientras el paquete viaja por la red. La segunda pinta el cambio **síncronamente** desde la memoria local y, si el servidor rechaza la mutación (algo que apenas ocurre porque las validaciones se ejecutan antes de crear la transacción), revierte el observable y el usuario ve un breve parpadeo.
+
+Esta arquitectura se llama **local-first** y fue lo primero que escribió Tuomas, uno de los cofundadores de Linear. No es algo que se añada en la versión 3. Es la viga maestra sobre la que se construye todo lo demás.
+
+## La sincronización: un delta, una celda
+
+El motor de sincronización no es un lujo, es la otra mitad del pacto. Cuando el servidor confirma una mutación — tuya o de un compañero — no devuelve la issue entera. Devuelve un **sobre JSON diminuto** con el delta: qué campo cambió y a qué valor.
+
+El cliente aplica ese delta escribiendo directamente en el observable de MobX correspondiente. Y aquí está la genialidad: cada propiedad de cada modelo en Linear es su propio observable. Cada componente que lee una propiedad está envuelto en `observer()`. MobX sabe exactamente qué componentes dependen de qué campos.
+
+El resultado: una ráfaga de 50 issues actualizándose a la vez produce 50 re-renders de celda, no un re-render de la lista entera. El coste escala con lo que cambió, no con lo que hay en pantalla.
+
+```js
+// Cada campo de cada modelo es un observable independiente
+class Issue {
+  @observable titulo = "";
+  @observable estado = "backlog";
+  @observable asignadoA = null;
+  @observable prioridad = "normal";
+}
+
+// MobX solo re-renderiza los componentes que leyeron el campo cambiado
+const FilaIssue = observer(({ issue }) => (
+  <div className="fila">
+    <span className="titulo">{issue.titulo}</span>
+    <BadgeEstado estado={issue.estado} />
+  </div>
+));
+// Si cambia 'prioridad', FilaIssue ni se entera
+```
+
+Esta granularidad es lo que mantiene un workspace con diez personas editando cosas a la vez completamente fluido. Sin trucos de virtualización ni `React.memo` por todas partes. Solo observables finos y un motor de syncing que sabe exactamente dónde escribir.
+
+## La primera carga: el arte de esconder la red
+
+Si la base de datos está en el navegador, hidratarla debería ser instantáneo ¿no? Casi. El truco está en lo que ocurre mientras el usuario aún no ha llegado a la app.
+
+Linear divide su bundle en cientos de chunks, uno por cada paquete npm de más de 3 KB. No es un `vendor.js` monolítico que se invalida entero cuando actualizas `lodash`. Es un chunk por librería. Si bump eas una dependencia, solo se invalida un chunk; el resto sigue en caché.
+
+Pero dividir en cientos de chunks crea un problema nuevo: la cascada de imports. El navegador no sabe qué imports tiene un chunk hasta que lo parsea. Sin ayuda, la carga se convierte en una cadena secuencial: fetch → parse → fetch imports → parse → fetch más imports...
+
+La solución de Linear es brutalmente simple: **modulepreload**.
+
+```html
+<!-- En el <head> del index.html de Linear -->
+<script type="module" crossorigin 
+        src="https://static.linear.app/client/assets/html.2_JBQs3Q.js">
+</script>
+<link rel="modulepreload" crossorigin 
+      href="https://static.linear.app/client/assets/vendor-mobx.Crhy2qQc.js">
+<link rel="modulepreload" crossorigin 
+      href="https://static.linear.app/client/assets/SyncWebSocket.Djw6l_Op.js">
+<link rel="modulepreload" crossorigin 
+      href="https://static.linear.app/client/assets/DatabaseManager.DKssGAN8.js">
+<!-- y así con ~1200 assets más -->
+```
+
+El atributo `crossorigin` en el preload coincide con el del script de entrada, así que el navegador reutiliza la misma petición cacheada. La cascada secuencial colapsa en una sola ráfaga paralela. Para cuando el entry point llega a su primer `import`, los chunks ya están en memoria.
+
+Y luego viene el service worker. Mientras el usuario está en la pantalla de login, un manifest precacheado con unos 1.200 assets se descarga en segundo plano. En pocos segundos, la app entera está en caché. Las navegaciones subsecuentes no tocan la red. Combinado con la base de datos en IndexedDB, Linear funciona **offline**: puedes leer issues, crear nuevas, cambiar estados. Todo se encola y se sincroniza cuando vuelve la conexión.
+
+## Autenticación: asume el camino feliz
+
+La mayoría de las apps matan su presupuesto de rendimiento en la autenticación. El flujo típico: fetch del HTML → cargar bundle → validar sesión → fetch del usuario → fetch del workspace → renderizar. De uno a tres segundos antes de que el usuario vea algo.
+
+Linear hace algo mucho más elegante: ni siquiera comprueba la sesión al arrancar. Comprueba si hay datos que mostrar.
+
+```js
+// Script inline en el <head> del index.html
+if (localStorage.getItem("ApplicationStore") === null) {
+  document.documentElement.classList.add("logged-out");
+}
+```
+
+Si `ApplicationStore` existe, el usuario ya ha usado Linear en ese navegador y su workspace está en IndexedDB. Se renderiza la app inmediatamente con esos datos. Si no existe, se muestra el layout de login.
+
+El token de sesión real vive en una cookie HttpOnly. El bundle nunca intenta ser inteligente con él. Simplemente renderiza lo que tiene y deja que la primera petición real — el handshake del WebSocket, un delta de sync, cualquier llamada HTTP — sea la que falle con un 401 si la sesión ha caducado. Cuando eso ocurre, el cliente redirige al login.
+
+Es el mismo patrón que usan para las mutaciones: confía en lo local, verifica en segundo plano, reconcilia si hay conflicto. Coherencia arquitectónica de principio a fin.
+
+## Velocidad de diseño, no solo de ingeniería
+
+Un motor de sincronización perfecto no sirve de nada si llegar a la acción que quieres requiere tres menús, un clic derecho y un diálogo modal. Linear diseñó sus atajos de teclado desde el día uno.
+
+Cada acción común tiene un atajo. Los más frecuentes son de una sola tecla. Los de navegación, combinaciones de dos. `⌘K` abre una paleta de comandos que busca sobre **todo**: issues, proyectos, etiquetas, cambios de estado, navegación, creación, ajustes. La búsqueda es instantánea porque se ejecuta contra el pool de objetos MobX en memoria, no contra el servidor.
+
+El resultado es que jamás necesitas soltar el teclado. Y para quien prefiera el ratón, todas las acciones también son accesibles con clic. No alienas a nadie.
+
+La paleta de comandos es un primitivo tan potente que convierte la navegación en búsqueda, la creación de issues en búsqueda y los cambios de estado en búsqueda acotada a estados. Un solo componente, reutilizado en todas partes, corriendo sobre datos que ya están en memoria.
+
+## Anima solo lo que no dispare layout
+
+Los navegadores tienen tres niveles de coste al animar propiedades:
+
+- **Nivel GPU:** `transform` y `opacity`. Se resuelven en la GPU sin tocar el hilo principal.
+- **Nivel paint:** `color`, `background-color`, `border-color`. No recalcular layout, pero sí repintan píxeles.
+- **Nivel layout:** `width`, `height`, `margin`, `padding`, `top`, `left`. Fuerzan al navegador a recalcular la posición de todos los elementos subsiguientes. **Nunca animes estas propiedades. Nunca.**
+
+```css
+/* Lo que hace Linear */
+.fila:hover {
+  background-color: var(--color-bg-hover);
+  transition: background-color 0.12s;
+}
+.icono-flecha {
+  transform: translateX(0);
+  transition: transform 0.15s;
+}
+
+/* Lo que escribirías si no supieras esto */
+.fila:hover {
+  margin-left: 2px;        /* ¡dispara layout de toda la lista! */
+  transition: all 0.2s;    /* y ahora estás animando margin */
+}
+```
+
+Linear además usa duraciones asimétricas: los highlights aparecen instantáneamente (0ms) y se desvanecen al salir (150ms). Los popovers escalan desde su origen. Los paneles se deslizan desde su toggle. Cada animación tiene un propósito espacial: decirle al usuario de dónde viene el elemento nuevo.
+
+Sus variables de velocidad son más cortas que el estándar de la industria:
+
+```css
+--speed-highlightFadeIn: 0s;
+--speed-highlightFadeOut: 0.15s;
+--speed-quickTransition: 0.1s;
+--speed-regularTransition: 0.25s;
+--speed-slowTransition: 0.35s;
+```
+
+Para que te hagas una idea, Material Design recomienda 200ms de base y iOS ronda los 350ms con springs. Linear está muy por debajo.
+
+## Mi veredicto
+
+Lo que más me fascina de la arquitectura de Linear no es ninguna tecnología concreta sino la **coherencia**. Cada decisión apunta en la misma dirección: la red es el enemigo, elimínala siempre que puedas y cuando no puedas, escóndela.
+
+La base de datos en el navegador elimina la red para las lecturas. Las mutaciones optimistas la eliminan para las escrituras. Los modulepreloads paralelizan lo que queda. El service worker la elimina para las visitas repetidas. La autenticación asume el camino feliz y elimina la red del arranque. Los atajos de teclado eliminan la fricción de la interacción. Las animaciones respetan la GPU para no bloquear el hilo principal.
+
+No es una cuestión de usar la librería de moda. Linear usa React, MobX, TypeScript, Postgres y un CDN. Nada que no puedas encontrar en cualquier proyecto React serio. La diferencia es que decidieron su arquitectura el primer día y han tenido la disciplina de no traicionarla durante años.
+
+¿Es esto replicable en tu proyecto? Parcialmente. No necesitas escribir un motor de sincronización desde cero. TanStack Query y SWR te dan mutaciones optimistas que cubren el 80% del camino. Lo que sí puedes copiar hoy mismo es la mentalidad: **cada milisegundo que tu UI pasa esperando a la red es un milisegundo que le estás robando a tu usuario**. Haz todo lo posible por eliminar esos momentos. Tu app te lo agradecerá y tus usuarios también.
