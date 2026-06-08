@@ -7,7 +7,7 @@ excerpt: "Un servidor HTTPS sin configuración que usa eBPF como lenguaje de scr
 
 [zeroserve](https://github.com/losfair/zeroserve) es un servidor HTTPS de configuración cero escrito en Rust por Heyang Zhou. La premisa es simple: le das un tarball con tu sitio web y él lo sirve. Nada de `nginx.conf`, nada de `Caddyfile`, nada de `location` blocks. Pero lo que lo hace distinto no es la simplicidad — es que su "configuración" son programas eBPF que se ejecutan en cada petición.
 
-El proyecto ha llamado la atención en Hacker News (205 puntos, 53 comentarios) y ya acumula 137 estrellas en GitHub. Y los benchmarks tienen algo que ver: por núcleo, zeroserve supera a nginx en casi todos los escenarios.
+El proyecto ha llamado la atención en Hacker News (268 puntos, 62 comentarios) y ya acumula 252 estrellas en GitHub. Y los benchmarks tienen algo que ver: por núcleo, zeroserve supera a nginx en casi todos los escenarios.
 
 ## Cómo funciona por dentro
 
@@ -133,7 +133,7 @@ Lo que más me gusta de zeroserve no son los benchmarks — es la filosofía. Ll
 
 zeroserve colapsa todo eso en un solo programa. No hay archivo de configuración, no hay DSL, no hay dos capas que mantener sincronizadas. El programa eBPF *es* la configuración. Lees el script de arriba a abajo y sabes exactamente qué le pasa a cada petición.
 
-Dicho esto, no voy a migrar mis cosas a zeroserve mañana. Tiene 137 estrellas y lo mantiene una persona. El ecosistema de nginx/Caddy tiene una década de edge cases resueltos, módulos para todo y comunidades enormes. zeroserve es un experimento brillante, pero para producción necesitaría ver más adopción, más tests y más pares de ojos sobre ese pointer cage.
+Dicho esto, no voy a migrar mis cosas a zeroserve mañana. Tiene 252 estrellas y lo mantiene una persona. El ecosistema de nginx/Caddy tiene una década de edge cases resueltos, módulos para todo y comunidades enormes. zeroserve es un experimento brillante, pero para producción necesitaría ver más adopción, más tests y más pares de ojos sobre ese pointer cage.
 
 Aun así, me alegra ver a alguien cuestionar el dogma de "archivo de configuración + scripting como complemento". Es un diseño que arrastramos desde Apache 1.3 y nadie se había parado a repensarlo en serio. zeroserve lo hace, y además lo respalda con números.
 
