@@ -1,0 +1,134 @@
+---
+title: "Una bombilla Matter en Rust: IoT desde cero con Pi Pico 2 W"
+date: "2026-06-08T04:00"
+tags: ["rust", "embedded", "iot", "matter", "raspberry-pi"]
+excerpt: "Controla una bombilla LED desde Apple Home o Google Home usando Rust, Embassy y el protocolo Matter en una Raspberry Pi Pico 2 W de 10 euros."
+---
+
+Los proyectos de IoT casero suelen tener un problema: cada fabricante habla su propio idioma. Tu bombilla Philips habla Zigbee, el enchufe TP-Link habla Wi-Fi propietario, el sensor Aqara habla Zigbee pero con otro perfil. Acabas necesitando un Home Assistant que haga de traductor universal con más plugins que un WordPress de 2012.
+
+**Matter** nació para arreglar esto. Es un protocolo de conectividad estándar respaldado por Apple, Google, Amazon y la Connectivity Standards Alliance. La promesa: un dispositivo Matter se empareja con cualquier ecosistema sin adaptadores ni bridges.
+
+Pero Matter siempre ha tenido pinta de ser cosa de grandes. Chips especializados, stacks complejos, certificaciones caras. Hasta ahora.
+
+Un desarrollador llamado **melastmohican** ha subido a GitHub un proyecto que demuestra que puedes montar una bombilla Matter compatible desde cero con Rust, Embassy y una Raspberry Pi Pico 2 W. El coste total del hardware ronda los 15 euros. Y el código es sorprendentemente legible.
+
+## El stack técnico: Rust desde el silicio hasta el protocolo
+
+El proyecto corre sobre una **Raspberry Pi Pico 2 W**, que monta el microcontrolador RP2350 de doble núcleo (Arm Cortex-M33 + RISC-V). Para aprovechar el Wi-Fi integrado usa el chip CYW43439, el mismo que montan muchas placas Pico W. La pila de software es 100% Rust:
+
+- **Embassy** como framework asíncrono para embebidos. Aporta el executor, timers, GPIO, DMA y el driver de Wi-Fi.
+- **rs-matter-embassy** como stack Matter. Es un fork mantenido por el mismo autor que adapta `rs-matter` para funcionar sobre Embassy y microcontroladores con recursos limitados.
+- **cyw43** como driver del chip Wi-Fi + Bluetooth, con soporte para BLE (necesario para el commissioning de Matter).
+
+El ejecutable final cabe en unos pocos cientos de KB. No hay SO, no hay kernel de Linux, no hay runtime de Python. Es Rust compilado a binario `no_std` con el mínimo absoluto.
+
+## Cómo funciona el commissioning Matter
+
+Cuando enchufas una bombilla Matter por primera vez, no aparece mágicamente en tu app. El protocolo exige un proceso llamado **commissioning** que usa BLE (Bluetooth Low Energy) como canal inicial:
+
+```rust
+// Fragmento conceptual del flujo de commissioning Matter
+// El dispositivo anuncia su presencia por BLE con un código QR
+
+// 1. El stack Matter inicializa el dispositivo con sus credenciales
+let dev_det = BasicInfoConfig {
+    vendor_name: "melastmohican",
+    device_name: "rs-matter rp2350 light",
+    product_name: "rs-matter rp2350 light",
+    ..TEST_DEV_DET  // Credenciales de desarrollo (DAC, certificado)
+};
+
+// 2. Se crea el stack Matter sobre Wi-Fi
+let stack = EmbassyWifiMatterStack::<BUMP_SIZE, ()>::init(
+    &dev_det,
+    TEST_DEV_COMM,  // Configuración de comunicación
+    &TEST_DEV_ATT,  // Atestación del dispositivo
+);
+
+// 3. El stack se asocia al driver Wi-Fi (cyw43) y arranca el BLE
+//    para que tu móvil pueda encontrarlo y emparejarlo
+```
+
+La app de tu móvil (Apple Home, Google Home, Home Assistant) escanea el código QR, establece una conexión BLE segura e intercambia credenciales Wi-Fi y certificados. Después el dispositivo pasa a comunicarse por Wi-Fi usando IPv6 sobre el protocolo Matter nativo. A partir de ahí, BLE se apaga y solo se usa Wi-Fi.
+
+## La lógica de la bombilla: encender y apagar un LED desde tu móvil
+
+El núcleo funcional del proyecto es sorprendentemente pequeño. Matter define un modelo de datos con **clusters** y **endpoints**. Una bombilla on/off implementa el cluster `OnOff` en el endpoint 0:
+
+```rust
+use rs_matter_embassy::matter::dm::clusters::app::on_off::OnOffHooks;
+
+// Implementamos los hooks que Matter necesita para controlar el LED físico
+pub struct LedOnOffLogic;
+
+impl OnOffHooks for LedOnOffLogic {
+    fn on_off(&self) -> bool {
+        LED_STATE.load(Ordering::Relaxed)
+    }
+
+    fn set_on_off(&self, on: bool) {
+        LED_STATE.store(on, Ordering::Relaxed);
+    }
+
+    fn start_up_on_off(&self) -> Nullable<StartUpOnOffEnum> {
+        Nullable::none()
+    }
+}
+```
+
+El trait `OnOffHooks` define la interfaz que el stack Matter necesita para interactuar con tu hardware. Solo tienes que decirle cuál es el estado actual (`on_off`) y cómo cambiarlo (`set_on_off`). El resto — el protocolo de red, la serialización, la seguridad, las confirmaciones — lo gestiona `rs-matter-embassy`.
+
+Para no andar encuestando el estado del LED en bucle, el proyecto lanza una tarea asíncrona separada que reacciona a cambios de estado atómico:
+
+```rust
+#[embassy_executor::task]
+async fn led_task(mut led: Output<'static>) {
+    let mut last_state = false;
+    loop {
+        let current = LED_STATE.load(Ordering::Relaxed);
+        if current != last_state {
+            match current {
+                true => led.set_high(),
+                false => led.set_low(),
+            }
+            last_state = current;
+        }
+        Timer::after(Duration::from_millis(50)).await;
+    }
+}
+```
+
+50 milisegundos de latencia entre que tu dedo pulsa el botón en la app y el LED físico cambia. Con Wi-Fi local, la latencia de red es menor que ese intervalo de muestreo, así que la experiencia es instantánea.
+
+## Por qué Rust está ganando en embebidos
+
+El ecosistema Rust para microcontroladores ha madurado una barbaridad en los últimos dos años. Este proyecto es una buena muestra de por qué:
+
+1. **Abstracciones sin coste**: el GPIO, el Wi-Fi y el BLE se manejan con traits seguros que el compilador resuelve en tiempo de compilación. No hay despachos dinámicos, no hay vtables, no hay penalización.
+
+2. **Async sin RTOS**: Embassy proporciona un executor asíncrono cooperativo que cabe en unos pocos KB. Las tareas como `led_task` se planifican sin necesidad de un sistema operativo completo.
+
+3. **no_std real**: el proyecto compila contra `core`, no contra `std`. No hay allocator global salvo el heap mínimo (8 KB) que se reserva para buffers del stack Matter.
+
+4. **Seguridad sin runtime**: el borrow checker previene carreras de datos en tiempo de compilación. Para el estado compartido entre tareas, el proyecto usa `AtomicBool` y `StaticCell`, construcciones zero-cost verificadas estáticamente.
+
+El resultado es un binario que podría correr durante años sin reiniciarse y sin fugas de memoria.
+
+## Lo que falta para producción
+
+El proyecto usa credenciales de desarrollo (`TEST_DEV_DET`, `TEST_DEV_ATT`, `TEST_DEV_COMM`). Esto significa que Apple Home y Google Home lo aceptan durante el desarrollo, pero no pasaría una certificación Matter real. Para un producto comercial necesitarías:
+
+- Credenciales DAC firmadas por la Connectivity Standards Alliance
+- Un certificado de atestación de dispositivo
+- Pasar el test suite de certificación Matter (miles de casos)
+
+Pero para un proyecto personal o un prototipo, las credenciales de test son más que suficientes. Puedes tener tu bombilla funcionando en tu red doméstica esta misma tarde.
+
+## Mi veredicto
+
+Lo que más me gusta de este proyecto no es que funcione — eso ya se sabía que Matter era posible en microcontroladores — sino **la legibilidad del código**. En 200 líneas de Rust tienes un dispositivo Matter funcional que se empareja con tu móvil y enciende un LED. Eso es un logro de diseño de API brutal.
+
+El ecosistema Rust para embebidos ha pasado de "mira, puedo hacer parpadear un LED sin C" a "mira, puedo implementar un stack de conectividad estándar para smart home en una placa de 10 euros". La diferencia son tres años de trabajo de foundation y comunidad.
+
+Si estabas esperando una excusa para meterte en Rust embebido, este proyecto es el punto de entrada perfecto. El README incluye esquemas de cableado, comandos exactos para compilar y flashear y un desglose de cada ejemplo. No hay excusa para no tener una bombilla Matter hecha por ti mismo antes del fin de semana.
