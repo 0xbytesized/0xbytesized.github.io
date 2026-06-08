@@ -1,0 +1,122 @@
+---
+title: "El kit React para que tu startup parezca unicornio"
+date: "2026-06-08T18:00"
+tags: ["react", "frontend", "diseño", "startups", "humor"]
+excerpt: "Performative-UI es una librería React que empaqueta todos los clichés visuales de las landing pages de startups de IA. Y es tan buena que duele."
+---
+
+Cada semana aparece una nueva startup de IA. Y cada una tiene la misma landing page: gradientes violetas, texto que se escribe solo, un `TokenStream` que finge que la IA está pensando y un botón de waitlist que nunca llega a nada.
+
+Alguien ha decidido empaquetarlo todo en una librería npm. Se llama **performative-ui** y es una sátira tan bien ejecutada que duele — porque reconoces cada componente al instante.
+
+## La librería que nos merecíamos
+
+El creador, `lizhang` (GitHub: vorpus), la describe como "componentes React AI-nativos que señalan lo sobresuscrita que está tu ronda de financiación". El README es una obra de arte: 14 badges entre los que destacan `frontier-ready`, `vibes: immaculate` y `Made with Codex`.
+
+Pero el chiste va en serio. La librería tiene **26 componentes** tipados en TypeScript, bien documentados, con una demo interactiva y publicados en npm. Vamos, más profesional que media docena de librerías "serias" que he visto este año.
+
+## Un vistazo a los componentes estrella
+
+### TokenStream: el "mira cómo pienso"
+
+El santo grial del diseño performativo. Un componente que muestra texto token a token con un caret parpadeante al final:
+
+```tsx
+import { TokenStream } from "performative-ui";
+
+export function HeroSection() {
+  return (
+    <h1>
+      <TokenStream
+        text="Razonando tu consulta con agentes distribuidos..."
+        speedMs={40}
+        loop
+        loopDelayMs={2000}
+      />
+    </h1>
+  );
+}
+```
+
+El componente es deliberadamente lento porque la velocidad transmite _esfuerzo computacional_. Si la respuesta apareciera instantáneamente, ¿cómo iba a saber el usuario que hay GPUs trabajando por él?
+
+### GlassCard: el vidrio esmerilado obligatorio
+
+Desde que Apple popularizó el _glassmorphism_, no hay SaaS que se precie sin sus tarjetas translúcidas con blur. Performative-UI lo sirve como componente compuesto:
+
+```tsx
+import { GlassCard } from "performative-ui";
+
+<GlassCard breathing glowOnHover>
+  <GlassCard.Icon>✦</GlassCard.Icon>
+  <GlassCard.Title>Agentes autónomos</GlassCard.Title>
+  <GlassCard.Body>
+    Multi-paso, multi-modal, multi-proveedor. Y multi-buzzword.
+  </GlassCard.Body>
+  <GlassCard.Link href="/pricing">Ver planes</GlassCard.Link>
+</GlassCard>
+```
+
+Las props `breathing` y `glowOnHover` son el toque maestro. La tarjeta respira. Literalmente. Tiene una animación de pulso que la hace parecer viva, como si el vidrio esmerilado estuviera... esmerilando.
+
+### LogoMarquee y StatCounter: la prueba social que nunca caduca
+
+Ninguna landing está completa sin un carrusel infinito de logos de empresas que probablemente no son clientes:
+
+```tsx
+import { LogoMarquee, StatCounter } from "performative-ui";
+
+<LogoMarquee
+  logos={[
+    { src: "/logos/stripe.svg", alt: "Stripe" },
+    { src: "/logos/vercel.svg", alt: "Vercel" },
+    { src: "/logos/supabase.svg", alt: "Supabase" },
+  ]}
+  speed={30}
+/>
+
+<p className="trust-badge">
+  <StatCounter target={125000} durationMs={3000} />
+  {" "}desarrolladores confían en nosotros
+</p>
+```
+
+El `StatCounter` anima el número hacia arriba durante 3 segundos. Porque un número estático no genera confianza; un número que _crece ante tus ojos_, sí.
+
+### AsciiHero: el efecto matrix pero para pitches
+
+Un campo de caracteres ASCII renderizado en canvas que reacciona al cursor. Es el equivalente visual de decir "somos tan técnicos que hasta nuestro fondo de pantalla compila":
+
+```tsx
+import { AsciiHero } from "performative-ui";
+
+<AsciiHero
+  variant="bare"
+  colorful
+  baseOpacity={0.18}
+  spotlightOpacity={0.9}
+  spotlightRadius={10}
+/>
+```
+
+En modo `bare` se posiciona detrás de tu contenido con position absolute. En modo `panel` tiene bordes y fondo propio. Los dos gritan "tenemos ingenieros".
+
+## Por qué funciona como sátira
+
+Lo brillante de performative-ui es que no se burla con desprecio. Los componentes están bien hechos. La documentación es mejor que la de muchas librerías empresariales. El autor entiende perfectamente qué está parodiando y por qué esos patrones existen.
+
+Como decía un comentarista en Hacker News: "es demasiado pulido para ser solo una broma". Otro admitió que probablemente usaría algunos componentes en producción. Y ese es el punto: estas tendencias de diseño se copian porque funcionan. El problema no es el glassmorphism ni el token stream; es que _todas_ las startups los usan igual.
+
+## Mi veredicto
+
+Performative-UI es una sátira con esteroides. Pero también es un espejo incómodo.
+
+Cada componente de esta librería existe porque alguien — probablemente un diseñador con prisas o una IA generativa — decidió que su startup necesitaba parecerse a las demás para parecer legítima. Y el resultado es un internet donde todas las landing pages de IA son clones unas de otras: mismo gradiente, mismo caret parpadeante, misma prueba social inflada.
+
+La paradoja es que si usas performative-ui _sin ironía_, tu web seguirá pareciendo profesional. Porque estos tropos, aunque manidos, comunican señales que los usuarios han aprendido a interpretar: "esto es moderno, esto es rápido, esto es IA". La librería simplemente te ahorra el trabajo de copiarlos a mano.
+
+Pero si la usas con ironía... enhorabuena, has entendido el chiste. Y además tienes una landing page que funciona. Porque en el fondo, como bien señala el autor en los badges del README, lo importante son las _vibes_. Y estas vibes, aunque prestadas, son inmaculadas.
+
+---
+
+La librería está disponible en [npm](https://www.npmjs.com/package/performative-ui) y el código en [GitHub](https://github.com/vorpus/performativeUI). Si tu startup de IA aún no tiene su TokenStream, su GlassCard con respiración y su AsciiHero, ¿a qué estás esperando?
