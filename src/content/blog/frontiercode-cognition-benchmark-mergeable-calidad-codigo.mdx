@@ -1,0 +1,173 @@
+---
+title: "FrontierCode: cuando mergeable es más difícil que correcto"
+date: "2026-06-08T23:09"
+tags: ["benchmark", "ia", "codigo", "calidad", "open-source"]
+excerpt: "Cognition lanza FrontierCode, el primer benchmark que mide si un maintainer aceptaría el código de una IA. Claude Opus 4.8 saca un 13,4% en el tier más duro."
+---
+
+Cognition, la empresa detrás de Devin, acaba de publicar FrontierCode. Los resultados son un baño de humildad para todos los modelos que presumen de saber programar.
+
+El mejor modelo — Claude Opus 4.8 — saca un **13,4%** en el tier más difícil. GPT-5.5 se queda en un 6,3%. Gemini 3.1 Pro, un 4,7%. El mejor modelo open source, Kimi K2.6, apenas roza el 3,8%.
+
+No es que estos modelos no sepan escribir código. Es que FrontierCode mide algo distinto a todo lo que existía hasta ahora.
+
+## El problema con los benchmarks actuales
+
+SWE-Bench y sus derivados llevan años siendo el estándar. Funcionan así: coges issues reales de repos GitHub, le das el enunciado al modelo, y compruebas si su patch pasa los tests.
+
+El problema es que **pasar los tests no significa que el código sea bueno**. Puedes pasar todos los tests y escribir una chapuza que ningún maintainer aceptaría.
+
+METR ya había detectado esto: modelos que puntúan alto en SWE-Bench a menudo generan parches que un revisor humano rechazaría.
+
+FrontierCode cambia la pregunta. Ya no es "¿funciona?". Es **"¿lo mergearía un maintainer de verdad?"**.
+
+## Cómo se construyó
+
+Cognition reclutó a más de 20 maintainers de 36 repositorios open source de primer nivel. Gente que ha revisado y mergeado miles de PRs reales. Cada uno invirtió más de 40 horas por tarea, diseñando ejercicios extraídos directamente de los repos que mantienen.
+
+Entre los colaboradores están Tomer Nosrati (tech lead de Celery, 28.6k estrellas), Martin McKeaveney (CTO de Budibase, 28k estrellas), Merlijn Vos (core maintainer de uppy, 30.8k estrellas) y Claudio Costa (core maintainer de Mattermost, 37k estrellas).
+
+Las tareas no se generan automáticamente scrapeando PRs. Están **diseñadas a mano** por quienes conocen cada rincón del código. Los enunciados son deliberadamente concisos — un tercio de la longitud de los de SWE-Bench Pro — porque los modelos modernos no necesitan que les mastiquen el problema.
+
+## Tres tiers, cero piedad
+
+FrontierCode tiene 150 tareas repartidas en tres niveles:
+
+- **Extended**: las 150 tareas completas.
+- **Main**: las 100 más difíciles.
+- **Diamond**: las 50 más difíciles de todas. Aquí es donde todo arde.
+
+Cada modelo se ejecuta 5 veces por tarea en cada nivel de reasoning disponible. Se promedian los resultados y se toma la mejor configuración de cada modelo.
+
+En Diamond, Opus 4.8 lidera con un 13,4%. En Main sube a 34,3%. En Extended llega a 51,8%. Es decir, **incluso el mejor modelo del mundo solo aprueba la mitad de las tareas más fáciles**.
+
+Un detalle interesante: GPT-5.5 consume hasta 4 veces menos tokens que Opus 4.8 para intentar resolver las mismas tareas. La eficiencia tiene su propia métrica.
+
+## Qué mide exactamente
+
+FrontierCode evalúa seis dimensiones, y no todas pesan igual:
+
+1. **Corrección funcional**: ¿el patch resuelve el problema? Tests clásicos.
+2. **Seguridad ante regresiones**: ¿rompe algo que ya funcionaba?
+3. **Limpieza mecánica**: ¿pasa build, lint y style checks del proyecto?
+4. **Calidad de los tests**: ¿los tests que escribe el modelo realmente capturan el comportamiento esperado?
+5. **Scope**: ¿el patch toca solo lo necesario o se va por las ramas?
+6. **Calidad del código**: ¿respeta las convenciones del repo, usa patrones sensatos y es legible?
+
+Cada criterio puede ser **bloqueante** (si falla, el PR no se mergea) o **no bloqueante** (afecta a la puntuación pero no es un hard stop). Si un modelo falla cualquier bloqueante, su puntuación en esa tarea es **cero**. Sin medias tintas.
+
+## Los métodos de evaluación que no existían
+
+Para evitar los falsos positivos y negativos que plagan otros benchmarks, Cognition ha introducido tres técnicas nuevas que merece la pena entender.
+
+### Reverse-Classical Tests
+
+Imagina que una tarea pide implementar `validate_email()`. El modelo escribe su implementación y sus propios tests. ¿Cómo sabes que esos tests son válidos?
+
+Un reverse-classical test ejecuta los tests del modelo **contra el código original sin arreglar**. Si los tests pasan sobre el código roto, el modelo no ha entendido el problema. Para superar el criterio, los tests del modelo deben **fallar** sobre la versión original.
+
+```python
+# Código original (con bug): acepta emails sin @
+def validate_email(email: str) -> bool:
+    return "." in email  # Bug: no comprueba @
+
+# Test escrito por el modelo:
+def test_validate_email():
+    assert validate_email("sinarroba.com") == False  # Debe fallar
+    assert validate_email("user@domain.com") == True
+
+# Reverse-classical: ejecutar este test contra el código original.
+# test_validate_email() debe FAIL (sinarroba.com da True con el bug).
+# Si pasa, el modelo no entendió el problema → criterio bloqueante fallado.
+```
+
+Es una idea simple y potente: el test del modelo debe ser lo bastante bueno como para cazar el bug original. Si no lo caza, el modelo no sabe lo que está haciendo.
+
+### Code Scope
+
+Un buen PR ejerce moderación. No aprovecha para refactorizar medio repo ni toca archivos que no vienen al caso. El criterio de scope combina tres tipos de restricciones:
+
+- **Archivos**: qué archivos pueden modificarse, cuáles están prohibidos, cuáles deben eliminarse.
+- **Tamaño**: límites en líneas modificadas, crecimiento neto o total de archivos tocados.
+- **Semántica**: un LLM verifica que los cambios se limitan a la zona relevante (por ejemplo, dentro de una sola función).
+
+```python
+# Ejemplo conceptual de una verificación de scope:
+# La tarea pide añadir caché a get_user(). El modelo toca 5 archivos.
+
+scope_check = {
+    "allowed_files": ["src/users.py", "src/cache.py", "tests/test_users.py"],
+    "denied_files": ["src/auth.py", "src/billing.py", "src/admin.py"],
+    "max_lines_changed": 80,
+    "max_files_modified": 3
+}
+
+# El modelo modificó src/users.py (32 líneas), src/cache.py (18 líneas),
+# tests/test_users.py (25 líneas). Total: 75 líneas, 3 archivos. PASA.
+#
+# Pero si hubiera tocado src/auth.py "de paso", criterio bloqueante fallado.
+# Puntuación: 0. No hay debate.
+```
+
+### Adaptive Classical Grading (mutagent)
+
+Las tareas abiertas admiten múltiples soluciones válidas. Tests unitarios estáticos son demasiado rígidos: una solución correcta puede fallar porque usó `get_user()` en vez de `fetch_user()`.
+
+Aquí entra **mutagent**, una herramienta interna que usa un LLM para adaptar los tests a los detalles de implementación del modelo, permitiendo ejecutar tests deterministas sobre soluciones con decisiones de naming distintas.
+
+## El caso LOG_WARNING: cuando Opus 4.8 metió la pata
+
+El artículo incluye un ejemplo demoledor. La tarea, extraída del repo jsonschema (C++), pide:
+
+> Encapsular todos los logs de warning en un nuevo método `auto LOG_WARNING() -> std::ostream&` en `src/logger.h`, que imprima siempre a stderr, ignore el flag `--verbose`, y anteponga el prefijo `warning:`.
+
+Parece sencillo. Pero hay un criterio bloqueante sutil: los mensajes multi-línea deben usar `LOG_WARNING()` de forma **idiomática**, encadenando streams:
+
+```cpp
+// Forma idiomática (lo que espera el maintainer):
+LOG_WARNING()
+    << "You are opting in to remove schema identifiers...\n"
+    << "The only legit use case...\n"
+    << "non-compliant...\n"
+    << ...;
+```
+
+Claude Opus 4.8, consistentemente, hizo esto:
+
+```cpp
+// Lo que Opus 4.8 entregó:
+LOG_WARNING()
+    << "You are opting in to remove schema identifiers...\n";
+std::cerr << "The only legit use case...\n";
+std::cerr << "non-compliant...\n";
+```
+
+Funcionalmente son idénticas: en ambos casos el mensaje multi-línea llega a stderr. Pero la versión de Opus 4.8 **asume en el call site que `LOG_WARNING()` y `std::cerr` son el mismo stream**. Si mañana alguien cambia `LOG_WARNING()` para que escriba a un archivo de log además de stderr, el código de Opus 4.8 se rompe — la segunda y tercera línea seguirían yendo solo a stderr. Un maintainer real rechazaría este PR. Y FrontierCode lo detecta.
+
+## Mi opinión
+
+FrontierCode me parece el benchmark más honesto que se ha publicado sobre código generado por IA. No porque sea más difícil — que lo es — sino porque **cambia lo que medimos**.
+
+Hasta ahora el estándar era "¿funciona?". FrontierCode pregunta "¿lo aceptaría un compañero en code review?". Y esa es la pregunta correcta si de verdad queremos que la IA escriba código de producción.
+
+Me gustan especialmente tres cosas:
+
+**Primero**, que los maintainers sean reales. No es un equipo interno de Cognition simulando lo que un maintainer haría. Son las personas que mantienen Celery, Budibase, uppy y Mattermost. Gente que lleva años diciendo "esto no se mergea" a contribuidores humanos. Ahora se lo dicen a modelos.
+
+**Segundo**, el concepto de criterios bloqueantes con puntuación cero. Es brutal pero justo. En la vida real, si tu PR rompe el build o toca archivos que no debe, no hay "aprobado parcial". Se rechaza y punto. FrontierCode refleja esa realidad.
+
+**Tercero**, que no van a publicar las tareas. Los benchmarks públicos acaban contaminados — los modelos se entrenan con ellos y las puntuaciones pierden significado. Al mantener las tareas privadas y abrir la evaluación a cualquier creador de modelos, FrontierCode puede seguir siendo una señal fiable durante más tiempo.
+
+La parte que me deja intranquilo es otra: un 13,4% en Diamond significa que **ni el mejor modelo llega al aprobado** en las tareas más exigentes. Y esto con maintainers que dedicaron 40 horas a diseñar cada tarea, puliendo criterios para que fueran justos. No es un examen trampa. Es un examen realista. Y los modelos suspenden.
+
+La brecha entre "generar código que compila" y "generar código que un maintainer mergea" es mucho más grande de lo que los benchmarks anteriores nos hacían creer.
+
+## Qué significa esto para quienes programamos con IA
+
+Si usas Claude, GPT o Gemini para escribir código, FrontierCode te da una regla mental: **el código que genera tu modelo probablemente no pasaría una code review seria**. No porque esté mal, sino porque le faltan capas de juicio que solo vienen con años de mantener un codebase real.
+
+Eso no significa que la IA no sirva. Significa que el rol del desarrollador humano no es desaparecer — es **convertirse en el maintainer que revisa, corrige y mergea**. La IA escribe el borrador. Tú decides si entra a main. Y viendo los resultados de FrontierCode, ese rol no va a desaparecer pronto.
+
+---
+
+**Fuente**: [Introducing FrontierCode — Cognition](https://cognition.ai/blog/frontier-code), publicado el 8 de junio de 2026. También en [Hacker News](https://news.ycombinator.com/item?id=48451723).
