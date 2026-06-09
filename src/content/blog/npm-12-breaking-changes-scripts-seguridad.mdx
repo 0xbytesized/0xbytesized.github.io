@@ -1,0 +1,127 @@
+---
+title: "npm 12: GitHub te obliga a revisar qué scripts ejecutas"
+date: "2026-06-09T23:42"
+tags:
+  - npm
+  - seguridad
+  - supply-chain
+  - javascript
+  - node
+excerpt: "npm 12 cambia las reglas: los scripts de instalación ya no se ejecutan automáticamente, las dependencias Git y las URLs remotas se bloquean por defecto. Si haces npm install sin leer, esto te va a doler."
+---
+
+El 9 de junio de 2026, GitHub anunció en su [changelog oficial](https://github.blog/changelog/2026-06-09-upcoming-breaking-changes-for-npm-v12/) los breaking changes que llegarán con npm 12, previsto para julio de 2026. Y no son cambios cosméticos: son tres bombas que cambian las reglas de seguridad del ecosistema Node por defecto.
+
+La filosofía es clara: todo lo que antes se ejecutaba automáticamente durante un `npm install` ahora requiere aprobación explícita. Si tienes un proyecto con dependencias que ejecutan scripts de instalación, dependencias Git o tarballs desde URLs remotas, tu build se va a romper a menos que tomes acción ahora.
+
+## Los tres cambios que importan
+
+### 1. `allowScripts` pasa a `false` por defecto
+
+Este es el grande. A partir de npm 12, `npm install` **no ejecutará** los scripts `preinstall`, `install` ni `postinstall` de ninguna dependencia sin tu aprobación explícita. Esto incluye compilaciones nativas con `node-gyp`: si un paquete tiene un `binding.gyp` y ningún script de instalación explícito, npm ejecuta un `node-gyp rebuild` implícito, y eso también se bloquea.
+
+Es un cambio que duele pero que llega con años de retraso. Los scripts de instalación son el vector de ataque favorito en la cadena de suministro de npm. Recordemos el [gusano de Red Hat](https://0xbytesized.com/blog/gusano-npm-red-hat-supply-chain/) que infectó 30 paquetes npm en junio de 2025 usando exactamente este mecanismo.
+
+Para prepararte, npm 11.16.0 ya incluye las advertencias. Puedes ejecutar:
+
+```bash
+# Ver qué scripts se ejecutarían en tu proyecto
+npm approve-scripts --allow-scripts-pending
+
+# Te mostrará algo como:
+# Packages with pending script approvals:
+#   - core-js (postinstall)
+#   - esbuild (postinstall)
+#   - node-sass (install)
+#   - puppeteer (postinstall)
+```
+
+Una vez identificados los paquetes que necesitan ejecutar scripts, decides:
+
+```bash
+# Apruebas los que confías
+npm approve-scripts core-js esbuild puppeteer
+
+# Bloqueas explícitamente los que no
+npm deny-scripts node-sass
+```
+
+Esto escribe la lista de aprobación directamente en tu `package.json`:
+
+```json
+{
+  "scripts": {
+    "allow": {
+      "core-js": ["postinstall"],
+      "esbuild": ["postinstall"],
+      "puppeteer": ["postinstall"]
+    },
+    "deny": {
+      "node-sass": ["install"]
+    }
+  }
+}
+```
+
+La gracia está en que la allowlist se commitea. Cualquiera que clone tu repositorio hereda tus decisiones de seguridad. Si llega un paquete nuevo con un script sospechoso, simplemente no se ejecuta.
+
+### 2. `--allow-git` pasa a `none`
+
+El segundo cambio bloquea la resolución de dependencias Git, tanto directas como transitivas, a menos que las actives explícitamente con `--allow-git`.
+
+El razonamiento es inquietante: existía un camino de ejecución de código donde el `.npmrc` de una dependencia Git podía sobrescribir el ejecutable de Git, incluso con `--ignore-scripts` activado. Sí, habías desactivado los scripts y aún así podían ejecutar código.
+
+```bash
+# Esto ya no funciona sin el flag
+npm install github:usuario/repo
+
+# Necesitas ser explícito
+npm install github:usuario/repo --allow-git
+```
+
+### 3. `--allow-remote` pasa a `none`
+
+Similar al anterior pero para URLs remotas. Las dependencias que apuntan a tarballs HTTPS dejan de resolverse sin el flag `--allow-remote`.
+
+```bash
+# Esto se bloquea por defecto en npm 12
+npm install https://example.com/paquete-1.0.0.tgz
+
+# Tienes que autorizarlo
+npm install https://example.com/paquete-1.0.0.tgz --allow-remote
+```
+
+Los flags hermanos `--allow-file` y `--allow-directory` mantienen su comportamiento actual, así que las dependencias locales no se ven afectadas.
+
+## Cómo migrar sin que tu CI explote
+
+El plan de migración recomendado es sencillo:
+
+1. Actualiza a npm 11.16.0 o superior (`npm install -g npm@latest`)
+2. Ejecuta tu `npm install` habitual y presta atención a los warnings
+3. Usa `npm approve-scripts --allow-scripts-pending` para auditar qué paquetes necesitan scripts
+4. Aprueba los que confías, bloquea el resto
+5. Commitea el `package.json` actualizado
+
+Cuando llegue npm 12 en julio, tu proyecto seguirá funcionando porque ya tienes la allowlist definida. Lo que no hayas aprobado simplemente dejará de ejecutarse.
+
+Si usas CI, asegúrate de que tus pipelines instalan la versión correcta de npm y de que el `package.json` incluye las configuraciones de scripts.
+
+```bash
+# En tu Dockerfile o script de CI
+npm install -g npm@11.16.0
+npm install  # revisa los warnings
+npm approve-scripts --allow-scripts-pending  # falla si hay pendientes sin aprobar
+```
+
+## Mi opinión
+
+Llevo meses escribiendo sobre incidentes de supply chain en npm — desde el gusano de Red Hat hasta los [317 paquetes comprometidos de Shai-Hulud](https://0xbytesized.com/blog/shai-hulud-317-paquetes-npm-comprometidos/) — y este cambio me parece la respuesta correcta a un problema que se nos ha ido de las manos.
+
+Durante años, el ecosistema Node ha operado con una confianza implícita que rozaba la negligencia. Ejecutar código de terceros durante la instalación era el comportamiento por defecto, y la mayoría ni siquiera sabía que estaba pasando. La comunidad se acostumbró a ignorar los `postinstall` de cientos de dependencias transitivas.
+
+Lo que me gusta del enfoque de GitHub es que no elimina la funcionalidad: te obliga a ser consciente de ella. No es un `--force` ni un parche que rompe compatibilidad sin alternativa. Es un cambio de mentalidad: de "ejecuta todo y ya veremos" a "explícame qué necesitas ejecutar y decido si confío".
+
+La parte que menos me convence es la migración para proyectos legacy. Hay equipos con cientos de dependencias que llevan años acumulando scripts de instalación sin documentar. Para ellos, el proceso de auditar y aprobar va a ser doloroso. Pero también va a ser revelador: muchos descubrirán que la mitad de esos scripts no necesitaban ejecutarse en primer lugar.
+
+En cualquier caso, julio está a la vuelta de la esquina. Si mantienes paquetes npm o tienes proyectos en producción, empieza a revisar tus scripts hoy. No esperes a que tu build se rompa un viernes por la tarde.
