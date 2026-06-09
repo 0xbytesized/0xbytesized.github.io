@@ -1,0 +1,115 @@
+---
+title: "Gitdot: dos tíos en Brooklyn contra el monopolio de GitHub"
+date: "2026-06-09T05:30"
+tags: ["open source", "rust", "github", "git", "startups"]
+excerpt: "Dos devs en Brooklyn construyen Gitdot: alternativa a GitHub en Rust, open source y sin IA. ¿El GitHub que siempre quisimos?"
+---
+
+El 8 de junio de 2026, un Show HN titulado "Gitdot – a better GitHub. Open-source, written in Rust" alcanzó los 201 puntos y generó 155 comentarios. El proyecto, creado por Paul Bae y Mikkel Kim —"two dudes in Brooklyn", como ellos mismos se definen—, es una alternativa a GitHub construida íntegramente en Rust y publicada bajo licencia Apache 2.0.
+
+La propuesta es ambiciosa. Pero lo que más me llamó la atención no fue la tecnología, sino el tono: su FAQ es una declaración de principios, su README no tiene estrellitas ni badges de moda, y en su página web no hay ni rastro de IA generativa. De hecho, presumen de ello.
+
+## Lo que Gitdot promete
+
+El proyecto se define con tres pilares:
+
+1. **Un servidor Git hiper-rápido escrito en Rust.** No es un wrapper de libgit2 con una interfaz bonita; están construyendo su propia capa de servidor Git desde cero, usando `git2` como base pero añadiendo su propia lógica de autenticación, permisos y almacenamiento.
+
+2. **Code review con stacked diffs como primitiva.** Esto es interesante. En GitHub, los stacked diffs son un hack construido sobre PRs normales. En Gitdot, cada diff es una unidad atómica apilable, lo que permite revisiones incrementales sin perder contexto. Si has usado Gerrit o Phabricator, sabes lo potente que es este modelo.
+
+3. **CI/CD seguro por diseño y testeable en local.** Nada de "funciona en mi máquina pero explota en CI". El runner de Gitdot es determinista y reproducible. Puedes ejecutar exactamente el mismo pipeline en tu portátil antes de pushear.
+
+Además, planean un protocolo Git cifrado de extremo a extremo. No es un detalle menor: significa que ni siquiera Gitdot podría leer tu código fuente si habilitas esa opción.
+
+## Lo que Gitdot NO tendrá
+
+Y aquí viene la parte que más debate ha generado:
+
+- **Sin copiloto de IA.** "We view AI as an implementation detail, not as a feature", dicen. En un mundo donde cada SaaS mete un chatbot con un modelo de lenguaje y lo llama "revolución", esta postura es casi contractual.
+
+- **Sin estrellas de vanidad.** ¿Para qué sirven las estrellas de GitHub realmente? Para inflar egos y alimentar páginas de "awesome lists". Gitdot las elimina.
+
+- **Sin repos privados gratis.** Los repos públicos son gratuitos. Los privados, de pago. Un modelo de negocio honesto y directo, sin vender datos ni entrenar modelos con tu código.
+
+Esta filosofía es un soplo de aire fresco. Llevamos años quejándonos de que GitHub es un monopolio, de que Microsoft entrena Copilot con nuestro código sin preguntar, de que la plataforma se ha llenado de ruido. Pero quejarse es fácil. Construir una alternativa toma agallas.
+
+## El stack técnico
+
+He estado mirando el repositorio y el `Cargo.toml`. Es un monorepo serio con 15 crates:
+
+```toml
+[workspace]
+members = [
+  "gitdot-api", "gitdot-auth", "gitdot-axum",
+  "gitdot-cli", "gitdot-config", "gitdot-consumer",
+  "gitdot-core", "gitdot-metrics", "gitdot-server",
+  "s2-api", "s2-common", "s2-sdk", "s2-server",
+]
+```
+
+La arquitectura es interesante. Separan el servidor web (`gitdot-axum`), la API (`gitdot-api`), la autenticación (`gitdot-auth`), el núcleo de dominio (`gitdot-core`) y una CLI (`gitdot-cli`). Además tienen un subsistema llamado `s2` que parece ser una capa de infraestructura propia para almacenamiento y servicios.
+
+Las dependencias cuentan una historia de pragmatismo moderno:
+
+```toml
+axum = "0.8"          # framework web async
+sqlx = "0.8.6"        # acceso a PostgreSQL sin ORM
+tokio = "1.49"        # runtime asíncrono
+slatedb = "0.10"      # base de datos embebida en disco
+git2 = "0.20.3"       # bindings de libgit2
+blake3 = "1.8"        # hashing criptográfico rápido
+rdkafka = "0.36"      # colas de mensajería con Kafka
+redis = "0.27"        # caché
+mimalloc = "0.1"      # allocator alternativo
+```
+
+No usan ORM. No usan GraphQL. No hay microservicios innecesarios. Es un stack deliberadamente aburrido donde cada pieza tiene una razón de ser. Me gusta.
+
+## Lo que pienso: mi veredicto
+
+Voy a ser sincero: he visto docenas de "alternativas a GitHub" aparecer y desaparecer. Gitea y Forgejo son probablemente las más exitosas, y aun así su cuota de mercado es minúscula. El efecto red de GitHub es brutal: todos tus colaboradores están ahí, todas las integraciones apuntan ahí, todos los reclutadores miran tu perfil de GitHub.
+
+Pero Gitdot me parece diferente por tres razones.
+
+**Primera, no intentan ser un clon.** Mientras Gitea básicamente replica la UI y funcionalidad de GitHub, Gitdot toma decisiones de diseño propias. Stacked diffs como primitiva. CI determinista. Sin estrellas. Son apuestas arriesgadas pero coherentes.
+
+**Segunda, la transparencia radical.** Publican logs de desarrollo semanales en `/weeks` donde documentan no solo el progreso sino el *por qué* de cada decisión. También tienen una carpeta `/designs` con decisiones de arquitectura. Esto es oro para cualquiera que quiera aprender cómo se construye un producto de infraestructura desde cero. En un ecosistema donde la mayoría de startups operan en modo sigiloso hasta el lanzamiento, esta apertura es valiente.
+
+**Tercera, tienen un modelo de negocio.** No dependen de VC para siempre. Repos privados de pago. Simple, directo, sostenible. Han levantado una ronda pre-seed modesta y ambos son financieramente independientes, así que no tienen la presión de crecer a toda costa.
+
+Dicho esto, hay señales de alarma. El proyecto tiene solo 5 estrellas en GitHub (aunque irónicamente eso es coherente con su filosofía anti-estrellas). Su versión actual es v0.1 y la v0.2 está planeada para julio de 2026 con "infraestructura e issues". El camino es larguísimo.
+
+Además, como señalaron varios comentaristas de HN, la etiqueta "written in Rust" está empezando a cansar. Rust no es automáticamente mejor que Go, Elixir o incluso Rails para construir una plataforma de este tipo. Pero al menos aquí la elección tiene sentido: un servidor Git necesita control sobre memoria, concurrencia y rendimiento, y Rust ofrece las tres cosas.
+
+## El código: cómo servir Git en Rust
+
+Una de las cosas que más curiosidad me daba era cómo implementan el servidor Git. Aunque el núcleo del protocolo Git delega en `git2` (los bindings de libgit2), la capa de transporte y autenticación es completamente propia. La estructura es más o menos así:
+
+```
+Cliente Git → gitdot-server (axum) → gitdot-core → git2
+                                        ↓
+                                   gitdot-auth → PostgreSQL
+                                        ↓
+                                   s2-server → almacenamiento (S3/localfs)
+```
+
+El flujo de un `git clone` pasaría por:
+
+1. La petición HTTP llega a `gitdot-server`, que la enruta según el path
+2. `gitdot-auth` verifica permisos (repo público, token de acceso, etc.)
+3. `gitdot-core` prepara el packfile usando `git2` y lo sirve como stream
+4. Las métricas van a `gitdot-metrics` y se publican vía Kafka
+
+No es magia negra. Es ingeniería sólida, paso a paso.
+
+## ¿Le veo futuro?
+
+Si tuviera que apostar, diría que Gitdot no va a destronar a GitHub. Pero tampoco lo necesita. Si consigue atraer a un nicho de maintainers hartos del ruido, las estrellas vacías y la IA metida con calzador, habrá merecido la pena.
+
+El open source necesita desesperadamente alternativas reales a GitHub. No clones, no mirrors, sino productos con opiniones propias. Gitdot es exactamente eso: un producto con personalidad, construido por dos personas que saben lo que quieren y, más importante, lo que no quieren.
+
+Y en 2026, decir "no queremos IA" es casi un acto de rebeldía. Me gusta.
+
+---
+
+**Fuente:** [gitdot.io](https://gitdot.io/) · [GitHub: bkdevs/gitdot](https://github.com/bkdevs/gitdot) · [HN #48447806](https://news.ycombinator.com/item?id=48447806) (201 puntos, 155 comentarios)
