@@ -13,7 +13,7 @@ No es que estos modelos no sepan escribir código. Es que FrontierCode mide algo
 
 ## El problema con los benchmarks actuales
 
-SWE-Bench y sus derivados llevan años siendo el estándar. Funcionan así: coges issues reales de repos GitHub, le das el enunciado al modelo, y compruebas si su patch pasa los tests.
+SWE-Bench y sus derivados llevan años siendo el estándar. Funcionan así: coges issues reales de repos GitHub, le das el enunciado al modelo y compruebas si su patch pasa los tests.
 
 El problema es que **pasar los tests no significa que el código sea bueno**. Puedes pasar todos los tests y escribir una chapuza que ningún maintainer aceptaría.
 
@@ -119,7 +119,7 @@ Aquí entra **mutagent**, una herramienta interna que usa un LLM para adaptar lo
 
 El artículo incluye un ejemplo demoledor. La tarea, extraída del repo jsonschema (C++), pide:
 
-> Encapsular todos los logs de warning en un nuevo método `auto LOG_WARNING() -> std::ostream&` en `src/logger.h`, que imprima siempre a stderr, ignore el flag `--verbose`, y anteponga el prefijo `warning:`.
+> Encapsular todos los logs de warning en un nuevo método `auto LOG_WARNING() -> std::ostream&` en `src/logger.h`, que imprima siempre a stderr, ignore el flag `--verbose` y anteponga el prefijo `warning:`.
 
 Parece sencillo. Pero hay un criterio bloqueante sutil: los mensajes multi-línea deben usar `LOG_WARNING()` de forma **idiomática**, encadenando streams:
 
