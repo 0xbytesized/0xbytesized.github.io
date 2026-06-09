@@ -1,0 +1,145 @@
+---
+title: "Postgres 19: los query hints que juraron no llegar"
+date: "2026-06-09T11:30"
+tags: ["postgresql", "bases-de-datos", "sql", "rendimiento", "postgres-19"]
+excerpt: "Tras 15 años de debate, PostgreSQL 19 incorpora pg_plan_advice y pg_stash_advice. Robert Haas ha conseguido lo imposible: hints sin los vicios de Oracle."
+---
+
+Durante más de dos décadas, la comunidad de PostgreSQL mantuvo una posición clara y monolítica sobre un tema: los _query hints_ no iban a existir. Punto. La wiki oficial lo decía sin rodeos: "No estamos interesados en implementar hints como los de otras bases de datos". Y ahí se quedaba la conversación.
+
+El 4 de junio de 2026, PostgreSQL 19 Beta 1 se publicó con dos nuevos módulos contrib: `pg_plan_advice` y `pg_stash_advice`. Su autor principal es Robert Haas, una de las figuras más respetadas del proyecto. Sí, el mismo Robert Haas que en 2010 escribió en la lista pgsql-performance: "Creo que es simplemente estúpido decir que no queremos hints. Los queremos. Solo queremos que funcionen de verdad y que no apesten".
+
+Quince años después, ha cumplido ambas condiciones.
+
+## Por qué Postgres odiaba los hints
+
+Para entender lo monumental de este cambio, hay que entender por qué la resistencia era tan feroz. No era capricho. Los hints al estilo Oracle —comentarios incrustados en el SQL que fuerzan al planificador— tienen problemas muy reales:
+
+1. **Pesadillas de mantenimiento.** El hint que arreglaba una consulta con 100K filas se convierte en un ancla cuando tienes 10M.
+2. **Se rompen al actualizar.** Cada nueva versión del optimizador puede volver obsoleto un hint y no hay forma de saberlo hasta que la consulta se arrastra.
+3. **Desincentivan el análisis real.** ¿Para qué investigar estadísticas incorrectas si puedes meter un `/*+ FULL(t) */` y olvidarte?
+4. **Impiden que el planificador mejore.** Si los DBAs no reportan bugs porque usan hints como muleta, el optimizador nunca recibe feedback real.
+
+Pero había una hipocresía tácita. Como señaló Kevin Grittner, todos los que decían odiar los hints llevaban años usando `enable_seqscan = off` para forzar un index scan, metiendo `OFFSET 0` en subconsultas para evitar que el planificador las aplanase, o usando CTEs materializadas como vallas de optimización.
+
+Eran hints sin llamarlos hints. Simplemente no estaban documentados como tales.
+
+## Lo que hace diferente a pg_plan_advice
+
+Haas no ha implementado lo que Oracle, SQL Server o MySQL llaman "hints". Ha diseñado algo distinto desde los cimientos, resolviendo cada una de las objeciones históricas.
+
+### El advice vive fuera del SQL
+
+Esta es la decisión arquitectónica clave. El advice no se escribe como comentario dentro de la consulta. Se establece mediante un GUC:
+
+```sql
+SET pg_plan_advice.advice = 'INDEX_SCAN(f idx_fact_dim_id)';
+```
+
+O se guarda en un stash externo mediante `pg_stash_advice`. La consulta SQL permanece limpia. Si mañana el advice deja de ser necesario, lo quitas de la base de datos sin tocar una línea de código de la aplicación.
+
+### El planificador no se sustituye, se guía
+
+Esto es crítico. El advice _restringe el espacio de búsqueda_ del planificador, pero no lo reemplaza. Si le dices que use un índice que no existe, el planificador lo descarta y sigue adelante. La documentación es explícita: el advice solo puede producir planes que el planificador ya considera viables.
+
+```sql
+SET pg_plan_advice.advice = $$
+  INDEX_SCAN(f idx_fact_dim_id)
+  NESTED_LOOP_PLAIN(f)
+$$;
+
+EXPLAIN (COSTS OFF, VERBOSE, PLAN_ADVICE)
+SELECT * FROM my_fact f
+  JOIN my_dim d ON f.dim_id = d.id;
+```
+
+La salida de `EXPLAIN` te dice exactamente qué pasó con cada pieza de advice: `matched`, `inapplicable`, `failed`, `conflicting` o `not matched`. No hay misterio. No hay "el hint se aplicó en silencio y ahora tu consulta tarda 40 segundos en vez de 4 milisegundos".
+
+### El planificador genera su propio advice
+
+Esta es la parte más elegante. No necesitas conocer la sintaxis del mini-lenguaje de advice para empezar:
+
+```sql
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM my_fact f
+  JOIN my_dim d ON f.dim_id = d.id;
+
+            QUERY PLAN
+----------------------------------
+ Hash Join
+   Hash Cond: (f.dim_id = d.id)
+   ->  Seq Scan on my_fact f
+   ->  Hash
+         ->  Seq Scan on my_dim d
+ Generated Plan Advice:
+   JOIN_ORDER(f d)
+   HASH_JOIN(d)
+   SEQ_SCAN(f d)
+   NO_GATHER(f d)
+```
+
+El planificador literalmente te escupe el advice que reproduce su plan actual. A partir de ahí, puedes afinarlo: quitar lo que no te importa, añadir lo que quieres forzar. Es como si el planificador te dijera "mira, esto es lo que voy a hacer; si no te gusta, dime exactamente qué quieres cambiar".
+
+## pg_stash_advice: hints en producción sin tocar código
+
+`pg_plan_advice` resuelve el caso de laboratorio: experimentar, depurar, ajustar. Pero en producción necesitas algo más. Ahí entra `pg_stash_advice`, co-desarrollado por Lukas Fittl.
+
+Funciona así: creas un stash, asocias query IDs con strings de advice y el planificador los aplica automáticamente cada vez que encuentra esas queries:
+
+```sql
+-- Crear el stash
+SELECT pg_create_advice_stash('production_tuning');
+
+-- Asociar un query ID con su advice
+SELECT pg_set_stashed_advice(
+    'production_tuning',
+    5424487836266966148,
+    'INDEX_SCAN(f idx_fact_dim_id) NESTED_LOOP_PLAIN(f)'
+);
+
+-- Activar para esta sesión (o para toda la BD, o para un rol)
+SET pg_stash_advice.stash_name = 'production_tuning';
+```
+
+Los stashes persisten a disco (por defecto) y sobreviven reinicios. No hay magia. No hay archivos de configuración crípticos. Es SQL estándar contra tu propia base de datos.
+
+Puedes asignar stashes por base de datos o por rol:
+
+```sql
+ALTER DATABASE mydb SET pg_stash_advice.stash_name = 'production_tuning';
+ALTER ROLE reporting_user SET pg_stash_advice.stash_name = 'reporting_tuning';
+```
+
+Esto es ingeniería de base de datos como debe ser: la aplicación no sabe nada, el DBA tiene control quirúrgico y cuando el planificador mejora en la versión 20, simplemente borras el stash.
+
+## El mini-lenguaje de advice
+
+La sintaxis es más expresiva de lo que esperaba. Cubre las cuatro dimensiones que un DBA quiere controlar:
+
+- **Métodos de scan:** `SEQ_SCAN`, `INDEX_SCAN`, `DO_NOT_SCAN`
+- **Orden de join:** `JOIN_ORDER` con paréntesis para orden estricto y llaves para orden flexible
+- **Métodos de join:** `HASH_JOIN`, `NESTED_LOOP_PLAIN`, `MERGE_JOIN`
+- **Paralelismo:** `GATHER`, `GATHER_MERGE`, `NO_GATHER`
+
+Un ejemplo realista que combina varios a la vez:
+
+```sql
+SET pg_plan_advice.advice =
+    'JOIN_ORDER(f d1 d2) HASH_JOIN(d1 d2) SEQ_SCAN(f) INDEX_SCAN(d1 idx_d1_pk)';
+```
+
+Esto dice: empieza por `f`, luego únete con `d1` y `d2`; las dimensiones van al lado interno de hash joins; `f` se escanea secuencialmente; `d1` usa su primary key. El planificador toma estas restricciones y construye el mejor plan que las respeta. Si alguna restricción es imposible de cumplir, la ignora y te avisa.
+
+## Mi veredicto
+
+Lo que Haas ha conseguido aquí es raro en el software: tomar una decisión de diseño que la comunidad consideraba imposible y ejecutarla de una forma que convierte a los escépticos en aliados.
+
+No es solo que haya hints. Es que el diseño resuelve _todas_ las objeciones legítimas que la comunidad había planteado durante 15 años. Los hints no viven en el SQL. No sustituyen al planificador. Degradan con gracia. Generan feedback. Se auto-documentan.
+
+Hay un paralelismo interesante con la evolución de Rust. Cuando la comunidad de Rust dijo "no queremos excepciones", no significaba "no queremos manejo de errores". Significaba "queremos algo mejor". Y salió `Result<T, E>`. Aquí es igual: la comunidad de Postgres no odiaba los hints, odiaba _los hints mal diseñados_.
+
+Las limitaciones actuales son razonables para una primera versión. No puedes controlar si los agregados usan sorting o hashing, ni la estrategia de `UNION` o `INTERSECT`. Hay un pequeño coste de rendimiento por interrumpir el bucle del planificador, así que la documentación recomienda usar esto con criterio.
+
+Pero para ese 0.1% de consultas donde el planificador se equivoca y no hay forma de arreglarlo con estadísticas, `pg_plan_advice` es justo lo que los DBAs llevaban pidiendo desde que existe PostgreSQL. Y llega sin los vicios que todo el mundo temía.
+
+Ya era hora.
