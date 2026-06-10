@@ -1,0 +1,132 @@
+---
+title: "Apple lanza su propio Docker: containers nativos en macOS"
+date: "2026-06-10T05:49"
+tags:
+  - apple
+  - containers
+  - macos
+  - swift
+  - linux
+excerpt: "Apple libera container, su propia herramienta de contenedores Linux nativos para macOS 26. Escrita en Swift, optimizada para Apple Silicon y compatible con OCI."
+---
+
+Apple acaba de abrir [container](https://github.com/apple/container), una herramienta de contenedores Linux que corre como VMs ligeras en macOS. Escrita en Swift, optimizada para Apple Silicon y OCI-compatible. En otras palabras: Apple ha construido su propio Docker — y lo ha hecho público.
+
+La noticia ha explotado en [Hacker News](https://news.ycombinator.com/item?id=48469658) con 493 puntos y 173 comentarios. Y la razón es evidente: hasta ahora correr contenedores Linux en macOS implicaba pasar por una VM intermedia (Docker Desktop, Podman Machine, Lima), con el overhead de red, filesystem y memoria que eso conlleva. `container` usa el framework de virtualización nativo de macOS 26 para ejecutar Linux directamente sobre Apple Silicon, sin capas extra.
+
+## ¿Qué es exactamente `container`?
+
+No es un fork de Docker. No es un wrapper. Es una herramienta nueva de cero, mantenida por Apple, que hace tres cosas:
+
+1. **Gestiona imágenes OCI**: puedes `pull`, `build` y `push` imágenes usando registros estándar. Las imágenes que construyas funcionan en cualquier runtime OCI — Docker, Podman, Kubernetes.
+2. **Ejecuta contenedores como VMs ligeras**: cada contenedor corre en su propia máquina virtual usando el hypervisor de macOS 26. Esto da aislamiento real sin el overhead de una VM completa.
+3. **Container Machines**: una feature nueva que modela entornos Linux completos con `systemd`, mapeo automático del home del Mac y persistencia entre reinicios.
+
+La pieza central es `container machine`. No es un contenedor efímero estilo `docker run --rm`. Es una VM Linux ligera, persistente, con tu usuario y tu home mapeados automáticamente.
+
+## Container Machines: edita en Mac, compila en Linux
+
+Esta es la feature que está generando más conversación. Un Container Machine es un entorno Linux que se integra con macOS de forma transparente:
+
+```bash
+# Crear una máquina basada en Alpine
+container machine create alpine:latest --name dev
+
+# Ejecutar un comando: usa tu usuario del host, no root
+container machine run -n dev whoami     # tu nombre de usuario
+
+# Tu home de macOS está montado dentro
+container machine run -n dev pwd        # /home/david
+
+# Shell interactivo dentro de la VM
+container machine run -n dev
+```
+
+La magia está en el mapeo de usuario y home. Tus repos, tus dotfiles, tus claves SSH — todo aparece dentro del entorno Linux sin configuración manual. Editas el código en VS Code o Xcode en macOS, compilas y ejecutas dentro de la VM Linux y ambos ven los mismos archivos.
+
+Para stacks que necesitan servicios reales, `container machine` soporta el sistema de init de la imagen:
+
+```bash
+# En una máquina Ubuntu con systemd
+container machine run -n ubuntu -- systemctl start postgresql
+```
+
+Puedes tener una máquina por distro — Alpine, Ubuntu, Debian — cada una compartiendo el mismo `$HOME` y los mismos dotfiles.
+
+### Crear tu propia imagen de máquina
+
+Cualquier imagen Linux que incluya `/sbin/init` funciona como Container Machine. Aquí tienes un Dockerfile real que construye una máquina Ubuntu con `systemd`:
+
+```dockerfile
+FROM ubuntu:24.04
+
+ENV container container
+
+RUN apt-get update && \
+    apt-get install -y \
+    dbus systemd openssh-server net-tools iproute2 \
+    iputils-ping curl wget vim-tiny man sudo && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    yes | unminimize
+
+RUN >/etc/machine-id
+RUN >/var/lib/dbus/machine-id
+
+RUN systemctl set-default multi-user.target
+RUN systemctl mask \
+      dev-hugepages.mount \
+      sys-fs-fuse-connections.mount \
+      systemd-update-utmp.service \
+      systemd-tmpfiles-setup.service \
+      console-getty.service
+```
+
+Construyes la imagen y creas la máquina:
+
+```bash
+container build -t local/ubuntu-machine:latest .
+container machine create local/ubuntu-machine:latest --name ubuntu
+```
+
+A partir de ahí, `container machine run -n ubuntu` te da una shell Ubuntu con tu home montado y `systemd` funcionando.
+
+## ¿Por qué Swift?
+
+`container` está escrito en Swift y usa el paquete [Containerization](https://github.com/apple/containerization) para la gestión de bajo nivel. Tiene sentido: Swift es el lenguaje de sistemas de Apple, con acceso directo a las APIs de virtualización de macOS que no están disponibles desde Go o Rust sin bindings complejos.
+
+El proyecto tiene 639 commits, se construye con Swift Package Manager y genera un binario que se instala en `/usr/local/bin`. La CLI sigue la filosofía de simplicidad de las herramientas de Apple: comandos planos como `container machine create`, alias cortos como `container m ls` y flags consistentes con `-n` para nombre.
+
+## El contexto: por qué esto importa ahora
+
+Docker Desktop ha sido el estándar de facto para desarrollo con contenedores en Mac durante años, pero nunca ha sido una experiencia nativa. La VM intermedia de Docker consume RAM incluso cuando no hay contenedores corriendo. El rendimiento de I/O en volúmenes montados es mediocre. Y la licencia de Docker Desktop cambió en 2021, requiriendo suscripción de pago para uso comercial en empresas grandes.
+
+Podman lleva tiempo ofreciendo una alternativa open source con Podman Machine (que usa QEMU), pero la integración con macOS nunca ha sido tan pulida. Lima + Colima ha ganado tracción como solución ligera, pero sigue siendo una capa sobre QEMU o Virtualization.framework.
+
+`container` elimina la capa intermedia. Corre directamente sobre el hypervisor de macOS sin depender de QEMU, VirtualBox ni LinuxKit. Y al ser un proyecto de Apple, puede aprovechar APIs privadas del sistema que no están disponibles para terceros.
+
+## Requisitos y estado del proyecto
+
+Hay que ser claros con las limitaciones:
+
+- **Solo Apple Silicon.** Nada de Intel. El proyecto está optimizado para M1/M2/M3/M4 y no funciona en Macs con Intel.
+- **Solo macOS 26.** La herramienta usa características nuevas de virtualización y networking que no están en versiones anteriores.
+- **Estado pre-1.0.** El README advierte que la estabilidad solo se garantiza entre versiones patch. Los releases menores pueden tener breaking changes.
+
+El proyecto está bajo licencia Apache 2.0 y acepta contribuciones. No es un producto cerrado ni un experimento interno filtrado: es un proyecto open source con guías de contribución, documentación de API y releases firmados.
+
+## Mi opinión
+
+Llevo años usando Docker Desktop en Mac con esa sensación de estar corriendo algo que no pertenece. La VM de Docker es un agujero negro de RAM, los bind mounts son lentos y el daemon se queda colgado en los peores momentos. He probado Podman, Lima, Colima — todos mejoran algo pero ninguno se siente nativo.
+
+`container` me parece el movimiento más interesante de Apple en el espacio de desarrollo en años. No es solo "otro runtime de contenedores". Es Apple diciendo: sabemos que los desarrolladores necesitan Linux para trabajar, y en lugar de ignorarlo o forzarlos a usar una VM torpe, vamos a integrarlo de verdad.
+
+Dos cosas me convencen:
+
+**Primero**, que sea open source de verdad. Apache 2.0, repo público, contribuciones aceptadas. No es un framework privado que solo funciona si compilas con Xcode. Si Apple quisiera encerrar a los developers en su ecosistema, no haría esto.
+
+**Segundo**, el diseño de Container Machines. El modelo mental de "tengo una VM Linux con mi home montado y systemd corriendo" es exactamente lo que necesito para desarrollo. No estoy pensando en contenedores efímeros ni en pods ni en orquestación. Estoy pensando en compilar, testear y ejecutar servicios en un Linux real mientras edito en macOS.
+
+Dicho esto, hay preguntas abiertas. ¿Llegará esto a CI/CD? ¿Habrá imágenes oficiales mantenidas por Apple? ¿Qué pasa con el networking entre máquinas? El proyecto está en 0.x y el camino hasta 1.0 puede ser largo. Pero la dirección es la correcta y el punto de partida es sólido.
+
+Si tienes un Mac con Apple Silicon y estás en macOS 26, instálalo y pruébalo. La experiencia de hacer `container machine create alpine:latest --name dev && container machine run -n dev` y verte dentro de un Linux con tu home es genuinamente mágica.
