@@ -1,0 +1,238 @@
+---
+title: "Tu código lo escribió una IA y nadie sabe cómo funciona"
+date: "2026-06-10T12:00"
+tags: ["ia", "codigo", "deuda-tecnica", "mantenibilidad", "vibe-coding"]
+excerpt: "El verdadero peligro del código generado por IA no son los bugs: es la complejidad silenciosa que nadie del equipo entiende y que solo la IA puede descifrar."
+---
+
+import { Image } from "astro:assets";
+
+Jesse Skinner publicó el 8 de junio un artículo titulado ["Cleaning up after AI rockstar developers"](https://www.codingwithjesse.com/blog/rockstar-developers/) que en pocas horas se coló entre lo más votado de Hacker News (más de 470 puntos y 340 comentarios). La tesis es sencilla pero demoledora: cada vez que alguien abre un chat con un LLM y le pide que escriba una feature entera, está metiendo un rockstar developer al equipo. Uno que escribe código que solo él entiende, que no le importa si rompe el resto del sistema y que —esta es la parte crucial— mañana no recordará nada de lo que hizo hoy.
+
+## El rockstar que todos conocemos
+
+Todos hemos trabajado con uno. Llegó al equipo hace unos años, reescribió la arquitectura core en un fin de semana, metió tres lenguajes nuevos y rechazaba el 90% de los PRs porque «no estaban a la altura». Su código era brillante, indescifrable y completamente inmantenible para cualquiera que no fuera él. Cuando se fue a otro proyecto más interesante, el equipo tardó meses en entender lo que había dejado.
+
+Ahora multiplica eso por cien. Porque cada sesión de chat con una IA es un rockstar distinto. Uno que escribe veinte mil líneas en minutos, que no tiene contexto del sistema, que aplica patrones que no encajan y que jamás tendrá que hacer mantenimiento de lo que generó.
+
+## El problema no es que funcione mal
+
+El discurso habitual sobre código generado por IA se centra en los bugs. ¿Cuántos fallos introduce? ¿Qué porcentaje de líneas hay que corregir? Es una conversación necesaria pero incompleta. El verdadero problema es más sutil y mucho más caro: la complejidad que se acumula sin que nadie la entienda.
+
+Imagina que pides a un LLM que implemente un sistema de autenticación con roles. El agente te suelta esto:
+
+```python
+# Lo que te genera la IA cuando le pides "autenticación con roles"
+from functools import wraps
+from typing import Callable, TypeVar, ParamSpec, Concatenate
+from dataclasses import dataclass, field
+from enum import Enum, auto
+import hashlib, hmac, secrets, time, json
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+class Permission(Enum):
+    READ = auto()
+    WRITE = auto()
+    ADMIN = auto()
+    DELETE = auto()
+    EXECUTE = auto()
+
+@dataclass(frozen=True)
+class Role:
+    name: str
+    permissions: frozenset[Permission] = field(default_factory=frozenset)
+
+    def can(self, perm: Permission) -> bool:
+        return perm in self.permissions
+
+class RoleRegistry:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._roles: dict[str, Role] = {}
+        return cls._instance
+
+    def register(self, role: Role) -> None:
+        self._roles[role.name] = role
+
+    def get(self, name: str) -> Role | None:
+        return self._roles.get(name)
+
+def require_role(role_name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorator(fn: Callable[P, R]) -> Callable[P, R]:
+        @wraps(fn)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            registry = RoleRegistry()
+            role = registry.get(role_name)
+            if role is None:
+                raise PermissionError(f"Role {role_name} not found")
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+# 200 líneas más de AbstractSessionManager, TokenRefresher,
+# OAuth2ProviderFactory, etc.
+```
+
+Esto es código real que un LLM puede generar. ¿Funciona? Probablemente. ¿Es correcto? En su mayoría. Pero mete un singleton, tipos genéricos avanzados de Python 3.12, herencia múltiple, un Enum con cinco niveles —para un proyecto que solo necesita distinguir entre «usuario normal» y «admin»— y una clase `RoleRegistry` que es básicamente un `dict` disfrazado.
+
+El código compila. Pasa los tests. Pero nadie del equipo va a entender por qué demonios hay un `ParamSpec` cuando ni siquiera lo necesitaban.
+
+## Lo mismo, pero mantenible
+
+Aquí está la versión que escribirías tú si supieras que mañana te toca mantenerla:
+
+```python
+# auth.py — justo lo necesario, nada más
+from dataclasses import dataclass
+from functools import wraps
+from typing import Callable
+
+@dataclass
+class User:
+    id: str
+    name: str
+    is_admin: bool = False
+
+def require_admin(fn: Callable) -> Callable:
+    @wraps(fn)
+    def wrapper(user: User, *args, **kwargs):
+        if not user.is_admin:
+            raise PermissionError("Admin access required")
+        return fn(user, *args, **kwargs)
+    return wrapper
+
+# Uso
+@require_admin
+def delete_all_users(user: User) -> None:
+    ...
+```
+
+Son nueve líneas. No hay singletons, no hay registros de roles, no hay genéricos de typing que ocupan tres import. Si tu proyecto solo tiene dos tipos de usuario, esto es suficiente. Y si mañana necesitas roles, el salto a un sistema más complejo es trivial porque la interfaz (`require_admin`) no cambia.
+
+## El coste real: dependencia circular
+
+El patrón más inquietante que describe Skinner es el bucle de dependencia: generas tanto código con IA que el sistema se vuelve tan complejo que la única forma de entenderlo es... usar más IA. El desarrollador se convierte en un intermediario entre dos sesiones de chat, copiando y pegando contexto de una a otra sin entender realmente lo que pasa por el medio.
+
+He visto este patrón en proyectos reales. Un endpoint de 40 líneas que podría ser 12 termina siendo 200 porque el LLM metió tres capas de abstracción que nadie pidió. Y cada vez que hay que tocar ese endpoint, el desarrollador vuelve a abrir el chat:
+
+> «Mira, tengo este código [pega 200 líneas]. Necesito añadir un campo a la respuesta. Hazlo sin romper nada.»
+
+El LLM obedece. El endpoint ahora tiene 240 líneas. El ciclo se repite.
+
+```javascript
+// Ejemplo realista: endpoint "simple" generado por IA
+// que se ha ido inflando sesión tras sesión
+
+// Sesión 1: "crea un endpoint para obtener proyectos"
+// Sesión 2: "añade filtros por status"
+// Sesión 3: "añade paginación"
+// Sesión 4: "añade ordenación"
+// Sesión 7: "añade campos calculados y caché"
+
+async function getProjects(req, res) {
+  // Validación que podría ser un middleware
+  const { page = 1, limit = 10, status, sortBy, sortDir } = req.query;
+  if (page < 1 || limit < 1 || limit > 100) {
+    return res.status(400).json({ error: "Invalid pagination" });
+  }
+
+  // Caché inline que debería estar en otra capa
+  const cacheKey = `projects:${JSON.stringify(req.query)}`;
+  const cached = await redis.get(cacheKey);
+  if (cached) return res.json(JSON.parse(cached));
+
+  // Builder de consulta con 4 niveles de anidación
+  let query = db.select("*").from("projects");
+
+  if (status) {
+    if (Array.isArray(status)) {
+      query = query.whereIn("status", status);
+    } else {
+      query = query.where("status", status);
+    }
+  }
+
+  // Ordenación con whitelist que el LLM generó
+  // pero que nadie revisó si cubre todos los campos
+  const allowedSorts = ["name", "created_at", "updated_at", "status"];
+  if (sortBy && allowedSorts.includes(sortBy)) {
+    query = query.orderBy(sortBy, sortDir === "desc" ? "desc" : "asc");
+  }
+
+  const countQuery = db.select(db.raw("COUNT(*)")).from("projects");
+  // ... 30 líneas más de lógica duplicada para el count
+
+  const [projects, [{ count }]] = await Promise.all([
+    query.limit(limit).offset((page - 1) * limit),
+    countQuery,
+  ]);
+
+  // "Enriquecimiento" de datos que nadie sabe si se usa
+  const enriched = await Promise.all(
+    projects.map(async (p) => ({
+      ...p,
+      ownerName: (await db.select("name").from("users")
+        .where("id", p.owner_id).first())?.name ?? "Unknown",
+      taskCount: (await db.select(db.raw("COUNT(*)")).from("tasks")
+        .where("project_id", p.id).first())?.count ?? 0,
+    }))
+  );
+
+  await redis.set(cacheKey, JSON.stringify(enriched), "EX", 60);
+  return res.json(enriched);
+}
+```
+
+Este código «funciona». Pero mira lo que está pasando: el `ownerName` y `taskCount` generan N+1 consultas. La caché se invalida por query string completo, así que `?sortBy=name` y `?sortBy=name&sortDir=asc` son dos claves distintas para los mismos datos. La whitelist de ordenación es correcta pero está hardcodeada. Y lo peor: nadie sabe si esos campos enriquecidos se usan realmente en el frontend.
+
+La versión mantenible separa responsabilidades:
+
+```javascript
+// Proyectos reales: separar validación, consulta y serialización
+
+// 1. Validación como middleware reutilizable
+const paginationSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+  status: z.enum(["active", "archived", "draft"]).optional(),
+  sortBy: z.enum(["name", "created_at", "status"]).optional(),
+  sortDir: z.enum(["asc", "desc"]).default("desc"),
+});
+
+// 2. Consulta sin magic strings ni lógica condicional a granel
+function buildProjectQuery(filters) {
+  return db("projects")
+    .modify((qb) => {
+      if (filters.status) qb.where("status", filters.status);
+      if (filters.sortBy) qb.orderBy(filters.sortBy, filters.sortDir);
+    });
+}
+
+// 3. Endpoint: 8 líneas, cada pieza es testeable por separado
+async function getProjects(req, res) {
+  const filters = paginationSchema.parse(req.query);
+  const projects = await buildProjectQuery(filters)
+    .withOwnerName()      // joined, no N+1
+    .withTaskCount()      // joined, no N+1
+    .paginate(filters.page, filters.limit);
+
+  res.json(projects);
+}
+```
+
+La diferencia no está en si el código «funciona» —ambos funcionan— sino en si alguien puede leerlo, testearlo, extenderlo y depurarlo sin abrir otra sesión de chat. La primera versión genera dependencia de la herramienta. La segunda te devuelve el control.
+
+## Mi veredicto
+
+El artículo de Skinner da en el clavo con algo que llevo meses observando: la conversación sobre IA y código está obsesionada con métricas equivocadas. Medimos velocidad de generación, porcentaje de aceptación en PRs, líneas producidas por hora. Pero nadie está midiendo el coste de mantenimiento a seis meses vista.
+
+Un rockstar humano al menos tenía intención. Su diseño, por retorcido que fuera, respondía a una visión —equivocada o no, pero visión al fin y al cabo. El código generado por IA es distinto: es una colcha de retazcos cosidos por cien rockstars distintos que nunca hablaron entre sí. No hay diseño. No hay intención unificada. Solo hay respuestas a prompts.
+
+Esto no significa que haya que tirar las herramientas de IA a la basura. Significa que hay que usarlas como un desarrollador senior, no como un pasante que copia y pega sin leer. Pide snippets pequeños. Revisa cada línea. Refactoriza antes de hacer commit. Si no entiendes lo que generó el LLM, no lo aceptes. Punto.
+
+Porque al final, el código que perdura no es el más rápido de escribir. Es el que otro humano puede leer un año después sin querer tirarse por la ventana.
