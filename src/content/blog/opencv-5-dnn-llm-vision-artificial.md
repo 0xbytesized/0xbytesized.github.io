@@ -37,7 +37,7 @@ net = cv.dnn.readNetFromONNX("modelo.onnx")
 net = cv.dnn.readNetFromONNX("modelo.onnx", engine=cv.dnn.ENGINE_NEW)
 
 # Usar ONNX Runtime directamente (si se compiló con soporte)
-net = cv.dnn.readNetFromONNX("modelo.onnx", engine=cv.dnn.ENGINE_ONNX_RUNTIME)
+net = cv.dnn.readNetFromONNX("modelo.onnx", engine=cv.dnn.ENGINE_ORT)
 
 net.setInput(blob)
 salida = net.forward()
@@ -51,13 +51,13 @@ En benchmarks contra ONNX Runtime en CPU (Core i9-14900KS, Ubuntu 24.04), el mot
 
 Esta es la parte que todavía me hace arquear una ceja. OpenCV 5 puede ejecutar **modelos de lenguaje y modelos de visión-lenguaje** directamente dentro del módulo DNN, sin un runtime separado.
 
-Para conseguirlo han metido dos cosas que una librería de visión clásica nunca había necesitado: un **tokenizador** integrado y un **gestor de caché KV** para decodificación autorregresiva. Esto funciona con Qwen 2.5, Gemma 3, PaliGemma y la familia GPT-2.
+Para conseguirlo han metido dos cosas que una librería de visión clásica nunca había necesitado: un **tokenizador** integrado y un **gestor de caché KV** para decodificación autorregresiva. Esto funciona con Qwen 2.5, Gemma 3 y la familia GPT-2.
 
 ```python
 import cv2 as cv
 
 # Un VLM (visión-lenguaje) corriendo dentro de OpenCV
-net = cv.dnn.readNetFromONNX("paligemma.onnx")
+net = cv.dnn.readNetFromONNX("gemma3.onnx")
 
 # Preparar imagen + prompt de texto
 blob = cv.dnn.blobFromImages([img], scalefactor=1/255.0)
@@ -88,7 +88,7 @@ Un solo `forward()`. Sin dependencias externas. El ejemplo completo está en `sa
 
 La detección y emparejamiento de características es uno de los trabajos más antiguos de OpenCV. Durante años fue SIFT u ORB y punto. OpenCV 5 incorpora un pipeline neuronal completo como ciudadano de primera clase:
 
-- **SuperPoint** — detector y descriptor basado en CNN que encaja en los mismos puntos de llamada donde usabas SIFT.
+- **ALIKED** — detector y descriptor basado en CNN que encaja en los mismos puntos de llamada donde usabas SIFT.
 - **DISK** — características aprendidas con _reinforcement learning_, fuerte en escenas con poca textura.
 - **LightGlue** — un _matcher_ basado en atención que produce emparejamientos con puntuación de confianza.
 

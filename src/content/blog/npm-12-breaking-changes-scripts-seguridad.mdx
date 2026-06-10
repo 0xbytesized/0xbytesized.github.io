@@ -50,15 +50,11 @@ Esto escribe la lista de aprobación directamente en tu `package.json`:
 
 ```json
 {
-  "scripts": {
-    "allow": {
-      "core-js": ["postinstall"],
-      "esbuild": ["postinstall"],
-      "puppeteer": ["postinstall"]
-    },
-    "deny": {
-      "node-sass": ["install"]
-    }
+  "allowScripts": {
+    "core-js": true,
+    "esbuild": true,
+    "puppeteer": true,
+    "node-sass": false
   }
 }
 ```

@@ -82,7 +82,7 @@ El planificador literalmente te escupe el advice que reproduce su plan actual. A
 
 ## pg_stash_advice: hints en producción sin tocar código
 
-`pg_plan_advice` resuelve el caso de laboratorio: experimentar, depurar, ajustar. Pero en producción necesitas algo más. Ahí entra `pg_stash_advice`, co-desarrollado por Lukas Fittl.
+`pg_plan_advice` resuelve el caso de laboratorio: experimentar, depurar, ajustar. Pero en producción necesitas algo más. Ahí entra `pg_stash_advice`, con revisiones de Lukas Fittl.
 
 Funciona así: creas un stash, asocias query IDs con strings de advice y el planificador los aplica automáticamente cada vez que encuentra esas queries:
 
@@ -118,7 +118,7 @@ La sintaxis es más expresiva de lo que esperaba. Cubre las cuatro dimensiones q
 
 - **Métodos de scan:** `SEQ_SCAN`, `INDEX_SCAN`, `DO_NOT_SCAN`
 - **Orden de join:** `JOIN_ORDER` con paréntesis para orden estricto y llaves para orden flexible
-- **Métodos de join:** `HASH_JOIN`, `NESTED_LOOP_PLAIN`, `MERGE_JOIN`
+- **Métodos de join:** `HASH_JOIN`, `NESTED_LOOP_PLAIN`, `MERGE_JOIN_MATERIALIZE`, `MERGE_JOIN_PLAIN`
 - **Paralelismo:** `GATHER`, `GATHER_MERGE`, `NO_GATHER`
 
 Un ejemplo realista que combina varios a la vez:
