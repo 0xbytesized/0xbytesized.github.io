@@ -1,0 +1,145 @@
+---
+title: "GeoLibre 1.0: GIS open source para navegador y escritorio"
+date: "2026-06-11T12:41"
+tags: ["gis", "open-source", "typescript", "duckdb", "tauri"]
+excerpt: "GeoLibre 1.0 mete DuckDB-WASM, Tauri y MapLibre en un GIS que funciona igual en navegador, escritorio y Jupyter. SQL espacial en el browser, sin servidor."
+---
+
+Hace unos días apareció en Hacker News un proyecto que me hizo parar de hacer scroll: **GeoLibre 1.0**. No es otro visor de mapas más. Es un GIS completo — con SQL espacial, herramientas de geometría, plugins y hasta un paquete de Python para Jupyter — que corre en tres entornos distintos con el mismo código. Y es open source, licencia MIT.
+
+La parte que más me flipa: puedes lanzar consultas SQL espaciales contra capas vectoriales **directamente en el navegador**, sin servidor, gracias a DuckDB-WASM. Eso antes requería PostGIS y un backend. Ahora lo hace un archivo .wasm de 20 MB en tu pestaña del browser.
+
+## El stack técnico: una decisión valiente
+
+GeoLibre no se anda con medias tintas. Su stack es:
+
+- **Tauri v2** para el escritorio nativo (Rust, sin Electron)
+- **React + TypeScript** para la UI
+- **MapLibre GL JS** como motor de mapas (fork open source de Mapbox GL)
+- **DuckDB-WASM Spatial** para consultas SQL en el navegador
+- **deck.gl** para capas 3D avanzadas
+
+Lo interesante no es cada pieza por separado, sino cómo las han ensamblado. Tauri les da un binario de escritorio ligero (nada de 500 MB de Chromium). DuckDB-WASM les da un motor analítico completo sin backend. Y MapLibre les da libertad frente a las API keys de Mapbox.
+
+El resultado es que el mismo workspace funciona en tres entornos sin cambios en el código de la app:
+
+```typescript
+// La misma lógica de capas corre en los tres entornos
+// Tauri expone APIs nativas cuando está disponible; si no, el browser basta
+
+const layer = await loadGeoJSON(url);
+map.addLayer(layer);
+// Esto funciona igual en:
+// 1. npm run dev (browser)
+// 2. npm run tauri:dev (escritorio nativo)
+// 3. from geolibre import Map (Jupyter)
+```
+
+## SQL espacial en el navegador: la killer feature
+
+Esto es lo que de verdad me dejó con la boca abierta. Abres el SQL Workspace desde el menú Processing y tienes un editor SQL completo contra tus capas. DuckDB-WASM con la extensión Spatial cargada. Sin instalar nada. Sin servidor.
+
+Puedes hacer cosas como:
+
+```sql
+-- Consulta contra un Parquet remoto de 200+ países
+SELECT NAME, CONTINENT, POP_EST, geom
+FROM 'https://data.source.coop/giswqs/opengeos/countries.parquet'
+WHERE POP_EST > 50000000
+ORDER BY POP_EST DESC;
+```
+
+El archivo Parquet no se descarga entero. DuckDB-WASM usa HTTP range requests para leer solo las columnas y filas que necesita. Puedes consultar un dataset de gigabytes desde una pestaña del navegador y obtener resultados en milisegundos.
+
+Y no es solo SELECT. Puedes hacer JOINs espaciales, buffers, intersecciones:
+
+```sql
+-- Ciudades a menos de 100 km de la costa
+SELECT c.NAME, c.POP_MAX
+FROM 'cities.parquet' AS c
+JOIN 'coastline.geojson' AS o
+  ON ST_DWithin(c.geom, o.geom, 100000)
+WHERE c.POP_MAX > 1000000;
+```
+
+El resultado lo añades al mapa como una capa nueva o lo exportas como CSV/GeoParquet. Todo en el browser.
+
+## Herramientas de geometría con tres motores a elegir
+
+El menú Processing → Vector tiene las operaciones clásicas: buffer, centroides, convex hull, dissolve, clip, intersection, difference, union. Pero lo inteligente es que ofrecen **tres backends distintos** para ejecutarlas:
+
+1. **Turf.js** — todo en el navegador, cero dependencias externas
+2. **GeoPandas sidecar** — un servidor Python local para precisión con proyecciones reales
+3. **Pyodide** — GeoPandas/Shapely corriendo en el navegador vía WebAssembly, sin servidor
+
+El tercer motor es brillante. Pyodide descarga el runtime de Python una sola vez (desde CDN o self-hosted) y ejecuta el mismo código de GeoPandas que el sidecar, pero sin necesidad de un proceso externo. Los resultados son idénticos porque ambos comparten el mismo archivo `vector_ops.py`.
+
+Para el procesamiento ráster (hillshade, slope, contour, polygonize) sí necesitas el sidecar con rasterio, porque no hay forma de correr eso en WASM todavía. Pero el 80% del trabajo diario con vectores se resuelve sin salir del navegador.
+
+## Python y Jupyter: el GIS que vive en tu notebook
+
+Esto es otra decisión de diseño que me gusta mucho. GeoLibre no es solo una app de escritorio o web. Es también un paquete de Python (`pip install geolibre`) que embebe la app completa en una celda de Jupyter como un anywidget:
+
+```python
+from geolibre import Map
+
+m = Map(center=(-100, 40), zoom=4)
+m.add_geojson("https://example.com/data.geojson", name="Datos")
+m.add_tile_layer(
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    name="OpenStreetMap"
+)
+m.add_cog("https://example.com/dem.tif", name="DEM")
+
+# Renderiza la UI completa de GeoLibre en la celda
+m
+```
+
+Y la sincronización es bidireccional. Si el usuario mueve el mapa en la UI, puedes leer la nueva posición desde Python:
+
+```python
+m.to_project()["mapView"]["center"]  # Refleja lo que el usuario ve tras hacer pan
+# => [-99.13, 41.25]
+```
+
+Esto es potente para flujos de análisis: preparas datos en Python, los visualizas en la UI, el usuario explora y selecciona áreas de interés, y vuelves a leer el estado desde Python para continuar el pipeline. Sin exportar archivos intermedios, sin cambiar de herramienta.
+
+## Plugins y marketplace: extensible desde el día 1
+
+GeoLibre 1.0 ya trae un sistema de plugins con marketplace integrado. Viene con varios built-in: Time Slider para animar series temporales, Overture Maps, LiDAR, Street View (Google y Mapillary), GeoAgent y GeoEditor. Pero puedes instalar plugins externos desde el marketplace sin reiniciar la app.
+
+Los plugins se empaquetan como zip y se cargan desde el directorio de datos de la app. Para desarrollo local, GeoLibre lee plugins desde un directorio de trabajo sin necesidad de empaquetarlos. El sistema de manifiestos permite que un plugin declare su posición en los controles del mapa, sus dependencias y su configuración.
+
+## Mi opinión
+
+GeoLibre me parece uno de esos proyectos que aciertan en el *timing* tecnológico. Hace tres años esto no era viable: DuckDB-WASM no existía, Tauri estaba en pañales, Pyodide era experimental. Hoy todas esas piezas están maduras y GeoLibre las ensambla de forma coherente.
+
+Lo que más valoro:
+
+- **Cero fricción para empezar.** Abres el navegador, cargas un GeoJSON y ya estás haciendo SQL espacial. No hay registro, no hay API key, no hay instalación.
+- **El mismo código en tres entornos.** No es un wrapper fino alrededor de una webview. La app de escritorio, la web y el widget de Jupyter comparten el mismo core.
+- **Privacidad por diseño.** Los datos se procesan en el navegador. Solo salen de tu máquina cuando tú decides añadir una URL remota o compartir un proyecto.
+
+Lo que echo en falta:
+
+- El procesamiento ráster sin sidecar. Entiendo que rasterio no corre en WASM, pero me gustaría ver un motor ráster básico en el navegador para operaciones simples.
+- Una galería de proyectos compartidos más grande. Ahora mismo hay pocos ejemplos públicos en share.geolibre.app.
+- Documentación en español. Todo está en inglés, y siendo un proyecto con alcance global, traducir los tutoriales básicos abriría mucho mercado.
+
+Dicho esto, para ser una versión 1.0, el nivel de acabado es impresionante. La UI es limpia, los menús están bien organizados, el SQL Workspace tiene historial y ejemplos precargados y los diálogos de herramientas son consistentes. Se nota que hay horas de pulido detrás.
+
+## ¿Para quién es?
+
+Si trabajas con datos geoespaciales y tu flujo actual es QGIS + Python + PostGIS, GeoLibre no va a reemplazar todo eso mañana. Pero cubre un nicho que ninguna otra herramienta open source cubre bien: **análisis geoespacial rápido, sin fricción, que funciona en cualquier parte**.
+
+Para docencia es oro puro. Un profesor puede compartir un proyecto .geolibre.json, los alumnos lo abren en el navegador sin instalar nada, y en cinco minutos están haciendo consultas SQL espaciales.
+
+Para dashboards y embebidos también es ideal. El modo `maponly` te da un mapa limpio sin chrome que puedes embeber en un iframe con una URL:
+
+```text
+https://viewer.geolibre.app/?url=https://share.geolibre.app/...&maponly
+```
+
+Y para científicos de datos que viven en Jupyter, tener un GIS completo en una celda — con UI, herramientas de geometría y SQL — es un salto de productividad frente a folium o ipyleaflet.
+
+GeoLibre 1.0 es de esos proyectos que miras y piensas: "esto es lo que debería existir". Y ahora existe.
