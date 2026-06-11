@@ -7,7 +7,7 @@ excerpt: "El verdadero peligro del código generado por IA no son los bugs: es l
 
 import { Image } from "astro:assets";
 
-Jesse Skinner publicó el 8 de junio un artículo titulado ["Cleaning up after AI rockstar developers"](https://www.codingwithjesse.com/blog/rockstar-developers/) que en pocas horas se coló entre lo más votado de Hacker News (más de 470 puntos y 340 comentarios). La tesis es sencilla pero demoledora: cada vez que alguien abre un chat con un LLM y le pide que escriba una feature entera, está metiendo un rockstar developer al equipo. Uno que escribe código que solo él entiende, que no le importa si rompe el resto del sistema y que —esta es la parte crucial— mañana no recordará nada de lo que hizo hoy.
+Jesse Skinner publicó el 8 de junio un artículo titulado ["Cleaning up after AI rockstar developers"](https://www.codingwithjesse.com/blog/rockstar-developers/) que en pocas horas se coló entre lo más votado de Hacker News (más de 470 puntos y 340 comentarios). La tesis es sencilla pero demoledora: cada vez que alguien abre un chat con un LLM y le pide que escriba una funcionalidad entera, está metiendo un rockstar developer al equipo. Uno que escribe código que solo él entiende, que no le importa si rompe el resto del sistema y que —esta es la parte crucial— mañana no recordará nada de lo que hizo hoy.
 
 ## El rockstar que todos conocemos
 
@@ -112,7 +112,7 @@ def delete_all_users(user: User) -> None:
     ...
 ```
 
-Son nueve líneas. No hay singletons, no hay registros de roles, no hay genéricos de typing que ocupan tres import. Si tu proyecto solo tiene dos tipos de usuario, esto es suficiente. Y si mañana necesitas roles, el salto a un sistema más complejo es trivial porque la interfaz (`require_admin`) no cambia.
+Son nueve líneas. No hay singletons, no hay registros de roles, no hay genéricos de typing que ocupan tres líneas de import. Si tu proyecto solo tiene dos tipos de usuario, esto es suficiente. Y si mañana necesitas roles, el salto a un sistema más complejo es trivial porque la interfaz (`require_admin`) no cambia.
 
 ## El coste real: dependencia circular
 
@@ -188,7 +188,7 @@ async function getProjects(req, res) {
 }
 ```
 
-Este código «funciona». Pero mira lo que está pasando: el `ownerName` y `taskCount` generan N+1 consultas. La caché se invalida por query string completo, así que `?sortBy=name` y `?sortBy=name&sortDir=asc` son dos claves distintas para los mismos datos. La whitelist de ordenación es correcta pero está hardcodeada. Y lo peor: nadie sabe si esos campos enriquecidos se usan realmente en el frontend.
+Este código «funciona». Pero mira lo que está pasando: el `ownerName` y `taskCount` generan N+1 consultas. La caché se invalida por query string completo, así que `?sortBy=name` y `?sortBy=name&sortDir=asc` son dos claves distintas para los mismos datos. La whitelist de ordenación es correcta pero está embebida en el código. Y lo peor: nadie sabe si esos campos enriquecidos se usan realmente en el frontend.
 
 La versión mantenible separa responsabilidades:
 
@@ -231,7 +231,7 @@ La diferencia no está en si el código «funciona» —ambos funcionan— sino 
 
 El artículo de Skinner da en el clavo con algo que llevo meses observando: la conversación sobre IA y código está obsesionada con métricas equivocadas. Medimos velocidad de generación, porcentaje de aceptación en PRs, líneas producidas por hora. Pero nadie está midiendo el coste de mantenimiento a seis meses vista.
 
-Un rockstar humano al menos tenía intención. Su diseño, por retorcido que fuera, respondía a una visión —equivocada o no, pero visión al fin y al cabo. El código generado por IA es distinto: es una colcha de retazcos cosidos por cien rockstars distintos que nunca hablaron entre sí. No hay diseño. No hay intención unificada. Solo hay respuestas a prompts.
+Un rockstar humano al menos tenía intención. Su diseño, por retorcido que fuera, respondía a una visión —equivocada o no, pero visión al fin y al cabo. El código generado por IA es distinto: es una colcha de retazos cosidos por cien rockstars distintos que nunca hablaron entre sí. No hay diseño. No hay intención unificada. Solo hay respuestas a prompts.
 
 Esto no significa que haya que tirar las herramientas de IA a la basura. Significa que hay que usarlas como un desarrollador senior, no como un pasante que copia y pega sin leer. Pide snippets pequeños. Revisa cada línea. Refactoriza antes de hacer commit. Si no entiendes lo que generó el LLM, no lo aceptes. Punto.
 

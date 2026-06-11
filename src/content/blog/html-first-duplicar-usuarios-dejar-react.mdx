@@ -5,9 +5,9 @@ tags: ["html", "react", "astro", "progressive-enhancement", "web-performance"]
 excerpt: "Una utility dejó React por HTML plano con Astro y duplicó usuarios en 24h. No es teoría: es lo que pasa cuando priorizas a los usuarios reales sobre el ruido del ecosistema."
 ---
 
-Hace unas horas Alistair Davidson publicó un artículo que ha reventado Hacker News con 738 puntos y más de 340 comentarios. Trabajaba como contractor para una compañía de servicios públicos — un monopolio regulado donde bajar del 96% de satisfacción son millones en multas. El problema: los clientes no conseguían completar el formulario de alta.
+Hace unas horas Alistair Davidson publicó un artículo que ha reventado Hacker News, acumulando más de 1,200 puntos y 500 comentarios. Trabajaba como contratista para una compañía de servicios públicos — un monopolio regulado donde bajar del 96% de satisfacción son millones en multas. El problema: los clientes no conseguían completar el formulario de alta.
 
-Habían intentado dos cosas antes de que llegara Alistair. Un formulario ASP clásico que envejecía mal y un proceso manual carísimo. Luego externalizaron una app en React a contratistas en otro país. Duró tres días online antes de que la quitaran por quejas. Alistair la revisó y le dijo a su jefe: "no podemos hacernos cargo de esto". Spinners por todas partes, estados globales en JavaScript, imágenes metidas en localStorage con un límite de 5 MB, cero accesibilidad.
+Habían intentado dos cosas antes de que llegara Alistair. Un formulario ASP clásico que envejecía mal y un proceso manual carísimo. Luego externalizaron una app en React a contratistas en otro país. Duró tres días en línea antes de que la quitaran por quejas. Alistair la revisó y le dijo a su jefe: "no podemos hacernos cargo de esto". Indicadores de carga por todas partes, estados globales en JavaScript, imágenes metidas en localStorage con un límite de 5 MB, cero accesibilidad.
 
 Lo que hizo después es la parte que merece atención.
 
@@ -17,7 +17,7 @@ Construyó la nueva versión con [Astro](https://astro.build), un framework que 
 
 ¿Su razonamiento? Una utility es un servicio público. Tus usuarios no están en un coworking con un MacBook Pro y fibra de 600 Mbps. Están en medio de una urbanización a medio construir con un Android de hace diez años comprado en el súper, tirando de 3G. Mandarles 20 MB de JavaScript antes de pintar un `<form>` es una salvajada.
 
-El patrón es viejo pero efectivo: cada paso del wizard del formulario es su propia página. El usuario hace clic en "Siguiente", el form hace submit vía POST tradicional, el backend valida, guarda los datos en sesión y redirige a la página siguiente. Si todo falla, los datos ya están a salvo en el servidor. Nada de perder una solicitud a medio rellenar porque el teléfono se quedó sin batería.
+El patrón es viejo pero efectivo: cada paso del asistente del formulario es su propia página. El usuario hace clic en "Siguiente", el formulario se envía vía POST tradicional, el backend valida, guarda los datos en sesión y redirige a la página siguiente. Si todo falla, los datos ya están a salvo en el servidor. Nada de perder una solicitud a medio rellenar porque el teléfono se quedó sin batería.
 
 ## Código: validación nativa en menos de 1 KB
 
@@ -109,7 +109,7 @@ No es un 20% más pequeño. Es un orden de magnitud. Y lo más bestia: si el JS 
 
 ## Lo que pasó al desplegar
 
-Cuando lanzaron la nueva versión, el número de formularios completados se duplicó. El equipo de analytics no entendía de dónde salían esos usuarios. La respuesta es incómoda: tu paquete de analytics basado en JavaScript no ve a los usuarios que estás rebotando por culpa del JavaScript que no se carga.
+Cuando lanzaron la nueva versión, el número de formularios completados se duplicó. El equipo de analítica no entendía de dónde salían esos usuarios. La respuesta es incómoda: tu paquete de analytics basado en JavaScript no ve a los usuarios que estás rebotando por culpa del JavaScript que no se carga.
 
 Hubo un caso que lo resume todo: alguien completó un formulario un mes después de empezarlo. Como cada paso guardaba los datos en sesión del lado del servidor, la persona pudo retomar exactamente donde lo dejó. Intenta hacer eso con un estado metido en un store de Zustand.
 
@@ -117,9 +117,9 @@ Hubo un caso que lo resume todo: alguien completó un formulario un mes después
 
 El artículo de Alistair ha pegado fuerte porque toca un nervio. Llevamos una década construyendo webs como si todo el mundo tuviera un iPhone 17 con 5G ilimitado. La realidad de la mayoría de usuarios — y hablo de España, de Europa, no de contextos extremos — es mucho más precaria de lo que el developer medio asume desde su oficina.
 
-Lo que más me gusta del caso no es la tecnología. Es la claridad moral: "esto es un servicio público, debe funcionar para todo el mundo, sin excusas". Y luego ejecutó con herramientas que ya existen. No inventó un framework. No escribió un manifesto. Cogió Astro, HTML y un web component de 1 KB y duplicó las conversiones.
+Lo que más me gusta del caso no es la tecnología. Es la claridad moral: "esto es un servicio público, debe funcionar para todo el mundo, sin excusas". Y luego ejecutó con herramientas que ya existen. No inventó un framework. No escribió un manifiesto. Cogió Astro, HTML y un web component de 1 KB y duplicó las conversiones.
 
-Hay una frase del artículo que me dejó pensando. Cuando Alistair le explicó a su reemplazo que el sitio funcionaba sin JavaScript, la respuesta fue "pero eso nos da más trabajo a nosotros". Ahí está el problema de fondo. No es técnico, es cultural. Nos hemos convencido de que la complejidad es inevitable y que los usuarios deben pagar el pato con cargas de 20 segundos y spinners infinitos.
+Hay una frase del artículo que me dejó pensando. Cuando Alistair le explicó a su reemplazo que el sitio funcionaba sin JavaScript, la respuesta fue "pero eso nos da más trabajo a nosotros". Ahí está el problema de fondo. No es técnico, es cultural. Nos hemos convencido de que la complejidad es inevitable y que los usuarios deben pagar el pato con cargas de 20 segundos y ruedas de carga infinitas.
 
 No es verdad. HTML funciona. Lleva funcionando 30 años. Y el día que priorizas a los usuarios reales en lugar de a tu comodidad como desarrollador, los números hablan solos.
 

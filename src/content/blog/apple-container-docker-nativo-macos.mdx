@@ -10,9 +10,9 @@ tags:
 excerpt: "Apple libera container, su propia herramienta de contenedores Linux nativos para macOS 26. Escrita en Swift, optimizada para Apple Silicon y compatible con OCI."
 ---
 
-Apple acaba de abrir [container](https://github.com/apple/container), una herramienta de contenedores Linux que corre como VMs ligeras en macOS. Escrita en Swift, optimizada para Apple Silicon y OCI-compatible. En otras palabras: Apple ha construido su propio Docker — y lo ha hecho público.
+Apple ha liberado [container](https://github.com/apple/container), una herramienta de contenedores Linux que corre como VMs ligeras en macOS. Escrita en Swift, optimizada para Apple Silicon y OCI-compatible. En otras palabras: Apple ha construido su propio Docker — y lo ha hecho público.
 
-La noticia ha explotado en [Hacker News](https://news.ycombinator.com/item?id=48469658) con 493 puntos y 173 comentarios. Y la razón es evidente: hasta ahora correr contenedores Linux en macOS implicaba pasar por una VM intermedia (Docker Desktop, Podman Machine, Lima), con el overhead de red, filesystem y memoria que eso conlleva. `container` usa el framework de virtualización nativo de macOS 26 para ejecutar Linux directamente sobre Apple Silicon, sin capas extra.
+La noticia ha explotado en [Hacker News](https://news.ycombinator.com/item?id=48469658), donde ha acumulado más de 1,200 puntos y 400 comentarios. Y la razón es evidente: hasta ahora correr contenedores Linux en macOS implicaba pasar por una VM intermedia (Docker Desktop, Podman Machine, Lima), con el overhead de red, filesystem y memoria que eso conlleva. `container` usa el framework de virtualización nativo de macOS 26 para ejecutar Linux directamente sobre Apple Silicon, sin capas extra.
 
 ## ¿Qué es exactamente `container`?
 
@@ -20,13 +20,13 @@ No es un fork de Docker. No es un wrapper. Es una herramienta nueva de cero, man
 
 1. **Gestiona imágenes OCI**: puedes `pull`, `build` y `push` imágenes usando registros estándar. Las imágenes que construyas funcionan en cualquier runtime OCI — Docker, Podman, Kubernetes.
 2. **Ejecuta contenedores como VMs ligeras**: cada contenedor corre en su propia máquina virtual usando el hypervisor de macOS 26. Esto da aislamiento real sin el overhead de una VM completa.
-3. **Container Machines**: una feature nueva que modela entornos Linux completos con `systemd`, mapeo automático del home del Mac y persistencia entre reinicios.
+3. **Container Machines**: una funcionalidad nueva que modela entornos Linux completos con `systemd`, mapeo automático del home del Mac y persistencia entre reinicios.
 
 La pieza central es `container machine`. No es un contenedor efímero estilo `docker run --rm`. Es una VM Linux ligera, persistente, con tu usuario y tu home mapeados automáticamente.
 
 ## Container Machines: edita en Mac, compila en Linux
 
-Esta es la feature que está generando más conversación. Un Container Machine es un entorno Linux que se integra con macOS de forma transparente:
+Esta es la funcionalidad que está generando más conversación. Un Container Machine es un entorno Linux que se integra con macOS de forma transparente:
 
 ```bash
 # Crear una máquina basada en Alpine
@@ -117,7 +117,7 @@ El proyecto está bajo licencia Apache 2.0 y acepta contribuciones. No es un pro
 
 ## Mi opinión
 
-Llevo años usando Docker Desktop en Mac con esa sensación de estar corriendo algo que no pertenece. La VM de Docker es un agujero negro de RAM, los bind mounts son lentos y el daemon se queda colgado en los peores momentos. He probado Podman, Lima, Colima — todos mejoran algo pero ninguno se siente nativo.
+Llevo años usando Docker Desktop en Mac con esa sensación de estar corriendo algo que no pertenece. La VM de Docker es un agujero negro de RAM, los bind mounts son lentos y el demonio se queda colgado en los peores momentos. He probado Podman, Lima, Colima — todos mejoran algo pero ninguno se siente nativo.
 
 `container` me parece el movimiento más interesante de Apple en el espacio de desarrollo en años. No es solo "otro runtime de contenedores". Es Apple diciendo: sabemos que los desarrolladores necesitan Linux para trabajar, y en lugar de ignorarlo o forzarlos a usar una VM torpe, vamos a integrarlo de verdad.
 
