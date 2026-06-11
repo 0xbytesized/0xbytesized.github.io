@@ -1,0 +1,101 @@
+---
+title: "Homebrew 6: tap trust, API interna y sandbox en Linux"
+date: "2026-06-11T18:49"
+tags: ["homebrew", "macOS", "linux", "seguridad", "devtools"]
+excerpt: "Homebrew 6.0.0 llega con control de confianza para taps, una API JSON más rápida y sandbox nativo en Linux. Así cambia tu día a día."
+---
+
+Homebrew acaba de soltar su versión 6.0.0 y, sinceramente, es de esos lanzamientos que no hacen ruido pero cambian cosas que usas cada día sin pensar. Mike McQuaid y el equipo han metido cuatro cambios que merecen atención: un sistema de confianza para taps de terceros, una API JSON interna que ahora va por defecto, sandbox en Linux y mejoras serias en `brew bundle`. Te cuento lo que importa.
+
+## Tap trust: por fin Homebrew te pregunta antes de ejecutar código ajeno
+
+Este es el cambio más relevante en seguridad. Hasta ahora, cuando hacías `brew tap algun-usuario/algun-repo`, Homebrew cargaba y ejecutaba el Ruby de ese tap sin rechistar. Fórmulas, casks, comandos externos… todo podía correr con tus permisos de usuario sin que te enteraras.
+
+Con Homebrew 6.0.0, cualquier tap que no sea oficial requiere confianza explícita antes de evaluar su código:
+
+```bash
+# Antes: esto ya ejecutaba código del tap
+brew tap usuario/mi-tap
+brew install usuario/mi-tap/formula
+
+# Ahora: necesitas confiar explícitamente
+brew tap usuario/mi-tap
+brew trust usuario/mi-tap
+brew install formula
+```
+
+Si solo necesitas una fórmula concreta, puedes confiar únicamente en ese elemento:
+
+```bash
+brew trust --formula usuario/mi-tap/formula
+```
+
+Y si trabajas con Brewfiles, el soporte es directo:
+
+```ruby
+# Brewfile
+tap "usuario/mi-tap", trusted: true
+brew "usuario/mi-tap/formula", trusted: true
+```
+
+La idea es sencilla: reduces la superficie de ataque. Si un tap se ve comprometido o cambia de dueño, tu sistema no evalúa su código hasta que tú lo decidas. Para automatizaciones y CI, esto evita sorpresas desagradables con taps que se cuelan sin querer.
+
+Los taps oficiales de Homebrew (`homebrew/core`, `homebrew/cask`) siguen siendo de confianza por defecto, así que tu flujo diario no cambia. Solo notas el nuevo comportamiento cuando tocas taps de terceros.
+
+## API JSON interna: menos red, más velocidad
+
+Desde la versión 5.0.0, Homebrew tenía una API JSON interna que podías activar con `HOMEBREW_USE_INTERNAL_API`. La gracia es que consolida toda la metadata de Homebrew en una sola descarga en lugar de andar pidiendo cientos de ficheros individuales por la red.
+
+En 6.0.0, esa API pasa a ser el comportamiento por defecto. La variable de entorno está deprecada. ¿Qué ganas?
+
+- `brew update` más rápido porque pega un solo viaje a la red en vez de docenas
+- Menos latencia en instalaciones y búsquedas
+- Menos carga para los servidores de Homebrew
+
+Según el anuncio, `brew leaves` es un ~30% más rápido. No es magia: es simplemente consolidar peticiones HTTP. La API devuelve un JSON con todas las fórmulas, sus dependencias, versiones y metadatos en una sola respuesta. Homebrew lo cachea localmente y trabaja contra el caché.
+
+## Sandbox en Linux: Bubblewrap llega a la fiesta
+
+macOS lleva años ejecutando las fases de build, test y postinstall dentro de un sandbox. Linux estaba en desventaja: todo corría sin aislamiento.
+
+Homebrew 6.0.0 incorpora [Bubblewrap](https://github.com/containers/bubblewrap) para crear sandboxes en Linux. A partir de ahora, cuando compilas una fórmula desde fuente en Linux, el proceso corre aislado:
+
+- Sin acceso de escritura fuera del directorio de build
+- Sin acceso a la red durante la fase de build
+- Con un sistema de archivos temporal y controlado
+
+Esto alinea la experiencia Linux con macOS y evita que una fórmula maliciosa o con bugs haga destrozos durante la compilación. Viene activado por defecto para developers.
+
+## Brew bundle evoluciona
+
+`brew bundle` recibe varias mejoras notables. La instalación de fórmulas ahora es paralela por defecto: Homebrew decide automáticamente cuántas jobs lanzar según tu máquina. Antes tenías que configurarlo manualmente.
+
+También se añaden extensiones para `npm` y `krew` (el gestor de plugins de kubectl), y en Windows, soporte para `winget`. Esto convierte el Brewfile en un manifiesto más completo para entornos heterogéneos:
+
+```ruby
+# Brewfile con soporte npm y krew
+brew "node"
+npm "pnpm"
+brew "kubernetes-cli"
+krew "ctx"
+krew "ns"
+```
+
+Y la limpieza posterior (`brew bundle cleanup`) ahora cubre también paquetes instalados vía npm, cargo, go y uv. Si instalaste algo con el bundle y ya no está en el Brewfile, se va.
+
+## macOS 27 y el adiós a Intel
+
+Un detalle importante: macOS 27 (Golden Gate) elimina el soporte para Intel. Homebrew 6.0.0 añade compatibilidad inicial con esta versión, pero el calendario es claro:
+
+- **Septiembre 2026**: macOS Intel pasa a Tier 3. Sin CI, sin bottles nuevos.
+- **Septiembre 2027**: macOS Intel deja de tener soporte. Se borra el código relacionado.
+
+Si todavía usas un Mac Intel, tienes un año para planificar la transición. Los bottles (binarios precompilados) que ya existen seguirán funcionando, pero no se construirán nuevos.
+
+## Mi veredicto
+
+Homebrew 6.0.0 es de esos lanzamientos que no te cambian la vida pero te la hacen más segura y rápida sin que tengas que hacer nada. El tap trust era necesario: llevar años ejecutando Ruby de terceros sin confirmación era un agujero de seguridad que daba vergüenza ajena. La API JSON interna es puro sentido común técnico. Y el sandbox en Linux era una deuda pendiente que por fin se salda.
+
+Lo que más me gusta es que el equipo ha usado los resultados de su encuesta de usuarios para priorizar. El modo "ask" por defecto (que te pide confirmación antes de instalar) viene de ahí. Pocos proyectos escuchan tan de cerca.
+
+Si usas Homebrew a diario, el upgrade es transparente: un `brew update` y ya estás en la 6.0.0. Lo único que notarás es que va un pelín más rápido y que te pregunta antes de confiar en taps nuevos. Nada que objetar.
