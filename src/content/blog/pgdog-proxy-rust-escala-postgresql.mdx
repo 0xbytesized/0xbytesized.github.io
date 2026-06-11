@@ -1,0 +1,113 @@
+---
+title: "PgDog: escala PostgreSQL sin tocar tu código"
+date: "2026-06-11T00:14"
+tags: ["postgresql", "rust", "bases-de-datos", "sharding", "open-source"]
+excerpt: "Tres ingenieros, 5 millones de seed y un proxy en Rust que maneja 2M queries por segundo. PgDog quiere demostrar que PostgreSQL es la única BD que necesitas."
+---
+
+Hace unos días Lev Kokotov publicó un anuncio que llevaba años gestándose: [PgDog](https://pgdog.dev/blog/our-funding-announcement), su proxy para PostgreSQL escrito en Rust, acaba de cerrar una ronda seed de 5 millones de dólares con Basis Set, Y Combinator y Pioneer Fund. El equipo son tres personas. El producto ya mueve más de 2 millones de queries por segundo en producción.
+
+La tesis es provocadora: "La razón por la que existen MongoDB o DynamoDB es porque PostgreSQL tiene un problema de escalado. Si pudieras hacer que simplemente funcionase, con tablas de 100 TB y un millón de queries por segundo, no usarías nada más."
+
+Y tienen números para respaldarla: 1.4 millones de pulls en Docker, más de 20 TB shardeados en producción, releases semanales y una comunidad en Discord donde los propios fundadores responden preguntas cada día.
+
+## Qué hace PgDog exactamente
+
+PgDog es un proxy a nivel de aplicación (capa 7 OSI) que se coloca entre tu aplicación y tus instancias de PostgreSQL. Entiende el protocolo wire de Postgres y hace tres cosas principales:
+
+**Connection pooling.** Como PgBouncer, pero con esteroides. Soporta pooling por transacción y por sesión. A diferencia de PgBouncer, puede parsear y manejar sentencias `SET` y opciones de startup, manteniendo el estado de sesión correcto al compartir conexiones entre clientes.
+
+**Balanceo de carga.** Reparte queries entre primaria y réplicas automáticamente. Usa el parser nativo de PostgreSQL (via `pg_query`) para detectar escrituras — `INSERT`, `UPDATE`, `CREATE TABLE` — y enviarlas a la primaria, mientras las lecturas van a las réplicas. Soporta round robin, random y least active connections como estrategias.
+
+**Sharding.** Esta es la parte ambiciosa. PgDog puede particionar bases de datos enteras usando las mismas funciones de partición que PostgreSQL — `HASH`, `LIST`, `RANGE` — y también por esquemas. Para queries cross-shard, ensambla y transforma resultados en memoria antes de devolverlos al cliente.
+
+## Cómo se configura
+
+La configuración es deliberadamente simple. Dos archivos TOML: `pgdog.toml` para hosts y sharding, `users.toml` para credenciales.
+
+Un ejemplo mínimo con pool de conexiones:
+
+```toml
+# pgdog.toml
+[general]
+port = 6432
+default_pool_size = 10
+
+[[databases]]
+name = "pgdog"
+host = "127.0.0.1"
+```
+
+```toml
+# users.toml
+[[users]]
+name = "alice"
+database = "pgdog"
+password = "hunter2"
+```
+
+Para añadir balanceo de carga basta con declarar más de un host para la misma base de datos:
+
+```toml
+[[databases]]
+name = "prod"
+host = "10.0.0.1"
+role = "primary"
+
+[[databases]]
+name = "prod"
+host = "10.0.0.2"
+role = "replica"
+```
+
+Y para activar sharding, asignas un número de shard a cada host y declaras las tablas particionadas:
+
+```toml
+[[databases]]
+name = "prod"
+host = "10.0.0.1"
+shard = 0
+
+[[databases]]
+name = "prod"
+host = "10.0.0.2"
+shard = 1
+
+[[sharded_tables]]
+database = "prod"
+column = "user_id"
+```
+
+PgDog usa el parser de PostgreSQL para extraer la clave de sharding de cada query y decidir a qué shard va. Si la query incluye `WHERE user_id = $1`, va directa a un solo shard — el caso ideal. Si no, se ejecuta en todos y PgDog ensambla el resultado.
+
+## Los detalles técnicos que marcan la diferencia
+
+Hay varias decisiones de diseño que distinguen a PgDog de un proxy genérico:
+
+**Two-phase commit para escrituras cross-shard.** Cuando una transacción toca varios shards, PgDog ejecuta `PREPARE TRANSACTION` y `COMMIT PREPARED` por ti. Si el cliente se desconecta o PostgreSQL crashea, PgDog hace rollback automático en fase I y commit en fase II.
+
+**Re-sharding sin downtime.** PgDog entiende el protocolo de replicación lógica de PostgreSQL y puede orquestar splits de datos entre bases en background. El proceso tiene 5 pasos: crear el nuevo clúster, sincronizar esquemas, copiar datos con replicación lógica, crear índices secundarios y cortar el tráfico atómicamente con `MAINTENANCE ON`/`RELOAD`/`MAINTENANCE OFF`. Sin etcd, sin Zookeeper.
+
+**IDs únicos sin secuencias centralizadas.** En vez de depender de un `SEQUENCE` global que sería un cuello de botella en una arquitectura shardeada, PgDog expone `pgdog.unique_id()`, una función basada en timestamps que genera millones de IDs únicos por segundo sin coordinación entre shards.
+
+**Autenticación cloud-native.** Soporta RDS IAM y Azure Workload Identity para que PgDog se autentique contra PostgreSQL con tokens temporales, mientras los clientes mantienen su autenticación tradicional.
+
+**Parser de COPY.** PgDog tiene un parser de texto, CSV y binario para el comando `COPY` y puede dividir filas entre shards automáticamente, lo que permite ingestar datos a un clúster shardeado sin preprocesado.
+
+## Por qué Rust
+
+PgDog está escrito en Rust sobre Tokio y el crate `bytes` para evitar asignaciones de memoria innecesarias. El código es multithreaded y los benchmarks — disponibles en [su documentación](https://docs.pgdog.dev/architecture/) — muestran que puede manejar miles de conexiones en hardware commodity.
+
+La elección de Rust no es cosmética. Un proxy de base de datos es exactamente el tipo de software donde la seguridad de memoria y el rendimiento predecible importan: estás manejando el protocolo wire de PostgreSQL, parseando SQL, enrutando queries y ensamblando resultados en memoria, todo en el camino crítico de cada query.
+
+## Mi opinión
+
+PgDog me parece uno de esos proyectos que identifican un problema real y lo atacan desde primeros principios. Lev Kokotov no es un fundador que pivota: lleva años escalando PostgreSQL en producción — en Instacart durante el pico de la pandemia, cuando escalaron 5x en abril de 2020 gestionando cientos de miles de pedidos de supermercado por minuto.
+
+Lo que más me convence es la filosofía del producto: "mismo PostgreSQL de siempre, solo que con un proxy delante". No te pide que cambies de ORM, que reescribas queries o que adoptes un nuevo protocolo. Cambias el `DATABASE_URL`, apuntas a PgDog y el proxy se encarga del resto.
+
+Dicho esto, hay que ser realista sobre las limitaciones. El soporte para queries cross-shard es parcial: los CTEs y subqueries se ejecutan tal cual en todos los shards y algunas operaciones SQL complejas todavía no están soportadas. La documentación es honesta al respecto — incluyen una tabla clara de qué funciona y qué no.
+
+También está el elefante en la habitación: la licencia AGPL v3. Para uso interno no hay problema — puedes modificar PgDog sin compartir código. Pero si eres un proveedor cloud que quiere ofrecer PgDog como servicio público, la AGPL te obliga a publicar tus modificaciones. Es una decisión deliberada que protege el proyecto del "strip-mining" corporativo.
+
+Con 5 millones en el banco, un equipo de tres que lanza releases cada jueves y una comunidad que crece, PgDog tiene todos los ingredientes para convertirse en una pieza estándar del stack de PostgreSQL. Si estás acercándote al límite de lo que una sola instancia de Postgres puede manejar, merece la pena probarlo antes de plantearte migrar a otra base de datos.
