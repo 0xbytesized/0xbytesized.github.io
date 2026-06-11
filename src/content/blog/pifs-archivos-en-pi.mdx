@@ -1,0 +1,148 @@
+---
+title: "πFS: guarda tus archivos en los decimales de pi"
+date: "2026-06-11T06:30"
+tags: ["pi", "matemáticas", "sistemas-de-archivos", "python", "curiosidades"]
+excerpt: "π contiene todos los archivos que han existido y existirán. Un sistema FUSE lo demuestra con matemáticas, humor negro y cero bytes de almacenamiento."
+---
+
+Hace unas horas, Hacker News rescataba del olvido uno de los proyectos más brillantemente absurdos que han pasado por GitHub: **πFS**, un sistema de archivos que no almacena tus datos en disco. Los guarda en los decimales de π.
+
+El proyecto acumula más de 7.000 estrellas, 656 puntos en HN y cero bytes de almacenamiento real. Suena a broma —y lo es— pero la matemática que hay detrás es impecable.
+
+## La idea: tus datos ya existían
+
+Imagina que π contiene todas las secuencias finitas de dígitos. Si representas un archivo como una secuencia de bytes y cada byte como dos dígitos hexadecimales, entonces tu archivo entero —cada foto, cada documento, cada base de datos— ya está escrito en algún lugar de los infinitos decimales de π.
+
+Solo necesitas saber **dónde empieza** y **cuánto mide**.
+
+Eso es exactamente lo que hace πFS: parte los archivos byte a byte, busca cada byte en la expansión hexadecimal de π y guarda las coordenadas (offset, longitud) como metadatos. El archivo en sí nunca se toca.
+
+El resultado es un sistema de archivos donde el "almacenamiento" se reduce a un montón de punteros. Teóricamente, compresión infinita.
+
+## ¿π contiene realmente todos los archivos posibles?
+
+Aquí viene la parte matemática. No está demostrado, pero se **conjetura** que π es un número normal en base 16. Un número normal tiene sus dígitos distribuidos uniformemente: cada hex digit aparece con probabilidad 1/16, cada par con 1/256 y así sucesivamente.
+
+Si π es normal, entonces es una **secuencia disyuntiva**: toda secuencia finita de dígitos aparece en algún lugar. Eso incluye:
+
+- El código fuente de Linux
+- Una foto tuya en 4K (en hexadecimal)
+- Este mismo artículo
+- Una versión de este artículo donde digo exactamente lo contrario
+
+No necesitas disco duro. Tus datos siempre han estado ahí, esperando a que alguien encuentre su offset.
+
+## Cómo extraer dígitos de π sin calcularlos todos
+
+El truco que hace esto remotamente posible es la **fórmula de Bailey–Borwein–Plouffe** (BBP), descubierta en 1995. Permite calcular el n-ésimo dígito hexadecimal de π sin necesidad de calcular los anteriores.
+
+Aquí tienes una implementación en Python que escribí para verificarlo:
+
+```python
+import math
+
+
+def digito_hex_pi(n):
+    """Devuelve el n-ésimo dígito hexadecimal de π (1-indexado)."""
+    n -= 1
+
+    def serie(j, n):
+        s = 0.0
+        # Suma izquierda: k=0 hasta n
+        for k in range(n + 1):
+            r = 8 * k + j
+            s = (s + pow(16, n - k, r) / r) % 1.0
+        # Suma derecha: k=n+1 hasta convergencia
+        t = 0.0
+        k = n + 1
+        while True:
+            r = 8 * k + j
+            term = (16.0 ** (n - k)) / r
+            if term < 1e-17:
+                break
+            t += term
+            k += 1
+        return (s + t) % 1.0
+
+    resultado = (
+        4 * serie(1, n)
+        - 2 * serie(4, n)
+        - serie(5, n)
+        - serie(6, n)
+    ) % 1.0
+    return int(math.floor(16 * resultado))
+
+
+# Primeros 16 dígitos hexadecimales de π: 243F6A8885A308D3
+for i in range(1, 17):
+    print(f"{digito_hex_pi(i):X}", end="")
+print()  # → 243F6A8885A308D3
+```
+
+Cada dígito se calcula de forma independiente. Puedes pedir el dígito un millón sin haber tocado los anteriores.
+
+## Buscar un byte en π
+
+Saber calcular dígitos sueltos está bien, pero para que πFS funcione necesitas lo contrario: dado un byte, encontrar **dónde** aparece en π.
+
+El algoritmo es tan ingenuo como cabe esperar: pruebas offsets uno a uno hasta que coincides:
+
+```python
+def buscar_byte_en_pi(byte_buscado, limite=1_000_000):
+    """Busca un byte en los primeros `limite` offsets de π.
+    Devuelve (offset, longitud) o None si no lo encuentra."""
+    for offset in range(limite):
+        alto = digito_hex_pi(offset + 1)
+        bajo = digito_hex_pi(offset + 2)
+        if (alto << 4 | bajo) == byte_buscado:
+            return (offset, 2)  # 2 hex digits = 1 byte
+    return None
+
+
+# Buscar el byte 0x48 (letra 'H')
+resultado = buscar_byte_en_pi(0x48)
+print(f"Byte 0x48 encontrado en offset {resultado[0]}")
+```
+
+Con números pequeños funciona. Con archivos de verdad, el tiempo de búsqueda es astronómico. Pero ese no es el punto.
+
+## ¿Y el sistema de archivos en sí?
+
+πFS usa [FUSE](https://github.com/libfuse/libfuse) (Filesystem in Userspace) para montarse como un sistema de archivos normal en Linux. La interfaz es tan sencilla como parece:
+
+```bash
+# Instalar dependencias
+sudo apt-get install autotools-dev automake libfuse-dev
+
+# Compilar
+./autogen.sh && ./configure && make && make install
+
+# Montar
+pifs -o mdd=/ruta/metadatos /punto/de/montaje
+```
+
+A partir de ahí, cualquier operación con archivos —leer, escribir, listar— se traduce en búsquedas sobre los dígitos hexadecimales de π.
+
+Escribir un archivo de 400 líneas de texto puede llevarse **cinco minutos**. El README lo zanja con un encogimiento de hombros: "siempre nos queda la ley de Moore".
+
+## Por qué esto importa (aunque sea una broma)
+
+πFS es un chiste de April Fools de 2012, pero toca una pregunta profunda: **¿qué significa realmente almacenar información?**
+
+Si la información es solo la posición de un patrón en una secuencia infinita que ya existe, el concepto de "guardar un archivo" se vuelve borroso. No estás creando nada. Estás descubriendo coordenadas.
+
+Es la misma idea detrás de la [biblioteca de Babel](https://es.wikipedia.org/wiki/La_biblioteca_de_Babel) de Borges: un universo donde todos los libros posibles ya existen y el acto creativo se reduce a encontrar el estante correcto.
+
+La diferencia es que πFS lo implementa en C y lo monta en `/mnt/broma`.
+
+## Mi opinión
+
+Me encanta πFS porque es el tipo de proyecto que solo puede existir en la intersección entre matemáticas serias y humor de sistemas. No pretende ser útil. Pretende hacerte pensar.
+
+La fórmula BBP es un resultado matemático genuino de 1995. FUSE es una tecnología real del kernel de Linux. Todo el castillo está construido sobre cimientos sólidos. Y sin embargo, el resultado es gloriosamente inútil.
+
+Ese es el tipo de ingeniería que echo de menos. Algo hecho no porque resuelva un problema de negocio, sino porque la pregunta "¿y si...?" era demasiado tentadora para ignorarla.
+
+En una era donde todo proyecto nuevo parece necesitar una estrategia de monetización y un pitch deck, πFS recuerda que a veces el mejor código es el que se escribe un domingo por la tarde, con una cerveza en la mesa y cero expectativas.
+
+Buscar el byte 0x48 entre los decimales de π puede llevarse un millón de iteraciones. Pero la sonrisa que te saca cuando entiendes el truco es instantánea.
