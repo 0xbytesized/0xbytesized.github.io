@@ -1,0 +1,86 @@
+---
+title: "DeltaDB: adiós a los commits, hola a los deltas"
+date: "2026-06-12T00:57"
+tags: ["version-control", "git", "ai-agents", "zed", "deltadb", "crdt"]
+excerpt: "Zed presenta DeltaDB, un control de versiones que captura cada operación en lugar de snapshots. Diseñado para la era de los agentes de IA."
+---
+
+Nathan Sobo, fundador de Zed, nunca ha sido fan de los pull requests. En el equipo de Zed trabajan juntos sobre el mismo worktree, discutiendo el código mientras lo escriben. GitHub no te deja hablar del código hasta que haces commit y push, pero para entonces las conversaciones importantes ya han terminado.
+
+En 2021 fundaron Zed para moverse más allá de las limitaciones de los commits. Lo que no previeron es que los problemas que llevaban años pensando para la colaboración entre humanos se volverían aún más críticos al colaborar con agentes de IA.
+
+La conversación que genera el código se está convirtiendo en la verdadera fuente de nuestro software. Git, organizado alrededor de commits discretos, nunca se diseñó para esto. Así que Zed está construyendo algo que sí lo está: **DeltaDB**.
+
+## No son commits, son deltas
+
+DeltaDB rompe tu trabajo en un flujo de deltas de grano fino. Donde Git captura una snapshot en cada commit, DeltaDB captura **cada operación individual** y le asigna una identidad estable.
+
+Esto cambia la unidad atómica del control de versiones. Ya no es "el commit que hice a las 15:23", sino "la operación #4a7f donde el agente modificó la función `validateToken`". Cada delta es direccionable por sí mismo. Puedes señalar el código en cualquier momento de su evolución, incluso mientras sigue cambiando.
+
+La consecuencia práctica: un mensaje y la edición que produjo se graban juntos. Ninguno se desvincula del otro con el tiempo.
+
+## Worktrees replicados sin conflictos
+
+DeltaDB incorpora worktrees replicados libres de conflictos (CRDTs). Varias personas y agentes pueden editar los mismos archivos a la vez desde distintas máquinas. Los archivos son reales: los agentes trabajan en ellos desde una terminal y puedes montar el worktree completo en disco cuando quieras usar tus propias herramientas.
+
+Esto es radicalmente distinto al modelo de Git. Imagina esta diferencia:
+
+```text
+# Git: trabajo en ramas separadas, merge después
+# Tú y un agente no pueden tocar el mismo archivo
+# sin coordinación explícita
+
+# DeltaDB: edición concurrente real
+# Dos agentes modifican src/auth.ts simultáneamente
+# Cada operación es un delta independiente
+# El worktree converge automáticamente
+```
+
+No hay branching, no hay merging manual, no hay conflictos que resolver a posteriori. El worktree simplemente converge.
+
+## El código fuente es ahora la conversación fuente
+
+Cada referencia en DeltaDB se ancla a un delta, no a un número de línea. Esto significa que una referencia sobrevive cuando el código se mueve por debajo de ella.
+
+Desde cualquier línea de una conversación pasada, puedes saltar a ese código tal como está ahora o tal como estaba en el momento exacto en que el agente lo escribió. Desde cualquier línea de código, puedes encontrar la conversación que la produjo y cada conversación que la ha tocado desde entonces.
+
+Los agentes también pueden aprovechar esto. Recuperan el contexto detrás del código que están modificando o convocan a los agentes anteriores que trabajaron en él para preguntarles por qué está escrito así.
+
+```text
+# Trazabilidad bidireccional en DeltaDB
+
+# De conversación a código:
+# "¿Qué aspecto tiene ahora la función que el agente
+#  escribió en el mensaje #882?"
+# → Saltas al estado actual de esas líneas
+
+# De código a conversación:
+# "¿Quién escribió esta validación y por qué?"
+# → Recuperas la conversación completa que la generó
+```
+
+Git te da `git blame` y `git log -p`. DeltaDB te da la conversación entera.
+
+## Colaboración sin ceremonia
+
+Lo que Zed persigue es simple: la conversación con el agente se convierte en la única conversación que necesitas tener. Un compañero puede unirse mientras el trabajo está ocurriendo, hablar con el agente que lo hizo y anotar sobre la marcha, sin esperar a que hagas commit y push.
+
+Los pull requests, los hilos de review y los comentarios inline existen para reenganchar una discusión al código después de los hechos, porque la discusión y el código vivían en sitios separados. Ponlos en el mismo sitio y la ceremonia desaparece.
+
+Git y CI se quedan para lo que son buenos: ejecutar checks y conectarte con el resto del mundo. Dejan de ser el lugar donde la colaboración se ve forzada a ocurrir.
+
+## Mi opinión
+
+DeltaDB me parece uno de esos proyectos que identifican un problema real antes de que el resto del mundo lo haya articulado. La industria lleva años optimizando el pipeline commit → PR → review → merge como si fuera una ley de la física, cuando en realidad es una convención que Git nos impuso por su modelo de datos.
+
+El diagnóstico de Sobo es certero: la conversación con agentes está reemplazando al commit como unidad de trabajo. Tiene sentido que el control de versiones refleje esa realidad en lugar de forzarla a encajar en un modelo de 2005.
+
+Dicho esto, hay preguntas abiertas importantes. La primera es la adopción: Git no es solo una herramienta, es la columna vertebral de GitHub, GitLab, CI/CD, despliegues y un ecosistema entero de herramientas que asumen su modelo de datos. DeltaDB tendrá que demostrar que puede integrarse con ese mundo sin obligarte a elegir entre lo nuevo y lo que ya funciona.
+
+La segunda es la madurez: CRDTs para edición colaborativa de texto son un problema sorprendentemente difícil. Hacer que funcionen con ficheros arbitrarios, agentes de IA que generan cientos de operaciones por minuto y worktrees montados en disco es un desafío de ingeniería considerable.
+
+La tercera es la apertura: Zed es una empresa con inversores. DeltaDB, por ahora, es un producto de Zed, no un estándar abierto. Si el control de versiones del futuro pertenece a un editor concreto, eso genera el mismo tipo de preguntas que cuando GitHub se convirtió en la interfaz por defecto de Git.
+
+Aun con esas reservas, el planteamiento es sólido. La industria lleva dos décadas sin innovar en control de versiones. DeltaDB es el primer intento serio de repensarlo para un mundo donde el código no solo se escribe: se conversa.
+
+La beta llega en unas semanas. Habrá que ver si cumple lo que promete.
