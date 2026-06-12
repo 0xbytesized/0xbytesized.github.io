@@ -1,0 +1,139 @@
+---
+title: "WASI 0.3: WebAssembly ya habla async nativo"
+date: "2026-06-12T19:13"
+tags: ["wasi", "webassembly", "async", "wasm", "componentes"]
+excerpt: "La Bytecode Alliance ratifica WASI 0.3: async nativo en el Component Model. Adiós pollables, hola stream<T>, future<T> y async func nativas en Rust, Go y Python"
+---
+
+El 11 de junio de 2026 la Bytecode Alliance ratificó WASI 0.3.0. Si la última vez que miraste WASI fue la 0.1 —esa capa fina tipo POSIX para WebAssembly fuera del navegador—, prepárate: esto es otra cosa. WASI 0.3 mete el async dentro del Component Model y cambia las reglas del juego para cualquiera que quiera ejecutar código sandboxeado en el servidor.
+
+## El problema que WASI 0.2 no supo resolver
+
+WASI 0.2 introdujo el Component Model: una forma de empaquetar módulos WebAssembly con interfaces tipadas (WIT) que se podían componer entre sí. La idea era brillante: un componente escrito en Rust podía llamar a otro escrito en Go y el host se encargaba de pasar los datos de un lado a otro sin serialización intermedia.
+
+Pero tenía un agujero gordo: el async.
+
+En WASI 0.2 cada componente necesitaba su propio event loop. Si tenías un componente que usaba streams o APIs asíncronas, no podías componerlo con ningún otro. El host no coordinaba nada. Era como tener tres relojes en una misma habitación marcando horas distintas.
+
+El resultado práctico: `wasi:io` metía con calzador conceptos como `pollable`, `input-stream`, `output-stream` y un baile de tres pasos —`start-foo`, `finish-foo`, `subscribe`— que hacía que cualquier interfaz asíncrona pareciera un expediente de Hacienda.
+
+## Lo que trae WASI 0.3
+
+La frase clave del anuncio es esta: **async is now native to WebAssembly Components**. Traducción: el Component Model tiene ahora tipos async de primera clase y el host es el que maneja el event loop para todos los componentes.
+
+Estos son los nuevos constructos del ABI canónico:
+
+- **`stream<T>`**: un stream tipado. En WASI 0.2 tenías `input-stream` y `output-stream` como recursos separados. Ahora es un `stream<u8>` genérico.
+- **`future<T>`**: un valor que se resolverá en el futuro. Sustituye a los `pollable` de 0.2.
+- **`async func`**: funciones declaradas como asíncronas directamente en la interfaz WIT. Nada de `start`/`finish`/`subscribe`.
+
+La migración de 0.2 a 0.3 es mecánica en su mayor parte. Aquí va la tabla de equivalencias que publicó la Bytecode Alliance:
+
+| WASI 0.2 (`wasi:io`) | WASI 0.3 (Component Model) |
+|---|---|
+| `resource pollable` | `future<T>` |
+| `resource input-stream` | `stream<u8>` |
+| `resource output-stream` | `stream<u8>` (dirección escritura) |
+| `poll(list<pollable>)` | await sobre un future (gestionado por el runtime) |
+| `subscribe()` sobre recurso | devolver un `future<...>` desde la llamada |
+| `start-foo` / `finish-foo` | `foo: async func(...)` |
+
+El modelo async es **completion-based**, no readiness-based. Esto es importante: se parece a `io_uring` en Linux y a IOCP/IoRing en Windows, no a `epoll`/`kqueue`. El runtime despierta la tarea cuando el valor está listo, no cuando el descriptor de archivo está "preparado para leer". Para programas que necesiten compatibilidad con el modelo antiguo, se puede emular `epoll` encima.
+
+## Un problema resuelto: el estado del stream
+
+WASI 0.2 tenía un defecto sutil pero doloroso: los errores terminales en streams aparecían inline en cada llamada a `read`. Si un consumidor dejaba de leer antes de llegar al final, no podía distinguir entre un cierre limpio y un error. Perdías la información.
+
+En 0.3 los streams devuelven un `future` adicional que se resuelve independientemente de cuánto se haya consumido:
+
+```wit
+// WASI 0.2
+read-via-stream: func() -> result<input-stream, error-code>;
+
+// WASI 0.3
+read-via-stream: func() -> tuple<stream<u8>, future<result<_, error-code>>>;
+```
+
+El `future` te dice qué pasó al final sin obligarte a drenar el stream entero. Pequeño cambio, gran diferencia en robustez.
+
+## Cómo se ve en código real
+
+### Rust
+
+Con `wit-bindgen`, implementar un handler HTTP es directo. La interfaz WIT:
+
+```wit
+interface handler {
+    handle: async func(request: request) -> result<response, error-code>;
+}
+```
+
+Se mapea a un trait `Guest` con un `async fn handle`:
+
+```rust
+use wasi::http::types::{ErrorCode, Request, Response};
+
+impl Guest for Component {
+    async fn handle(request: Request) -> Result<Response, ErrorCode> {
+        // Tu lógica aquí — streaming, llamadas externas, lo que quieras
+        let body = "Hola desde WASI 0.3".as_bytes().to_vec();
+        Ok(Response::new(body))
+    }
+}
+```
+
+Nada de pollables, nada de suscripciones. Un `async fn` de Rust de toda la vida.
+
+### Go
+
+Aquí viene lo interesante. Go usa stackful coroutines (goroutines), no stackless como Rust o Python. El Component Model se diseñó para soportar ambas. Con `componentize-go`, puedes escribir un servidor HTTP que hace streaming con goroutines y el runtime las aparca en la frontera ABI hasta que el stream está listo:
+
+```go
+package export_wasi_http_handler
+
+func Handle(request *Request) Result[*Response, ErrorCode] {
+    tx, rx := MakeStreamU8()          // 1. Crear un par de canales
+    go func() {                        // 2. Lanzar una goroutine
+        defer tx.Drop()
+        tx.WriteAll([]uint8("Hello, world!"))  // 3. Escribir al canal
+    }()
+    response, send := ResponseNew(
+        FieldsFromList([]Tuple2[string, []byte]{
+            {F0: "content-type", F1: []byte("text/plain")},
+        }).Ok(),
+        Some(rx),                      // 4. Pasar el receiver como body
+        trailersFuture(),
+    )
+    send.Drop()
+    return Ok[*Response, ErrorCode](response)  // 5. Devolver la respuesta
+}
+```
+
+La goroutine se bloquea en la llamada ABI y el runtime la reanuda cuando el stream tiene datos. El código parece síncrono pero es completamente async por debajo. Esto es lo que hace que WASI 0.3 sea distinto: no te obliga a elegir un modelo de concurrencia.
+
+## wasi:http reorganizado
+
+La interfaz HTTP también se ha rediseñado. Ahora expone dos worlds:
+
+- **`wasi:http/service`**: importa un `client` (para hacer peticiones HTTP salientes) y exporta un `handler` (para recibir peticiones entrantes). Es el perfil básico de un servicio HTTP.
+- **`wasi:http/middleware`**: extiende `service` y además importa un `handler`. Permite service chaining: un componente puede recibir una petición, transformarla y pasársela a otro componente.
+
+Esto sustituye al antiguo `proxy` world de 0.2 y abre la puerta a pipelines de componentes HTTP: autenticación, rate limiting, logging, compresión — cada uno como un componente WASM independiente que se compone con los demás sin acoplarse.
+
+## ¿Quién puede ejecutar esto hoy?
+
+Wasmer y Wasmtime ya están implementando soporte. WasmEdge ha anunciado trabajo en curso. El ecosistema de toolchains —`wit-bindgen` para Rust, `componentize-py` para Python, `jco` para JavaScript, `componentize-dotnet` para C#, `componentize-go` para Go— está añadiendo bindings async nativos.
+
+No esperes que todo funcione mañana en producción. WASI 0.3 acaba de ratificarse y los runtimes están en fase de implementación. Pero la especificación es estable y eso es lo importante: ya hay un norte claro.
+
+## Mi opinión
+
+WASI 0.3 me parece el movimiento correcto en el momento correcto. El Component Model sin async era un coche sin motor: bonito por fuera, pero no te llevaba a ningún sitio. Meter `future<T>` y `stream<T>` como primitivas del ABI canónico, en lugar de parchear `wasi:io` con más verbos, es una decisión de diseño limpia.
+
+Lo que más me convence es el modelo completion-based. `io_uring` demostró en Linux que despertar tareas cuando los datos están listos —no cuando el socket está "preparable"— escala mucho mejor. Que WASI haya adoptado ese modelo desde el principio, en lugar de emular `epoll` y ya veremos, dice algo bueno sobre quién está tomando las decisiones técnicas.
+
+Dicho esto, hay críticas legítimas en los comentarios de HN. Algunos desarrolladores echan de menos la simplicidad de WASI 0.1 —una capa tipo POSIX, sin Component Model, sin WIT, sin worlds— y ven 0.3 como una sobrecarga de complejidad. Entiendo el sentimiento, pero creo que confunden simplicidad de especificación con simplicidad de uso. WASI 0.1 era simple sobre el papel y un infierno en la práctica si querías componer módulos de distintos lenguajes. WASI 0.3 es más complejo en la especificación pero mucho más simple en el código que escribes. Prefiero eso.
+
+La pregunta abierta es la adopción. WebAssembly fuera del navegador lleva años en el "año de WebAssembly en el servidor" sin terminar de despegar. WASI 0.3 resuelve problemas reales que frenaban la adopción —composición de componentes, async interoperable—, pero el ecosistema necesita runtime estables, toolchains maduras y, sobre todo, casos de uso donde WASM sea claramente mejor que un contenedor Linux. Ese último punto sigue siendo el más difícil de argumentar.
+
+Aun así, entre esto y el [anuncio del Component Model 1.0](https://bytecodealliance.org/articles/the-road-to-the-wasm-component-model-1.0) que salió ayer, 2026 está siendo el año donde WebAssembly en el servidor deja de ser una promesa y empieza a ser una herramienta.
