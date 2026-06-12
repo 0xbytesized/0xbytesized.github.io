@@ -7,7 +7,7 @@ excerpt: "π contiene todos los archivos que han existido y existirán. Un siste
 
 Hace unas horas, Hacker News rescataba del olvido uno de los proyectos más brillantemente absurdos que han pasado por GitHub: **πFS**, un sistema de archivos que no almacena tus datos en disco. Los guarda en los decimales de π.
 
-El proyecto acumula más de 7.000 estrellas, 656 puntos en HN y cero bytes de almacenamiento real. Suena a broma —y lo es— pero la matemática que hay detrás es impecable.
+El proyecto acumula más de 7.000 estrellas, cientos de puntos en HN y cero bytes de almacenamiento real. Suena a broma —y lo es— pero la matemática que hay detrás es impecable.
 
 ## La idea: tus datos ya existían
 
@@ -118,7 +118,7 @@ sudo apt-get install autotools-dev automake libfuse-dev
 ./autogen.sh && ./configure && make && make install
 
 # Montar
-pifs -o mdd=/ruta/metadatos /punto/de/montaje
+πfs -o mdd=/ruta/metadatos /punto/de/montaje
 ```
 
 A partir de ahí, cualquier operación con archivos —leer, escribir, listar— se traduce en búsquedas sobre los dígitos hexadecimales de π.
@@ -127,7 +127,7 @@ Escribir un archivo de 400 líneas de texto puede llevarse **cinco minutos**. El
 
 ## Por qué esto importa (aunque sea una broma)
 
-πFS es un chiste de April Fools de 2012, pero toca una pregunta profunda: **¿qué significa realmente almacenar información?**
+πFS es una inocentada de 2012, pero toca una pregunta profunda: **¿qué significa realmente almacenar información?**
 
 Si la información es solo la posición de un patrón en una secuencia infinita que ya existe, el concepto de "guardar un archivo" se vuelve borroso. No estás creando nada. Estás descubriendo coordenadas.
 

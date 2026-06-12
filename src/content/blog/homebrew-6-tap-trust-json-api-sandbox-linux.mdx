@@ -64,13 +64,13 @@ Homebrew 6.0.0 incorpora [Bubblewrap](https://github.com/containers/bubblewrap) 
 - Sin acceso a la red durante la fase de build
 - Con un sistema de archivos temporal y controlado
 
-Esto alinea la experiencia Linux con macOS y evita que una fórmula maliciosa o con bugs haga destrozos durante la compilación. Viene activado por defecto para developers.
+Esto alinea la experiencia Linux con macOS y evita que una fórmula maliciosa o con bugs haga destrozos durante la compilación. Viene activado por defecto para desarrolladores.
 
 ## Brew bundle evoluciona
 
-`brew bundle` recibe varias mejoras notables. La instalación de fórmulas ahora es paralela por defecto: Homebrew decide automáticamente cuántas jobs lanzar según tu máquina. Antes tenías que configurarlo manualmente.
+`brew bundle` recibe varias mejoras notables. La instalación de fórmulas ahora es paralela por defecto: Homebrew decide automáticamente cuántas tareas lanzar según tu máquina. Antes tenías que configurarlo manualmente.
 
-También se añaden extensiones para `npm` y `krew` (el gestor de plugins de kubectl), y en Windows, soporte para `winget`. Esto convierte el Brewfile en un manifiesto más completo para entornos heterogéneos:
+También se añaden extensiones para `npm` y `krew` (el gestor de plugins de kubectl) y en Windows, soporte para `winget`. Esto convierte el Brewfile en un manifiesto más completo para entornos heterogéneos:
 
 ```ruby
 # Brewfile con soporte npm y krew
@@ -98,4 +98,4 @@ Homebrew 6.0.0 es de esos lanzamientos que no te cambian la vida pero te la hace
 
 Lo que más me gusta es que el equipo ha usado los resultados de su encuesta de usuarios para priorizar. El modo "ask" por defecto (que te pide confirmación antes de instalar) viene de ahí. Pocos proyectos escuchan tan de cerca.
 
-Si usas Homebrew a diario, el upgrade es transparente: un `brew update` y ya estás en la 6.0.0. Lo único que notarás es que va un pelín más rápido y que te pregunta antes de confiar en taps nuevos. Nada que objetar.
+Si usas Homebrew a diario, la actualización es transparente: un `brew update` y ya estás en la 6.0.0. Lo único que notarás es que va un pelín más rápido y que te pregunta antes de confiar en taps nuevos. Nada que objetar.

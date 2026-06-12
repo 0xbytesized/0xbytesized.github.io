@@ -15,7 +15,7 @@ Y tienen números para respaldarla: 1.4 millones de pulls en Docker, más de 20 
 
 PgDog es un proxy a nivel de aplicación (capa 7 OSI) que se coloca entre tu aplicación y tus instancias de PostgreSQL. Entiende el protocolo wire de Postgres y hace tres cosas principales:
 
-**Connection pooling.** Como PgBouncer, pero con esteroides. Soporta pooling por transacción y por sesión. A diferencia de PgBouncer, puede parsear y manejar sentencias `SET` y opciones de startup, manteniendo el estado de sesión correcto al compartir conexiones entre clientes.
+**Agrupación de conexiones.** Como PgBouncer, pero con esteroides. Soporta agrupación por transacción y por sesión. A diferencia de PgBouncer, puede parsear y manejar sentencias `SET` y opciones de startup, manteniendo el estado de sesión correcto al compartir conexiones entre clientes.
 
 **Balanceo de carga.** Reparte queries entre primaria y réplicas automáticamente. Usa el parser nativo de PostgreSQL (via `pg_query`) para detectar escrituras — `INSERT`, `UPDATE`, `CREATE TABLE` — y enviarlas a la primaria, mientras las lecturas van a las réplicas. Soporta round robin, random y least active connections como estrategias.
 
@@ -86,7 +86,7 @@ Hay varias decisiones de diseño que distinguen a PgDog de un proxy genérico:
 
 **Two-phase commit para escrituras cross-shard.** Cuando una transacción toca varios shards, PgDog ejecuta `PREPARE TRANSACTION` y `COMMIT PREPARED` por ti. Si el cliente se desconecta o PostgreSQL crashea, PgDog hace rollback automático en fase I y commit en fase II.
 
-**Re-sharding sin downtime.** PgDog entiende el protocolo de replicación lógica de PostgreSQL y puede orquestar splits de datos entre bases en background. El proceso tiene 5 pasos: crear el nuevo clúster, sincronizar esquemas, copiar datos con replicación lógica, crear índices secundarios y cortar el tráfico atómicamente con `MAINTENANCE ON`/`RELOAD`/`MAINTENANCE OFF`. Sin etcd, sin Zookeeper.
+**Reparticionamiento sin interrupción.** PgDog entiende el protocolo de replicación lógica de PostgreSQL y puede orquestar splits de datos entre bases en segundo plano. El proceso tiene 5 pasos: crear el nuevo clúster, sincronizar esquemas, copiar datos con replicación lógica, crear índices secundarios y cortar el tráfico atómicamente con `MAINTENANCE ON`/`RELOAD`/`MAINTENANCE OFF`. Sin etcd, sin Zookeeper.
 
 **IDs únicos sin secuencias centralizadas.** En vez de depender de un `SEQUENCE` global que sería un cuello de botella en una arquitectura shardeada, PgDog expone `pgdog.unique_id()`, una función basada en timestamps que genera millones de IDs únicos por segundo sin coordinación entre shards.
 
@@ -108,6 +108,6 @@ Lo que más me convence es la filosofía del producto: "mismo PostgreSQL de siem
 
 Dicho esto, hay que ser realista sobre las limitaciones. El soporte para queries cross-shard es parcial: los CTEs y subqueries se ejecutan tal cual en todos los shards y algunas operaciones SQL complejas todavía no están soportadas. La documentación es honesta al respecto — incluyen una tabla clara de qué funciona y qué no.
 
-También está el elefante en la habitación: la licencia AGPL v3. Para uso interno no hay problema — puedes modificar PgDog sin compartir código. Pero si eres un proveedor cloud que quiere ofrecer PgDog como servicio público, la AGPL te obliga a publicar tus modificaciones. Es una decisión deliberada que protege el proyecto del "strip-mining" corporativo.
+También está el elefante en la habitación: la licencia AGPL v3. Para uso interno no hay problema — puedes modificar PgDog sin compartir código. Pero si eres un proveedor cloud que quiere ofrecer PgDog como servicio público, la AGPL te obliga a publicar tus modificaciones. Es una decisión deliberada que protege el proyecto de la explotación corporativa.
 
 Con 5 millones en el banco, un equipo de tres que lanza releases cada jueves y una comunidad que crece, PgDog tiene todos los ingredientes para convertirse en una pieza estándar del stack de PostgreSQL. Si estás acercándote al límite de lo que una sola instancia de Postgres puede manejar, merece la pena probarlo antes de plantearte migrar a otra base de datos.
