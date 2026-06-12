@@ -1,0 +1,191 @@
+---
+title: "MiMo Code: Xiaomi libera su agente de código open source"
+date: "2026-06-12T07:00"
+tags: ["xiaomi", "mimo-code", "coding-agent", "open-source", "claude-code"]
+excerpt: "Xiaomi libera MiMo Code bajo licencia MIT: un agente de código con memoria persistente, verificación de objetivos y orquestación en código."
+---
+
+Hace dos días Xiaomi lanzó [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code), su agente de código para terminal y lo publicó como open source bajo licencia MIT. En 48 horas ha acumulado más de 5.300 estrellas en GitHub y ha generado un debate intenso en Hacker News: ¿puede un agente _made in China_ competir de tú a tú con Claude Code?
+
+La respuesta corta es que sí y con argumentos técnicos sólidos. MiMo Code no es otro wrapper de LLM con un prompt bonito. Es un fork de [OpenCode](https://github.com/anomalyco/opencode) al que el equipo MiMo de Xiaomi ha añadido tres capas que cambian las reglas del juego: **computación**, **memoria** y **evolución**. Vamos a destriparlas.
+
+## El problema que MiMo Code resuelve
+
+Todos los agentes de código funcionan igual: un modelo de lenguaje metido en un bucle que lee, decide, ejecuta herramientas y repite. El modelo es _stateless_ — cada llamada empieza desde cero. Para tareas cortas (menos de 10 turnos) esto funciona: pasas el historial completo y ya está.
+
+Pero cuando la tarea crece a 50, 100 o 200 pasos, aparecen dos problemas:
+
+1. **La ventana de contexto se agota.** Da igual lo grande que sea: docenas de rondas de output de herramientas, snippets de código y logs de error acaban llenándola. Toca comprimir o descartar y la compresión simple refuerza lo cercano mientras debilita lo lejano.
+
+2. **La capacidad de seguir instrucciones se degrada.** A medida que el input crece, las restricciones e intenciones importantes se diluyen entre montañas de output de herramientas. El modelo pierde el hilo.
+
+MiMo Code aborda esto desde tres frentes.
+
+## Computación: gastar tokens para ganar fiabilidad
+
+Cuando una tarea tiene 100 pasos, un error del 2% por paso se convierte en una probabilidad de fracaso acumulada altísima. MiMo Code invierte computación extra en dos mecanismos:
+
+### Max Mode: muestreo paralelo con juez
+
+En lugar de generar una única respuesta por turno, Max Mode genera **5 candidatos en paralelo** (con temperatura 1 para garantizar diversidad). Cada candidato razona y planifica sus tool calls de forma independiente, pero **no las ejecuta**. Luego el mismo modelo actúa como juez a baja temperatura, compara los 5 planes y selecciona el mejor.
+
+El coste en tokens se multiplica por 4 o 5, pero la mejora en SWE-Bench Pro es del 10-20%. Es la misma filosofía que los _best-of-N_ de los modelos de razonamiento, aplicada a nivel de agente.
+
+```bash
+# Activar Max Mode en la configuración
+# .mimocode/mimocode.json
+{
+  "experimental": {
+    "maxMode": true
+  }
+}
+```
+
+### Goal: verificación independiente de finalización
+
+El fallo más traicionero en tareas largas no es hacer algo mal, sino **declarar "terminado" antes de tiempo**. El agente ve progreso en los turnos anteriores y decide que ya está, cuando en realidad faltan tests por pasar o features por implementar.
+
+Goal resuelve esto con un **modelo juez independiente**: cuando el agente intenta detenerse, el sistema lanza una llamada separada que revisa la conversación completa y verifica si la condición de parada (definida por el usuario en lenguaje natural) se cumple de verdad. Si no, le devuelve al agente exactamente lo que falta.
+
+```bash
+# Definir un objetivo al iniciar una sesión
+/goal "todos los tests pasan, el build es limpio y el código está commiteado"
+```
+
+El juez no participa en el trabajo real, así que no desarrolla sesgo de alineación con lo que el agente ya ha hecho. En pruebas internas, la probabilidad de bucle infinito está por debajo del 0.5%.
+
+## Memoria: sesiones que no se acaban nunca
+
+Aquí está la innovación más profunda de MiMo Code. Han diseñado un sistema que permite que una **sesión lógica dure indefinidamente** mientras cada ventana física de contexto se mantiene acotada.
+
+### Ciclos y checkpoints
+
+Imagina una sesión como una secuencia de turnos. La ventana tiene un límite superior. Antes de llegar a él, el runtime interviene en varias posiciones fijas — los **checkpoints** — y lanza un **subagente escritor independiente** que lee la conversación hasta ese punto y escribe un archivo estructurado a disco con 11 campos: intención actual, próxima acción, restricciones, árbol de tareas, archivos implicados, descubrimientos cross-task, errores y fixes, estado del runtime, decisiones de diseño y notas varias.
+
+El agente principal **sigue trabajando** mientras el escritor corre en paralelo. No se bloquean mutuamente.
+
+Cuando la ventana se acerca al límite real, el runtime hace un **rebuild**: corta la ventana actual, abre una nueva y reconstruye el contexto usando los archivos persistidos como semilla. El agente despierta en la nueva ventana con el estado ya desplegado frente a él y sigue trabajando. Desde la perspectiva del modelo, la conversación nunca se interrumpió.
+
+Una secuencia de turnos que pasa por checkpoints y termina con un rebuild es un **ciclo**. No hay límite máximo de ciclos: la sesión lógica es una cadena de ciclos y esa cadena no tiene longitud máxima.
+
+### Por qué extraer pronto, no tarde
+
+La intuición natural es esperar a que la ventana esté casi llena para extraer. El equipo de Xiaomi descubrió que esto es justo al revés. La capacidad del modelo se degrada bajo alta utilización de contexto (el conocido fenómeno _lost in the middle_). Pedirle al modelo que haga la compresión más crítica justo cuando su capacidad de compresión está degradada es una mala idea.
+
+Por eso los checkpoints se disparan **mucho antes del límite**: aproximadamente al 20%, 45% y 70% del presupuesto configurado. Cada disparo es una actualización incremental del anterior. El rebuild final no es una compresión apresurada, sino el momento en que los registros acumulados se convierten en contexto de trabajo.
+
+### Cuatro capas de memoria
+
+El escritor mantiene un sistema de memoria en cuatro capas, cada una con un ciclo de vida distinto:
+
+| Capa | Archivo | Ciclo de vida |
+|------|---------|---------------|
+| **Sesión** | `checkpoint.md` | Solo dentro de la sesión lógica actual |
+| **Proyecto** | `MEMORY.md` | Persistente: decisiones de arquitectura, reglas, hechos técnicos verificados |
+| **Global** | — | Preferencias del usuario que aplican a todos los proyectos |
+| **Historial** | SQLite | Traza completa de cada sesión, sin indexar |
+
+Las capas superiores son más refinadas, más persistentes y más pequeñas; las inferiores son más completas, más grandes y más lentas. El escritor destila hacia arriba y el historial sirve como fallback cuando un detalle no aparece en la memoria estructurada.
+
+```bash
+# El agente puede consultar su memoria en cualquier momento
+# La memoria del proyecto se inyecta automáticamente al retomar una sesión
+cat .mimocode/memory/MEMORY.md
+```
+
+## Evolución: aprender de la experiencia
+
+Si toda la experiencia se pierde al terminar cada sesión, el agente nunca acumula conocimiento. MiMo Code incorpora dos mecanismos de auto-mejora:
+
+### Dream (cada 7 días)
+
+Un agente independiente lee las conversaciones históricas y el archivo de memoria existente y realiza merge, deduplicación, verificación de paths y compresión. Convierte recuerdos dispersos en una representación compacta del estado actual.
+
+### Distill (cada 30 días)
+
+Otro agente independiente lee sesiones históricas pero con un foco distinto: identifica **patrones de trabajo recurrentes** y los solidifica en skills reutilizables, comandos CLI, agentes personalizados o documentos SOP.
+
+```bash
+# Ejecutar manualmente
+/dream    # Consolida conocimiento en memoria de proyecto
+/distill  # Extrae workflows recurrentes como skills
+```
+
+## Dynamic Workflow: orquestación en código, no en prompts
+
+Una de las decisiones de diseño más interesantes es Dynamic Workflow. La forma tradicional de orquestar tareas complejas en agentes es escribir un `SKILL.md` en lenguaje natural: "haz A, luego B y si pasa C, haz D". Esto funciona en escenarios simples pero falla sistemáticamente en workflows complejos: la compresión de contexto se traga pasos, el modelo se salta etapas, la lógica de branching y retry depende del criterio del modelo en vez de estar garantizada por código.
+
+Dynamic Workflow convierte la orquestación **de prompt a código**. El agente principal genera un script JavaScript que se ejecuta de forma determinista en un sandbox aislado:
+
+```javascript
+// Ejemplo conceptual de un workflow que migra componentes
+// El script se ejecuta en un sandbox determinista, no en lenguaje natural
+
+const components = await agent("Lista todos los componentes React en /src");
+
+// parallel() lanza subagentes simultáneos
+const migrations = await parallel(
+  components.map(c => 
+    agent(`Migra ${c.name} de JSX a TSX. Escribe el resultado en /src/${c.name}.tsx`)
+  )
+);
+
+// pipeline() ejecuta en secuencia cuando hay dependencias
+await pipeline([
+  () => agent("Ejecuta los tests de los componentes migrados"),
+  () => agent("Si hay fallos, corrígelos y vuelve a ejecutar"),
+  () => agent("Genera un informe de migración en MIGRATION.md")
+]);
+```
+
+Un `if` no olvida una rama, un `for` no sale antes de tiempo y una barrera no se salta un subagente. El criterio del modelo se usa donde debe usarse (entender y generar código), no se desperdicia en control de flujo.
+
+## Evaluación: los números acompañan
+
+El equipo de Xiaomi publicó dos tipos de evaluación:
+
+**Benchmarks offline**: MiMo Code + MiMo-V2.5-Pro supera a Claude Code con el modelo Sonnet de Anthropic en SWE-Bench Pro y otros dos benchmarks. Hay que ser justos: estos benchmarks miden resolución _one-shot_ de issues a nivel repositorio y muchas de las ventajas de MiMo Code (memoria multi-turno, verificación de finalización, evolución cross-session) solo se manifiestan en escenarios reales de desarrollo que se extienden durante docenas de turnos.
+
+**Prueba A/B con humanos**: 576 desarrolladores, 474 repositorios privados reales, 1.213 pares A/B con juicios claros de ganador/perdedor. El resultado más revelador: cuando la tarea tiene menos de 200 pasos, ambos sistemas ganan aproximadamente el 50% de las veces. Cuando la tarea supera los 200 pasos (incluyendo interacción multi-turno con el usuario), **MiMo Code gana más del 65% de las veces**.
+
+Esto confirma la tesis central del proyecto: las ventajas arquitectónicas de MiMo Code se manifiestan precisamente en el régimen para el que fueron diseñadas — tareas largas.
+
+## Instalación y uso
+
+MiMo Code se instala con un solo comando y ofrece varias opciones de modelo:
+
+```bash
+# Instalación en una línea
+curl -fsSL https://mimo.xiaomi.com/install | bash
+
+# O vía npm
+npm install -g @mimo-ai/cli
+
+# Al primer lanzamiento, elige cómo acceder al modelo:
+# - MiMo Auto (gratis por tiempo limitado, anónimo, cero configuración)
+# - Xiaomi MiMo Platform (OAuth)
+# - Importar desde Claude Code (migra tu auth en un paso)
+# - Proveedor personalizado (cualquier API compatible con OpenAI)
+```
+
+Tiene tres agentes principales: `build` (desarrollo con todos los permisos), `plan` (análisis solo lectura) y `compose` (desarrollo guiado por especificaciones). Cambias entre ellos con `Tab`.
+
+## Mi opinión
+
+MiMo Code me parece la noticia más importante en el espacio de agentes de código desde el lanzamiento de Claude Code. No por los benchmarks — los benchmarks de agentes son notoriamente ruidosos y dependen de mil factores de configuración — sino por tres razones de fondo:
+
+**Primero, es open source de verdad.** Licencia MIT. Puedes leer el código, forkearlo, modificarlo. En un ecosistema donde los agentes de código más capaces son cajas negras (Claude Code, Codex, Gemini CLI), tener una implementación abierta y de calidad es un soplo de aire fresco. El hecho de que esté construido sobre OpenCode y no desde cero es una decisión pragmática que respeto: no reinventas la rueda, añades valor donde importa.
+
+**Segundo, la arquitectura de memoria es el avance correcto en la dirección correcta.** Todos los agentes de código acaban chocando con el mismo muro: la ventana de contexto. La solución de "resúmenes" es un parche. La solución de MiMo Code — checkpoints incrementales con un escritor independiente, rebuilds con inyección presupuestada, cuatro capas de memoria con destilación automática — es una arquitectura pensada desde cero para tareas que duran horas o días. Esto no es un truco de prompt engineering, es ingeniería de sistemas.
+
+**Tercero, Dynamic Workflow señala el futuro.** Llevo meses viendo cómo los SKILL.md en lenguaje natural se convierten en el estándar de facto para orquestar agentes. Funcionan para flujos simples, pero son frágiles, ambiguos y no verificables. Pasar la orquestación a código determinista ejecutado en un sandbox es el camino obvio una vez que lo ves escrito. Me sorprende que hayamos tardado tanto.
+
+Dicho esto, hay preguntas abiertas. Xiaomi regala acceso gratuito al modelo MiMo-V2.5-Pro a través de MiMo Auto "por tiempo limitado". ¿Cuánto durará? ¿Qué pasa cuando se acabe? ¿Es esto una estrategia de adquisición de usuarios para su plataforma de pago? El modelo de negocio no está claro y en el mundo del open source, la sostenibilidad importa.
+
+También me pregunto cómo envejecerá la memoria de proyecto. Un archivo `MEMORY.md` que crece indefinidamente necesita mantenimiento y aunque Dream y Distill están diseñados para eso, he visto demasiados sistemas de "auto-mantenimiento" que degeneran silenciosamente. El tiempo dirá.
+
+En cualquier caso, MiMo Code es una contribución genuina al ecosistema. No es un me-too, no es un wrapper, no es un benchmark hack. Es un agente con ideas propias, liberado como open source, que además funciona bien. Voy a usarlo esta semana en un proyecto real para ver si esa memoria persistente cumple lo que promete.
+
+---
+
+**Fuente:** [MiMo Code: Scaling Coding Agents to Long-Horizon Tasks](https://mimo.xiaomi.com/blog/mimo-code-long-horizon) (Xiaomi MiMo Team, 10 de junio de 2026) · [GitHub: XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) (5.311★, MIT) · [Hacker News #48490826](https://news.ycombinator.com/item?id=48490826) (468 puntos, 257 comentarios)
