@@ -1,0 +1,118 @@
+---
+title: "Apple migra TrueType a Swift: 13% más rápido y memory-safe"
+date: "2026-06-13T01:18"
+tags: ["swift", "apple", "truetype", "memory-safety", "rendimiento"]
+excerpt: "Apple migró el intérprete de hinting TrueType de C a Swift con strict memory safety. Resultado: 13% más rápido, cero bugs de memoria y código open source"
+---
+
+El 12 de junio de 2026 Apple publicó algo que no es un producto nuevo ni un chip más rápido: es la historia de cómo reescribieron el intérprete de hinting TrueType —ese motor que llevas usando desde 1991 cada vez que ves texto en pantalla— de C a Swift. Y no solo lo migraron: lo hicieron un 13% más rápido, eliminaron toda una clase de vulnerabilidades de memoria y publicaron el código en GitHub.
+
+Scott Perry, del equipo de seguridad de Apple, firma el artículo en swift.org. El repo está en `apple/truetype-hinting-interpreter-example`. 41 estrellas en GitHub en el momento de escribir esto, pero el número es lo de menos: lo importante es lo que significa esta migración para el futuro de Swift como lenguaje de sistemas.
+
+## TrueType: 35 años moviendo píxeles
+
+TrueType nació en Apple a finales de los 80 y se lanzó con System 7 en 1991. La idea era brillante: en lugar de almacenar mapas de bits para cada tamaño de fuente, guardas contornos vectoriales y un programa de "hinting" —una serie de instrucciones en bytecode— que le dice al rasterizador cómo ajustar esos vectores a la cuadrícula de píxeles de la pantalla.
+
+El hinting es lo que hace que una Helvetica a 9px no parezca un borrón ilegible. El intérprete ejecuta un bytecode que mueve puntos del contorno para alinearlos con los píxeles, aplica reglas de redondeo, gestiona zonas de referencia y mantiene un estado gráfico complejo. Todo esto en tiempo real, millones de veces, cada vez que renderizas texto.
+
+El problema: ese intérprete estaba escrito en C. Y procesa datos de fuentes que vienen de cualquier parte —un PDF adjunto en un email, una web que visitas, un documento que descargas. Es una superficie de ataque crítica.
+
+## La migración: ~Copyable, Span y noncopyable types
+
+El equipo de Apple no hizo un port línea por línea. Rediseñaron la arquitectura aprovechando capacidades de Swift que simplemente no existen en C.
+
+La clave estuvo en tres features del lenguaje:
+
+**`~Copyable`**: Swift usa ARC (Automatic Reference Counting) para gestionar la memoria de tipos por referencia. En un intérprete de bytecode que ejecuta millones de operaciones por segundo, el overhead de retain/release se acumula. La solución fue usar tipos valor no copiables (`~Copyable`) en toda la arquitectura, reservando las clases solo para abstracciones de alto nivel.
+
+```swift
+// Estado de ejecución del intérprete como tipo no copiable
+struct State: ~Copyable, ~Escapable {
+    var executionState: ExecutionState
+
+    struct Substate: ~Copyable {
+        var gs: GraphicsState
+        var cvt: ControlValueTable
+        var stack: Stack
+    }
+
+    var substate: Substate
+    var storageArea: StorageArea
+}
+```
+
+Esto elimina el ARC por completo en las estructuras internas del intérprete. No hay retain, no hay release, no hay exclusivity checking. El compilador sabe exactamente quién es dueño de qué en cada momento.
+
+**`Span`**: Introducido en Swift 6.2, `Span` permite operar sobre secuencias de memoria sin copiarlas. En el intérprete original en C, los puntos de los glifos se almacenaban en structs con arrays separados para cada coordenada (x original, y original, x escalada, y escalada, x hinted, y hinted). Esto es cache-friendly porque puedes iterar sobre una dimensión de muchos puntos seguidos. Pero en Swift querían exponer los datos como una colección de elementos "punto" para que el código fuera más legible. `Span` les permitió hacer las dos cosas: una vista tipada y segura sobre la memoria subyacente sin copiar nada.
+
+```swift
+// Ejemplo conceptual del patrón usado en el intérprete:
+// Span permite vistas tipadas sobre memoria sin copiarla
+// En el código real, los glifos se acceden vía Zone y Ref<fnt_ElementType>
+func adjustTouchedPoints(_ zone: borrowing Zone) {
+    for point in zone.points where point.touchedX {
+        // desplazar punto según el hinting calculado
+        point.x += hintDelta
+    }
+}
+```
+
+**`F26Dot6` y tipos de punto fijo**: El hinting TrueType opera con aritmética de punto fijo, no con floats. Un `F26Dot6` representa un número con 6 bits fraccionales (1/64 de píxel de precisión). En C esto es un `Int32` con convenciones implícitas. En Swift, el equipo definió tipos explícitos que hacen imposible mezclar unidades por accidente:
+
+```swift
+// Tipos de punto fijo del intérprete — imposible confundir unidades
+struct F26Dot6: FixedWidthInteger {
+    var value: Int32
+    // 6 bits fraccionales: 1 unidad = 1/64 píxel
+    static let fractionBits = 6
+}
+
+struct F2Dot14: FixedWidthInteger {
+    var value: Int16
+    // 14 bits fraccionales: usado para vectores y escalado
+    static let fractionBits = 14
+}
+```
+
+En C, confundir un `F26Dot6` con un `F2Dot14` es un error silencioso que produce glifos deformados. En Swift, el sistema de tipos te grita en tiempo de compilación.
+
+## Cómo validaron que el nuevo intérprete era correcto
+
+Aquí es donde la historia se pone interesante. No bastaba con que el nuevo intérprete "funcionara bien". Tenía que producir píxeles **idénticos** al intérprete en C. Un cambio de un solo píxel en el hinting de una Helvetica a 12pt sería visible para millones de usuarios.
+
+El enfoque de Apple:
+
+1. **Tests unitarios con 99.7% de cobertura** en ambas implementaciones (C y Swift). Los mismos tests se ejecutan contra los dos intérpretes y comparan resultados.
+
+2. **Fuzzing sobre 10 millones de PDFs reales**. Redujeron el corpus a 4.200 documentos sin perder cobertura de código. Esos PDFs contenían 25.572 fuentes con 27 millones de glifos. Renderizaron cada glifo con 4 transformaciones distintas y compararon los bitmaps píxel a píxel contra el intérprete de referencia.
+
+3. **4 veces más código de test que de implementación**. El artículo lo dice explícitamente: escribieron casi cuatro veces más líneas de test que de intérprete.
+
+Esto no es "confiamos en que Swift es memory-safe y ya". Es ingeniería de verificación al nivel de sistemas críticos.
+
+## El resultado: 13% más rápido
+
+El dato que más sorprende: el intérprete en Swift es de media un 13% más rápido que el original en C. No es "igual de rápido". No es "un poco más lento pero más seguro". Es **más rápido**.
+
+¿Cómo? Las optimizaciones cayeron en cuatro categorías:
+
+- **Eliminar overhead de runtime**: `~Copyable` quitó el ARC del camino crítico.
+- **Reorganizar datos**: `Span` permitió vistas tipadas sin copias de memoria.
+- **Specialization**: El compilador de Swift puede especializar genéricos en tiempo de compilación de formas que C no puede.
+- **Aliasing**: Swift sabe que dos referencias no se solapan (exclusivity), lo que permite optimizaciones que en C requerirían `restrict` manual (y rezar para no equivocarse).
+
+## Mi veredicto
+
+Llevo meses cubriendo historias de migraciones de C a Rust —zeroserve, pgdog, silk de ClickHouse— y esta es la primera migración grande de C a Swift que veo documentada con este nivel de detalle. Y es contundente.
+
+Lo que más me convence no es el 13% de rendimiento. Es la combinación de tres cosas que rara vez se dan juntas:
+
+1. **Memory safety demostrable**, no teórico. Strict memory safety de Swift activado en un intérprete que procesa datos no confiables.
+2. **Corrección validada con 27 millones de glifos**. No es un benchmark sintético.
+3. **Código abierto**. Puedes ir a GitHub ahora mismo, clonar el repo, compilarlo y ejecutar los tests.
+
+Apple no suelta código así porque sí. El hecho de que hayan publicado este intérprete —con tests, benchmarks y todo— sugiere que quieren que la industria vea Swift como una alternativa real a C y Rust para sistemas de alto rendimiento. Y con estos números, tienen argumentos.
+
+Si trabajas en sistemas embebidos, renderizado de texto, parsing de formatos binarios o cualquier cosa que procese datos no confiables a alta velocidad, este repo debería estar en tu radar. No por el hinting en sí, sino como referencia de arquitectura Swift de alto rendimiento.
+
+El código requiere macOS 26 y Xcode 26, así que no vas a poder compilarlo en Linux. Pero los patrones —`~Copyable`, `Span`, tipos de punto fijo, tests de compatibilidad binaria— son transferibles a cualquier plataforma donde Swift corra.
