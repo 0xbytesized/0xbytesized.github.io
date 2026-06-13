@@ -1,0 +1,101 @@
+---
+title: "TensorZero: 11.500 estrellas, $7.3M y un repo archivado"
+date: "2026-06-13T19:35"
+tags: ["open-source", "rust", "llm", "startups", "ai-infra"]
+excerpt: "TensorZero recaudó 7,3 millones, alcanzó 11.500 estrellas en GitHub y procesaba ~1% del gasto global en APIs LLM. Esta semana archivaron el repo."
+---
+
+El miércoles 11 de junio de 2026, los 11.500 desarrolladores que habían puesto una estrella a TensorZero en GitHub se despertaron con una sorpresa: el repositorio estaba archivado. Sin announcement previo, sin blog post de despedida, sin periodo de transición. Solo un mensaje en la web: "TensorZero remains available on GitHub but is no longer maintained."
+
+TensorZero era uno de los proyectos open source más ambiciosos del ecosistema LLMOps. Recaudó $7.3 millones en ronda seed liderada por FirstMark con participación de Bessemer, Bedrock, DRW y Coalition. Estaba escrito en Rust, ofrecía latencia sub-milisegundo a 10.000+ QPS y según su propio README procesaba aproximadamente el 1% del gasto global en APIs de LLM.
+
+Y ahora está muerto.
+
+## Qué era TensorZero
+
+TensorZero se presentaba como una plataforma completa para aplicaciones LLM en producción. Unificaba cinco componentes:
+
+- **Gateway**: API unificada para todos los proveedores (OpenAI, Anthropic, DeepSeek, Mistral, Groq, xAI y una docena más)
+- **Observabilidad**: almacenamiento de inferencias y feedback en base de datos propia
+- **Evaluación**: benchmarks con heurísticas y LLM judges
+- **Optimización**: fine-tuning supervisado, prompt engineering automatizado (GEPA), dynamic in-context learning
+- **Experimentación**: A/B testing adaptativo, routing, fallbacks y retries
+
+La idea era crear un "flywheel de datos y aprendizaje": las métricas de producción y el feedback humano alimentan un ciclo que optimiza prompts, modelos y estrategias de inferencia de forma continua.
+
+Técnicamente era sólido. El gateway estaba escrito en Rust — no en Python, no en Node — y prometía menos de 1ms p99 de overhead de latencia. La integración era trivial: cambiabas el `base_url` de tu cliente OpenAI y todo funcionaba.
+
+```python
+from openai import OpenAI
+
+# Así de simple era migrar a TensorZero
+client = OpenAI(
+    base_url="http://localhost:3000/openai/v1",
+    api_key="not-used"
+)
+
+response = client.chat.completions.create(
+    model="tensorzero::model_name::openai::gpt-4o",
+    messages=[
+        {"role": "user", "content": "Dame un dato curioso sobre Rust"}
+    ]
+)
+```
+
+El modelo de datos era el verdadero diferenciador. Cada inferencia se almacenaba con métricas estructuradas, permitiendo construir datasets para fine-tuning, evaluar variantes contra datos históricos y hacer backtesting de nuevas estrategias antes de desplegarlas. La configuración se definía en TOML:
+
+```toml
+# tensorzero.toml — configuración declarativa del gateway
+[models.chat_gpt]
+routing = ["openai", "azure"]
+
+[models.chat_gpt.providers.openai]
+type = "openai"
+model_name = "gpt-4o"
+system_template = "templates/chat_system.msg"
+
+[models.chat_gpt.providers.azure]
+type = "azure"
+model_name = "gpt-4o"
+```
+
+Incluso tenían un "Autopilot": un agente de IA que analizaba datos de observabilidad, configuraba evaluaciones, optimizaba prompts y ejecutaba A/B tests de forma autónoma. La visión era ambiciosa: automatizar gran parte de la ingeniería LLM.
+
+## Qué pasó
+
+Gabriel Bianconi, co-fundador y CEO, confirmó en Hacker News que "a principios de esta semana tomamos la difícil decisión de cerrar el proyecto". Añadió que habían gastado menos de la mitad de los $7.3M levantados.
+
+No hubo adquisición, no hubo pivot público, no hubo un comunicado explicando los motivos. El repo pasó a estado archivado y la web se actualizó con un mensaje escueto.
+
+Una semana antes del cierre, el proyecto había recibido un aviso de seguridad de severidad alta (GHSA-824w-x939-6cmc): un endpoint interno permitía lectura arbitraria de archivos y SSRF. No está claro si esto tuvo relación con la decisión, pero el timing es llamativo.
+
+## Por qué importa
+
+El caso TensorZero es un síntoma de algo más grande. Los VCs invirtieron fuerte en AI infraestructura bajo la tesis de que "las apps son arriesgadas, la infraestructura es segura". Pero la infraestructura open source para LLMs tiene un problema estructural: no hay foso técnico.
+
+Un comentarista en HN lo resumió bien: "Hace un año creé un LLM gateway con métricas, fallback entre proveedores, soporte para tools, MCP client y server, todo con baja latencia. Era un proyecto simple en términos de complejidad técnica. No lo publiqué porque ya conté varios proyectos similares."
+
+El mercado de LLM gateways está saturado: LiteLLM, Portkey, Plexus, Helix y docenas más. Muchos son open source. Diferenciarse es difícil cuando tu producto es esencialmente un proxy con métricas.
+
+Y luego está el elefante en la habitación: los proveedores de modelos (OpenAI, Anthropic, Google) están añadiendo estas capacidades directamente en sus APIs. Cuando OpenAI lanza su propio gateway con observabilidad integrada, ¿quién necesita un middleware externo?
+
+## Mi opinión
+
+TensorZero era técnicamente impresionante. Rust como lenguaje base, métricas estructuradas con un modelo de datos pensado para optimización continua y una visión de flywheel que iba más allá del típico "proxy con dashboard". El problema no era la ejecución técnica.
+
+El problema era el modelo de negocio. $7.3M para construir infraestructura open source en un mercado donde:
+
+1. La barrera de entrada técnica es baja (un gateway LLM no es exactamente un kernel)
+2. Los competidores open source se multiplican
+3. Los proveedores de modelos están integrando verticalmente estas capacidades
+4. El valor real está en los datos y la optimización, no en el proxy
+
+Es la misma historia que hemos visto con tantas herramientas de infraestructura: el open source te da adopción pero no ingresos. Puedes tener 11.500 estrellas y procesar el 1% del gasto global en LLMs y aún así no encontrar un camino a la sostenibilidad.
+
+Lo que más me llama la atención es la forma de cerrar. Archivar el repo sin previo aviso, sin un plan de transición para los usuarios que — según tus propias métricas — representaban el 1% del gasto global en APIs LLM, es una decisión que erosiona la confianza en el open source empresarial. Si construyes infraestructura crítica sobre un proyecto que puede desaparecer de la noche a la mañana, el riesgo no es técnico: es de gobernanza.
+
+La lección para desarrolladores: mira quién está detrás del proyecto, cuál es su modelo de negocio y si depende de funding VC, ten un plan B. La licencia Apache 2.0 significa que el código sigue ahí, pero sin maintainers el valor se evapora rápido en un ecosistema que se mueve a esta velocidad.
+
+Para founders: si levantas VC para infraestructura open source, el reloj empieza a correr en el momento que cierras la ronda. TensorZero gastó menos de la mitad de su funding antes de tirar la toalla, lo que sugiere que no era un problema de burn rate sino de tracción comercial o de tesis de inversión.
+
+El código de TensorZero seguirá disponible en GitHub. Pero el proyecto, como entidad viva, ya es historia.
