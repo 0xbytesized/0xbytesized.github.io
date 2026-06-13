@@ -1,0 +1,92 @@
+---
+title: "21 zero-days en FFmpeg: lo que Google y Anthropic no vieron"
+date: "2026-06-13T07:00"
+tags: ["seguridad", "ffmpeg", "agentes-ia", "c", "vulnerabilidades"]
+excerpt: "Depthfirst desplegó un agente de seguridad sobre FFmpeg y encontró 21 zero-days que llevaban hasta 23 años latentes. Coste: 1.000 dólares."
+---
+
+FFmpeg es ese proyecto que todo el mundo usa y casi nadie mira. Procesa el vídeo de Netflix, YouTube, TikTok, tu navegador, tus cámaras de vigilancia y probablemente el streaming de tu timbre con cámara. Tiene 1.5 millones de líneas de C altamente optimizado, dos décadas de fuzzing intensivo y auditorías manuales de los mejores equipos del mundo. Hace poco Google (con su equipo Big Sleep) encontró 13 vulnerabilidades. Anthropic metió su modelo Mythos y también sacó bugs. Parecía que ya no quedaba fruta en el árbol.
+
+Y entonces llegó depthfirst con su agente autónomo de seguridad y encontró **21 zero-days más**. Ocho ya tienen CVE asignado. Algunos llevaban 23 años escondidos en el código. El coste total: unos 1.000 dólares en cómputo. Anthropic había gastado 10.000.
+
+## No es un asistente de código, es un cazador
+
+Aquí está la diferencia clave que mucha gente no entiende. Un agente de código (tipo Claude Code o Copilot) recibe una tarea tuya y escribe código. Su objetivo es construir. Un agente de seguridad hace lo contrario: modela amenazas, traza flujos de datos, identifica superficies de ataque y persigue hipótesis hasta confirmarlas con un exploit reproducible.
+
+El agente de depthfirst no se limita a escanear patrones. Razona sobre la arquitectura del codebase. Entiende qué parsers aceptan input del atacante, sigue el flujo de datos componente a componente y cuando encuentra algo sospechoso genera un harness para verificarlo. No te suelta un informe teórico: te da un PoC que crashea el binario.
+
+## El bug estrella: de un paquete RTP de 183 bytes a control total del PC
+
+De los 21 bugs, uno destaca por elegante y aterrador. Está en el depacketizador AV1 sobre RTP (`libavformat/rtpdec_av1.c`). La víctima solo tiene que ejecutar:
+
+```bash
+ffmpeg -i rtsp://atacante/stream
+```
+
+El comando más inocente del mundo. Un solo paquete RTP de 183 bytes basta para secuestrar el puntero de instrucción.
+
+### Cómo funciona el depacketizador (y dónde se rompe)
+
+Cuando FFmpeg recibe un stream RTSP, los paquetes RTP llegan troceados. El depacketizador los recompone en un stream elemental limpio. AV1 organiza su bitstream en OBUs (Open Bitstream Units). Un tipo especial de OBU es el Temporal Delimiter (TD), un marcador minúsculo que separa frames. La especificación dice: "ignóralo y elimínalo".
+
+El depacketizador mantiene un cursor `pktpos` que apunta a dónde se escribirá el siguiente byte en el buffer de salida. La invariante fundamental es simple: **`pktpos` nunca debe superar el tamaño del buffer asignado**. Cada vez que se emiten bytes reales, se llama a `av_grow_packet()` para agrandar el buffer. Pero el TD rompe esta invariante:
+
+```c
+// Conceptual: lo que hace el código vulnerable
+if (obu_type == AV1_OBU_TEMPORAL_DELIMITER) {
+    pktpos += obu_size;   // avanza el cursor...
+    continue;             // ...pero sin asignar memoria
+}
+```
+
+El cursor avanza `obu_size` bytes (controlado por el atacante), pero no se reserva memoria. Peor aún: el puntero de entrada `buf_ptr` tampoco avanza, así que en la siguiente iteración el código **relee los bytes del TD como si fueran un OBU nuevo**. El atacante controla tanto el offset como el contenido que se escribe.
+
+```c
+// Conceptual: la siguiente iteración escribe donde no debe
+av_grow_packet(pkt, output_size);  // asigna solo output_size bytes
+pkt->data[pktpos++] = *buf_ptr++;  // pero escribe en offset pktpos (ya envenenado)
+memcpy(pkt->data + pktpos, buf_ptr, payload_size);  // overflow controlado
+```
+
+Con un `obu_size = 148` en el TD, las escrituras empiezan en `pkt->data[148]`, pero el buffer real puede tener solo 81 bytes. El overflow aterriza justo encima de la estructura `AVBuffer` que vive a continuación en el heap:
+
+```c
+// Conceptual: estructura AVBuffer en el heap
+struct AVBuffer {
+    uint8_t *data;       // offset 0
+    size_t   size;       // offset 8
+    atomic_uint refcount; // offset 16
+    void (*free)(void *opaque, uint8_t *data); // offset 24 ← el objetivo
+    void *opaque;        // offset 32
+};
+```
+
+El puntero `free` está en offset 152 desde el inicio del buffer de datos. Con `obu_size = 148`, las escrituras empiezan justo 4 bytes antes, dejando `refcount` intacto (vale 1) y machacando `free` con un valor controlado por el atacante. Cuando FFmpeg necesita reasignar el buffer, `refcount` baja a 0 y se invoca `buffer->free(buffer->opaque, buffer->data)`. Pero `free` ya no es una función legítima: es `0xdeadbeef` o lo que el atacante haya puesto. RIP secuestrado.
+
+## Los otros 20 bugs: un museo de los horrores
+
+El artículo detalla cada vulnerabilidad. Aquí van algunos highlights:
+
+- **CVE-2026-39214**: un stack buffer overflow en el parser SDT que llevaba **23 años** latente (desde 2003). Escribe entradas de servicio sin comprobar el espacio restante.
+- **CVE-2026-39212**: un stack overflow por recursión infinita en el parser de opciones. Una regresión de julio de 2025.
+- **DFVULN-122**: un heap buffer overflow en el depacketizador RTP MPEG-4. **21 años** sin que nadie lo viera (desde 2005). Un `AU-headers-length` de 0 produce una asignación de 1 byte que luego se lee como un campo de 4 bytes.
+- **DFVULN-123**: un integer overflow en el depacketizador RTP LATM que permite un `memcpy` de ~1 GB fuera del buffer. Presente desde 2010.
+- **DFVULN-120**: un integer underflow en el demuxer AVI. Un chunk LIST de tamaño 0 produce un underflow a ~4 GB, disparando una asignación de ~2 GB (DoS). Desde 2011.
+
+El patrón es demoledor: bugs en codecs y demuxers que procesan input no confiable, introducidos hace décadas, sobreviviendo a dos décadas de fuzzing y auditorías de los mejores equipos del planeta.
+
+## Mi opinión
+
+Esto me parece un punto de inflexión. No por los bugs en sí — FFmpeg es un proyecto enorme en C, tener bugs es normal — sino por **quién** los encontró y **cómo**.
+
+Primero, el dato económico: 1.000 dólares frente a 10.000. Un orden de magnitud menos que Anthropic con Mythos. Esto no es "la IA encuentra bugs", que ya lo sabíamos. Es "un agente especializado y autónomo encuentra bugs que equipos humanos de élite pasaron por alto durante 20 años y lo hace por menos de lo que cuesta una conferencia".
+
+Segundo, la metodología. El agente no hace pattern matching ni escaneo estático tradicional. Razona sobre arquitectura, modela amenazas, sigue flujos de datos y **verifica** sus hallazgos con PoCs ejecutables. Esto es cualitativamente distinto a un SAST o un fuzzer. Es más parecido a cómo trabaja un investigador de seguridad humano... pero sin dormir, sin cobrar salario y sin sesgo de "este archivo ya lo audité hace 5 años, no voy a volver a mirarlo".
+
+Tercero, la implicación para el software que usamos. FFmpeg es la biblioteca multimedia más ubicua del mundo. Si un agente de seguridad encontró 21 zero-days en una semana de escaneo, ¿cuántos hay en los otros 10.000 paquetes open source que sostienen Internet? La respuesta me inquieta y me entusiasma a partes iguales.
+
+Lo que está claro es que el modelo de "auditoría de seguridad cada 2 años si hay presupuesto" está muerto. Herramientas como esta van a convertir el escaneo continuo y autónomo en la nueva línea base. Y eso, para cualquiera que ejecute código que no ha escrito él mismo, es una noticia excelente.
+
+---
+
+**Fuente**: [depthfirst.com/research/21-zero-days-in-ffmpeg](https://depthfirst.com/research/21-zero-days-in-ffmpeg) — Zhenpeng (Leo) Lin, Founding Security Researcher. Hacker News [#48510046](https://news.ycombinator.com/item?id=48510046) (177 puntos, 107 comentarios).
