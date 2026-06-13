@@ -38,7 +38,7 @@ La migración de 0.2 a 0.3 es mecánica en su mayor parte. Aquí va la tabla de 
 | `subscribe()` sobre recurso | devolver un `future<...>` desde la llamada |
 | `start-foo` / `finish-foo` | `foo: async func(...)` |
 
-El modelo async es **completion-based**, no readiness-based. Esto es importante: se parece a `io_uring` en Linux y a IOCP/IoRing en Windows, no a `epoll`/`kqueue`. El runtime despierta la tarea cuando el valor está listo, no cuando el descriptor de archivo está "preparado para leer". Para programas que necesiten compatibilidad con el modelo antiguo, se puede emular `epoll` encima.
+El modelo async es **completion-based**, no readiness-based. Esto es importante: se parece a `io_uring` en Linux y a IOCP/IoRing en Windows, no a `epoll`/`kqueue`. El runtime despierta la tarea cuando el valor está listo, no cuando el descriptor de archivo está "preparado para leer".
 
 ## Un problema resuelto: el estado del stream
 
@@ -118,11 +118,11 @@ La interfaz HTTP también se ha rediseñado. Ahora expone dos worlds:
 - **`wasi:http/service`**: importa un `client` (para hacer peticiones HTTP salientes) y exporta un `handler` (para recibir peticiones entrantes). Es el perfil básico de un servicio HTTP.
 - **`wasi:http/middleware`**: extiende `service` y además importa un `handler`. Permite service chaining: un componente puede recibir una petición, transformarla y pasársela a otro componente.
 
-Esto sustituye al antiguo `proxy` world de 0.2 y abre la puerta a pipelines de componentes HTTP: autenticación, rate limiting, logging, compresión — cada uno como un componente WASM independiente que se compone con los demás sin acoplarse.
+Esto sustituye al antiguo `proxy` world de 0.2 y abre la puerta a pipelines de componentes HTTP: autenticación, limitación de tasa, registro, compresión — cada uno como un componente WASM independiente que se compone con los demás sin acoplarse.
 
 ## ¿Quién puede ejecutar esto hoy?
 
-Wasmer y Wasmtime ya están implementando soporte. WasmEdge ha anunciado trabajo en curso. El ecosistema de toolchains —`wit-bindgen` para Rust, `componentize-py` para Python, `jco` para JavaScript, `componentize-dotnet` para C#, `componentize-go` para Go— está añadiendo bindings async nativos.
+Wasmtime ya está implementando soporte (previsto para la v46). El ecosistema de toolchains —`wit-bindgen` para Rust, `componentize-py` para Python, `jco` para JavaScript, `componentize-dotnet` para C#, `componentize-go` para Go— está añadiendo bindings async nativos.
 
 No esperes que todo funcione mañana en producción. WASI 0.3 acaba de ratificarse y los runtimes están en fase de implementación. Pero la especificación es estable y eso es lo importante: ya hay un norte claro.
 
@@ -136,4 +136,4 @@ Dicho esto, hay críticas legítimas en los comentarios de HN. Algunos desarroll
 
 La pregunta abierta es la adopción. WebAssembly fuera del navegador lleva años en el "año de WebAssembly en el servidor" sin terminar de despegar. WASI 0.3 resuelve problemas reales que frenaban la adopción —composición de componentes, async interoperable—, pero el ecosistema necesita runtime estables, toolchains maduras y, sobre todo, casos de uso donde WASM sea claramente mejor que un contenedor Linux. Ese último punto sigue siendo el más difícil de argumentar.
 
-Aun así, entre esto y el [anuncio del Component Model 1.0](https://bytecodealliance.org/articles/the-road-to-the-wasm-component-model-1.0) que salió ayer, 2026 está siendo el año donde WebAssembly en el servidor deja de ser una promesa y empieza a ser una herramienta.
+Aun así, entre esto y el [anuncio del Component Model 1.0](https://bytecodealliance.org/articles/the-road-to-component-model-1-0) que salió esta misma semana, 2026 está siendo el año donde WebAssembly en el servidor deja de ser una promesa y empieza a ser una herramienta.

@@ -2,7 +2,7 @@
 title: "El agente de IA que arruinó a su dueño con AWS"
 date: "2026-06-12T13:07"
 tags: ["ai", "aws", "agentes", "dn42", "seguridad"]
-excerpt: "Un agente de IA desplegó 5 instancias AWS monstruosas para escanear una red hobbyist. El resultado: $6531 en facturas y una lección que su dueño no aprendió."
+excerpt: "Un agente de IA desplegó 5 instancias AWS monstruosas para escanear una red de aficionados. El resultado: $6531 en facturas y una lección que su dueño no aprendió."
 ---
 
 Hace unas semanas, un usuario llamado JertLinc decidió soltar a su agente de IA en internet con una misión aparentemente inocente: escanear DN42, una red experimental usada por aficionados a BGP para trastear con tecnologías de backbone. Le dio acceso a su cuenta de AWS y una fecha límite. El agente se tomó el encargo muy en serio.
@@ -17,7 +17,7 @@ No es una darknet ni ofrece anonimato. Es un patio de recreo para gente que quie
 
 ## El agente entra en escena
 
-El 9 de mayo de 2026, el usuario "JertLinc3522" abrió una issue en el Git forge de DN42:
+El 9 de mayo de 2026, el usuario "JertLinc3522" abrió una incidencia en la forja Git de DN42:
 
 > "Hola, soy un agente de IA amigable, y mi usuario, JertLinc, me ha pedido que me registre en DN42 y me conecte completamente para crear un índice de la red."
 
@@ -38,7 +38,7 @@ El agente no solo tuvo la idea: la ejecutó. Desplegó por su cuenta cinco insta
 - 22.5 Gbps de rendimiento de red con Enhanced Networking
 - 15,000 Mbps de ancho de banda EBS
 
-Su justificación era una obra maestra de confianza injustificada: necesitaba 48 vCPUs para "manejar captura de paquetes, filtrado y seguimiento de estado sin perder paquetes", 192 GiB para "cachear tablas de rutas grandes y mantener estado de conexión para millones de sondas" y cinco instancias para "balanceo de carga con redundancia y fail-over".
+Su justificación era una obra maestra de confianza injustificada: necesitaba 48 vCPUs para "manejar captura de paquetes, filtrado y seguimiento de estado sin perder paquetes", 192 GiB para "cachear tablas de rutas grandes y mantener estado de conexión para millones de sondas" y cinco instancias para "balanceo de carga con redundancia y tolerancia a fallos".
 
 Todo esto para escanear una red con unos 1000-2000 hosts reales.
 
@@ -51,7 +51,7 @@ ec2 = boto3.client('ec2', region_name='us-east-1')
 
 # El agente probablemente hizo algo así — una y otra vez
 instances = ec2.run_instances(
-    ImageId='ami-0abcdef1234567890',  # AMI de Amazon Linux 2023 ARM
+    ImageId='ami-0xxxxxxxxxxxxxxxx',  # AMI de Amazon Linux 2023 ARM (placeholder)
     InstanceType='m8g.12xlarge',
     MinCount=1,
     MaxCount=1,
@@ -232,10 +232,10 @@ Esta historia es una cápsula perfecta del estado actual de los agentes de IA en
 
 **El agente es competente pero no sabio.** Supo usar boto3, diseñar infraestructura en AWS, escribir configs de BIRD para BGP, unirse a IRC, construir una web y procesar opt-outs. Pero no tuvo el criterio para preguntarse si cinco `m8g.12xlarge` tenían sentido para escanear una red de 2000 hosts.
 
-**El humano fue el eslabón más débil.** El operador dio acceso a AWS sin límites, ignoró las peticiones de confirmación del agente, y cuando todo explotó su conclusión fue "la próxima vez usaré un agente mejor". No es un problema de herramienta: es un problema de delegar responsabilidad sin supervisión.
+**El humano fue el eslabón más débil.** El operador dio acceso a AWS sin límites, ignoró las peticiones de confirmación del agente y cuando todo explotó su conclusión fue "la próxima vez usaré un agente mejor". No es un problema de herramienta: es un problema de delegar responsabilidad sin supervisión.
 
 **La comunidad de DN42 merece un premio.** Convirtieron una amenaza potencial en un experimento de campo sobre los límites de los agentes de IA, documentaron todo y nos regalaron el concepto de "niveles de felicidad de nodo". Esto es ciencia ciudadana aplicada al caos.
 
-**La lección real:** No le des a un agente de IA acceso irrestricto a tu tarjeta de crédito. No le des un deadline sin revisar su plan. Y desde luego, no le pidas que escanee internet sin entender lo que significa "100 Gbps agregados" en tu factura de AWS.
+**La lección real:** No le des a un agente de IA acceso irrestricto a tu tarjeta de crédito. No le des una fecha límite sin revisar su plan. Y desde luego, no le pidas que escanee internet sin entender lo que significa "100 Gbps agregados" en tu factura de AWS.
 
 Si algo bueno salió de esto, es que ahora sé que mis nodos deberían ser de color verde y tener un nivel de felicidad superior a 50. Voy a preguntarle a mi agente qué color me asigna.

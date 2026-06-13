@@ -5,9 +5,9 @@ tags: ["xiaomi", "mimo-code", "coding-agent", "open-source", "claude-code"]
 excerpt: "Xiaomi libera MiMo Code bajo licencia MIT: un agente de código con memoria persistente, verificación de objetivos y orquestación en código."
 ---
 
-Hace dos días Xiaomi lanzó [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code), su agente de código para terminal y lo publicó como open source bajo licencia MIT. En 48 horas ha acumulado más de 5.300 estrellas en GitHub y ha generado un debate intenso en Hacker News: ¿puede un agente _made in China_ competir de tú a tú con Claude Code?
+Hace dos días Xiaomi lanzó [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code), su agente de código para terminal y lo publicó como open source bajo licencia MIT. En 48 horas ha acumulado miles de estrellas en GitHub y ha generado un debate intenso en Hacker News: ¿puede un agente _made in China_ competir de tú a tú con Claude Code?
 
-La respuesta corta es que sí y con argumentos técnicos sólidos. MiMo Code no es otro wrapper de LLM con un prompt bonito. Es un fork de [OpenCode](https://github.com/anomalyco/opencode) al que el equipo MiMo de Xiaomi ha añadido tres capas que cambian las reglas del juego: **computación**, **memoria** y **evolución**. Vamos a destriparlas.
+La respuesta corta es que sí y con argumentos técnicos sólidos. MiMo Code no es otro wrapper de LLM con un prompt bonito. Está construido sobre [OpenCode](https://github.com/anomalyco/opencode) y el equipo MiMo de Xiaomi le ha añadido tres capas que cambian las reglas del juego: **computación**, **memoria** y **evolución**. Vamos a destriparlas.
 
 ## El problema que MiMo Code resuelve
 
@@ -43,7 +43,7 @@ El coste en tokens se multiplica por 4 o 5, pero la mejora en SWE-Bench Pro es d
 
 ### Goal: verificación independiente de finalización
 
-El fallo más traicionero en tareas largas no es hacer algo mal, sino **declarar "terminado" antes de tiempo**. El agente ve progreso en los turnos anteriores y decide que ya está, cuando en realidad faltan tests por pasar o features por implementar.
+El fallo más traicionero en tareas largas no es hacer algo mal, sino **declarar "terminado" antes de tiempo**. El agente ve progreso en los turnos anteriores y decide que ya está, cuando en realidad faltan tests por pasar o funcionalidades por implementar.
 
 Goal resuelve esto con un **modelo juez independiente**: cuando el agente intenta detenerse, el sistema lanza una llamada separada que revisa la conversación completa y verifica si la condición de parada (definida por el usuario en lenguaje natural) se cumple de verdad. Si no, le devuelve al agente exactamente lo que falta.
 
@@ -60,7 +60,7 @@ Aquí está la innovación más profunda de MiMo Code. Han diseñado un sistema 
 
 ### Ciclos y checkpoints
 
-Imagina una sesión como una secuencia de turnos. La ventana tiene un límite superior. Antes de llegar a él, el runtime interviene en varias posiciones fijas — los **checkpoints** — y lanza un **subagente escritor independiente** que lee la conversación hasta ese punto y escribe un archivo estructurado a disco con 11 campos: intención actual, próxima acción, restricciones, árbol de tareas, archivos implicados, descubrimientos cross-task, errores y fixes, estado del runtime, decisiones de diseño y notas varias.
+Imagina una sesión como una secuencia de turnos. La ventana tiene un límite superior. Antes de llegar a él, el runtime interviene en varias posiciones fijas — los **checkpoints** — y lanza un **subagente escritor independiente** que lee la conversación hasta ese punto y escribe un archivo estructurado a disco con 11 campos: intención actual, próxima acción, restricciones, árbol de tareas, archivos implicados, descubrimientos entre tareas, errores y correcciones, estado del runtime, decisiones de diseño y notas varias.
 
 El agente principal **sigue trabajando** mientras el escritor corre en paralelo. No se bloquean mutuamente.
 
@@ -144,7 +144,7 @@ Un `if` no olvida una rama, un `for` no sale antes de tiempo y una barrera no se
 
 El equipo de Xiaomi publicó dos tipos de evaluación:
 
-**Benchmarks offline**: MiMo Code + MiMo-V2.5-Pro supera a Claude Code con el modelo Sonnet de Anthropic en SWE-Bench Pro y otros dos benchmarks. Hay que ser justos: estos benchmarks miden resolución _one-shot_ de issues a nivel repositorio y muchas de las ventajas de MiMo Code (memoria multi-turno, verificación de finalización, evolución cross-session) solo se manifiestan en escenarios reales de desarrollo que se extienden durante docenas de turnos.
+**Benchmarks offline**: MiMo Code + MiMo-V2.5-Pro supera a Claude Code con el modelo Sonnet de Anthropic en SWE-Bench Pro y otros dos benchmarks. Hay que ser justos: estos benchmarks miden resolución de una sola pasada de incidencias a nivel de repositorio y muchas de las ventajas de MiMo Code (memoria multi-turno, verificación de finalización, evolución entre sesiones) solo se manifiestan en escenarios reales de desarrollo que se extienden durante docenas de turnos.
 
 **Prueba A/B con humanos**: 576 desarrolladores, 474 repositorios privados reales, 1.213 pares A/B con juicios claros de ganador/perdedor. El resultado más revelador: cuando la tarea tiene menos de 200 pasos, ambos sistemas ganan aproximadamente el 50% de las veces. Cuando la tarea supera los 200 pasos (incluyendo interacción multi-turno con el usuario), **MiMo Code gana más del 65% de las veces**.
 
@@ -184,8 +184,8 @@ Dicho esto, hay preguntas abiertas. Xiaomi regala acceso gratuito al modelo MiMo
 
 También me pregunto cómo envejecerá la memoria de proyecto. Un archivo `MEMORY.md` que crece indefinidamente necesita mantenimiento y aunque Dream y Distill están diseñados para eso, he visto demasiados sistemas de "auto-mantenimiento" que degeneran silenciosamente. El tiempo dirá.
 
-En cualquier caso, MiMo Code es una contribución genuina al ecosistema. No es un me-too, no es un wrapper, no es un benchmark hack. Es un agente con ideas propias, liberado como open source, que además funciona bien. Voy a usarlo esta semana en un proyecto real para ver si esa memoria persistente cumple lo que promete.
+En cualquier caso, MiMo Code es una contribución genuina al ecosistema. No es una copia, no es un wrapper, no es un truco de benchmark. Es un agente con ideas propias, liberado como open source, que además funciona bien. Voy a usarlo esta semana en un proyecto real para ver si esa memoria persistente cumple lo que promete.
 
 ---
 
-**Fuente:** [MiMo Code: Scaling Coding Agents to Long-Horizon Tasks](https://mimo.xiaomi.com/blog/mimo-code-long-horizon) (Xiaomi MiMo Team, 10 de junio de 2026) · [GitHub: XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) (5.311★, MIT) · [Hacker News #48490826](https://news.ycombinator.com/item?id=48490826) (468 puntos, 257 comentarios)
+**Fuente:** [MiMo Code: Scaling Coding Agents to Long-Horizon Tasks](https://mimo.xiaomi.com/blog/mimo-code-long-horizon) (Xiaomi MiMo Team, 10 de junio de 2026) · [GitHub: XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) (MIT) · [Hacker News](https://news.ycombinator.com/item?id=48490826)
