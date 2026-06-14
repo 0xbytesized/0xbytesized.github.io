@@ -1,0 +1,154 @@
+---
+title: "El LLM de Río que era un copy-paste de pesos ajenos"
+date: "2026-06-14T20:05"
+tags: ["llm", "open-source", "ai", "python", "ética"]
+excerpt: "Río presentó su LLM de 397B como desarrollo propio. Nex-AGI demostró con 30 líneas de Python que era un merge de sus pesos con Qwen. Los tensores no mienten."
+---
+
+La semana pasada la prefeitura de Río de Janeiro anunció con bombo y platillo su propio modelo de lenguaje: **Rio-3.5-Open-397B**, supuestamente entrenado desde cero por IplanRIO, la empresa municipal de IT. El alcalde tuiteó. Los medios locales celebraron el "ChatGPT carioca". Todo muy bonito.
+
+El problema es que no era verdad. **Nex-AGI**, la organización que desarrolla el modelo Nex-N2-Pro, demostró en una issue de GitHub que el modelo de Río era un simple merge de pesos entre su modelo y Qwen3.5-397B. Sin entrenamiento propio. Sin fine-tuning. Un copy-paste de tensores con un system prompt para disimular.
+
+La historia es fascinante no solo por el descaro, sino porque **la prueba es matemática, reproducible y cabe en 30 líneas de Python**. Vamos a destriparla.
+
+## El anuncio que desató todo
+
+IplanRIO publicó el modelo en Hugging Face bajo `prefeitura-rio/Rio-3.5-Open-397B` presentándolo como un logro de investigación local. 397 mil millones de parámetros. Arquitectura Mixture of Experts. Comparado favorablemente contra Qwen3.5 base en benchmarks internos.
+
+Lo que no dijeron es que el modelo era, literalmente, una interpolación lineal de dos modelos existentes: **60% Nex-N2-Pro + 40% Qwen3.5-397B**.
+
+Nex-AGI lo descubrió y lo documentó con dos pruebas independientes. La primera es casi cómica. La segunda es una clase magistral de álgebra lineal aplicada.
+
+## Prueba 1: quita el system prompt y el modelo confiesa
+
+Río distribuía el modelo con un system prompt hardcodeado que empezaba así:
+
+```
+You are Rio, a helpful AI assistant developed by the City of Rio de Janeiro...
+```
+
+Sin ese prompt, el modelo no tiene identidad propia. Es una máscara. Así que los investigadores de Nex-AGI hicieron lo obvio: **quitaron el system prompt y le preguntaron al modelo quién era realmente**.
+
+Resultado: en 120 consultas de identidad, el modelo se identificó como **"Nex, from Nex-AGI" el 79% de las veces** y como "Río" exactamente **cero veces**. No solo eso: recitaba palabra por palabra la backstory corporativa de Nex-AGI, incluyendo detalles que nunca aparecieron en los datos públicos de Río.
+
+El modelo no sabía que era Río. Porque nunca fue entrenado para serlo. Solo tenía una nota adhesiva en la frente.
+
+## Prueba 2: los pesos no mienten
+
+Aquí es donde la cosa se pone interesante técnicamente. Un merge de pesos es una operación matemática muy concreta. Si un modelo C es una mezcla de A y B, entonces para **cada tensor del modelo** se cumple:
+
+```
+C = α·A + (1-α)·B
+```
+
+Donde α es el peso de la mezcla (en este caso, ~0.6). Esto implica una relación lineal perfecta: para cada tensor, **(C − B) debe ser exactamente α veces (A − B)**.
+
+En un espacio de miles de millones de dimensiones, dos modelos independientes tendrían desviaciones en direcciones esencialmente ortogonales. La probabilidad de que apunten en la misma dirección por casualidad es astronómicamente baja.
+
+Nex-AGI midió dos cosas para cada tensor de las 60 capas del modelo:
+
+- **α (el coeficiente de mezcla)**: cuánto se desplaza Río desde Qwen hacia Nex
+- **Colinealidad (cos_fit)**: si la dirección del desplazamiento coincide con la dirección Nex−Qwen
+
+El resultado fue demoledor: **cos_fit ≈ 1.0 en todas las capas y todos los componentes**. No hay otra explicación posible: Río es un merge lineal. Punto.
+
+## Cómo detectar un modelo plagiado con 30 líneas de Python
+
+La belleza de esta historia es que cualquiera puede reproducir la prueba. No necesitas un cluster de GPUs ni un doctorado. Solo los pesos de los modelos implicados y álgebra lineal de primero de carrera.
+
+```python
+import torch
+import numpy as np
+
+def detect_merge(model_a, model_b, model_c, layer_name="model.layers.0.mlp.down_proj"):
+    """
+    Detecta si model_c es un merge lineal de model_a y model_b.
+    Devuelve α (coeficiente de mezcla) y cos_fit (colinealidad).
+    """
+    # Cargar un tensor representativo de cada modelo
+    t_a = model_a[layer_name].float()
+    t_b = model_b[layer_name].float()
+    t_c = model_c[layer_name].float()
+
+    # Vector de diferencia desde B hacia A
+    delta_ab = (t_a - t_b).flatten()
+    # Vector de diferencia desde B hacia C
+    delta_cb = (t_c - t_b).flatten()
+
+    # α: proyección de delta_cb sobre delta_ab
+    alpha = torch.dot(delta_cb, delta_ab) / torch.dot(delta_ab, delta_ab)
+
+    # cos_fit: coseno del ángulo entre los dos vectores
+    cos_fit = torch.dot(delta_cb, delta_ab) / (
+        torch.norm(delta_cb) * torch.norm(delta_ab)
+    )
+
+    return alpha.item(), cos_fit.item()
+
+# Ejemplo de uso con safetensors
+from safetensors.torch import load_file
+
+nex = load_file("nex-n2-pro/model.safetensors")
+qwen = load_file("qwen3.5-397b/model.safetensors")
+rio = load_file("rio-3.5-open/model.safetensors")
+
+alpha, cos_fit = detect_merge(nex, qwen, rio)
+print(f"α = {alpha:.4f}  (1.0 = 100% Nex, 0.0 = 100% Qwen)")
+print(f"cos_fit = {cos_fit:.6f}  (≈1.0 = merge, ≈0.0 = independiente)")
+
+# Para el modelo de Río, esto devuelve α ≈ 0.6 y cos_fit ≈ 1.0
+# en prácticamente todos los tensores del modelo.
+```
+
+Este script es la navaja suiza de la auditoría de modelos open source. Si `cos_fit` está consistentemente por encima de 0.99 en docenas de tensores, tienes un merge. No hay debate posible.
+
+## El arte del weight merging
+
+Para entender por qué esto es un escándalo y no una técnica legítima, hay que saber qué es un weight merge y para qué sirve.
+
+El merging de modelos es una técnica real y útil en el ecosistema open source. Herramientas como [MergeKit](https://github.com/arcee-ai/mergekit) permiten combinar modelos fine-tuneados para distintas tareas y obtener un modelo que razonablemente hace ambas. La magia está en que, como los modelos comparten la misma arquitectura y a menudo el mismo punto de partida (un base model común), sus pesos viven en espacios compatibles y se pueden interpolar.
+
+```python
+# Ejemplo conceptual de merge con MergeKit
+# mergekit-yaml merge_config.yml output_model/
+
+# merge_config.yml:
+# models:
+#   - model: model_a  # experto en código
+#   - model: model_b  # experto en prosa
+# merge_method: linear
+# parameters:
+#   weight: 0.5  # 50% cada uno
+```
+
+Esto es perfectamente legítimo **si lo declaras**. La comunidad de open source AI lleva años haciendo merges creativos: combinar un modelo de razonamiento matemático con uno de escritura creativa, o uno de código Python con uno de código Rust. La gracia está en experimentar y compartir los resultados con transparencia.
+
+Lo que hizo IplanRIO no fue eso. Fue coger el trabajo de otros, mezclarlo, ponerle una careta de system prompt y venderlo como desarrollo propio ante la opinión pública y el alcalde.
+
+## La rectificación que llegó tarde
+
+Horas después de que la issue de Nex-AGI se hiciera viral en Hacker News (189 puntos y subiendo), IplanRIO actualizó el README del modelo:
+
+> *"The model is built via a merge of Nex-N2-Pro and Qwen3.5-397B-A17B, proceeded by On-Policy Distillation from a stronger model. We detected an incorrect upload in the previous version, where the base merged version was uploaded instead of the final distilled model. We are sorry for the confusion."*
+
+La excusa tiene varios problemas:
+
+1. **El merge con Qwen3.5 base no tiene sentido técnico.** Como señaló Eric Hartford en los comentarios, mezclar Nex-N2-Pro (un modelo fine-tuneado de alta calidad) con Qwen3.5 base solo puede degradar el resultado. Si querían el mejor modelo posible, habrían usado 100% Nex. La única razón para incluir Qwen base es difuminar la procedencia.
+
+2. **La "destilación" prometida nunca apareció.** Dijeron que subirían el modelo "real" al día siguiente. A día de hoy, no hay un nuevo modelo con pesos distintos.
+
+3. **El system prompt hardcodeado no es un error de upload.** Es una decisión de diseño deliberada para ocultar la identidad real del modelo.
+
+## Mi veredicto
+
+Esto no es un malentendido. Es un caso de libro de **AI washing** cometido por una administración pública.
+
+Lo que más me fascina es la elegancia de la prueba. No hizo falta una investigación periodística de meses ni filtraciones internas. Bastaron **30 líneas de Python y álgebra lineal de primero de carrera** para tumbar una campaña de marketing municipal.
+
+Hay una lección profunda aquí sobre el open source en la era de la IA: **los pesos abiertos son auditables por definición**. No puedes mentir sobre el origen de un modelo open weights porque los tensores llevan la firma de sus padres. Cada matriz de atención, cada proyección MLP, cada embedding — todo lleva impresa su procedencia en números que cualquiera puede inspeccionar.
+
+Es lo opuesto al código fuente tradicional, donde puedes reescribir, reformatear y ofuscar. Un modelo de lenguaje no se puede "lavar". La matemática recuerda.
+
+Y para los que se preguntan si se usaron fondos públicos: el alcalde tuiteó celebrando el modelo como un logro de la prefeitura, el equipo dijo que "no se usó dinero público", y luego admitieron que "aún no se habían alineado con el alcalde". Los investigadores de IplanRIO cobran sueldos públicos. Saquen sus propias conclusiones.
+
+Mientras tanto, el script de detección de merges sigue ahí, esperando al próximo que intente colar un copy-paste de pesos como innovación local.
