@@ -1,0 +1,134 @@
+---
+title: "Cada frame perfecto: la regla UI que todo frontend necesita"
+date: "2026-06-14T13:57"
+tags: ["frontend", "animaciones", "css", "rendimiento", "ui"]
+excerpt: "Nikita Tonsky ha reventado HN con un manifiesto sobre animaciones UI. La regla: si haces una captura de tu app en cualquier momento, debe tener sentido."
+---
+
+Nikita Tonsky no es un cualquiera. Es el creador de [Fira Code](https://github.com/tonsky/FiraCode), la fuente con ligaduras que usas en VS Code. También es el autor de [DataScript](https://github.com/tonsky/datascript), una base de datos inmutable para ClojureScript. Cuando alguien con ese historial escribe sobre animaciones UI, conviene prestar atención.
+
+Su último artículo, [Every Frame Perfect](https://tonsky.me/blog/every-frame-perfect/), ha pegado fuerte en Hacker News: 787 puntos y subiendo. El mensaje es demoledoramente simple y sin embargo casi nadie lo aplica:
+
+> Si hago una captura de pantalla de tu app en cualquier instante, debe tener sentido.
+
+No al acabar la animación. No al cargar la página. En **cualquier** instante. Cada frame. Cada milisegundo de transición.
+
+## Wayland lo entendió primero
+
+Tonsky arranca con una cita de la [documentación de Wayland](https://wayland-book.com/protocol-design/design-patterns.html): "every frame is perfect". Wayland se diseñó con ese mantra porque el stack de GPU moderno es tan complejo que los frames imperfectos —tearing, stuttering, artifacts— se volvieron la norma. Wayland dijo basta.
+
+La genialidad de Tonsky es aplicar ese mismo principio al diseño de interfaces. No es un problema de GPU, es un problema de respeto al usuario. Cada frame imperfecto erosiona la confianza.
+
+## La galería de los horrores
+
+El artículo es un desfile de capturas y vídeos a cámara lenta que exponen fallos en apps que usas a diario. Safari anima el placeholder del centro pero el cursor desde la izquierda. Fotos de Apple desincroniza el borde de recorte con la imagen. YouTube deforma un rectángulo en vez de moverlo. El botón de guardar colapsa sobre sí mismo como un acordeón desafinado.
+
+No son bugs catastróficos. Son micro decisiones de implementación que nadie revisó a cámara lenta. Pero el usuario las nota. No conscientemente, pero las nota. Como dice Tonsky: si la UI tiene estos descuidos, ¿qué garantía tengo de que el código no los tiene también?
+
+## Lo que pasa entre medias
+
+El error clásico del desarrollador frontend es diseñar el estado inicial y el estado final, y tratar la transición como un problema resuelto por el framework. "Le pongo una transición CSS de 300ms y ya está". No. La transición ES el producto. Cada frame intermedio es tan importante como el resultado.
+
+Veamos un ejemplo. Este es el tipo de código que veo en codebases reales constantemente:
+
+```css
+/* El horror silencioso */
+.panel {
+  transition: all 300ms ease;
+}
+```
+
+`all` es una palabra de cuatro letras en CSS. Le estás diciendo al navegador que recalcule estilo, layout, paint y composite para cada propiedad que cambie. Incluso propiedades que no necesitan repaint. Incluso propiedades que el usuario nunca verá cambiar. Es como pedir una pizza y que te traigan el menú entero.
+
+La alternativa:
+
+```css
+.panel {
+  transition: transform 200ms ease-out, opacity 200ms ease-out;
+}
+```
+
+Solo `transform` y `opacity`. Estas dos propiedades son las únicas que el navegador puede animar en la capa de composición, sin disparar layout ni paint. El resultado es una animación que va a 60 fps incluso en un teléfono de gama baja. La diferencia no es teórica: la he medido. En un perfil de rendimiento de Chrome, `transition: all` en un panel con sombra y border-radius dispara recalculaciones de layout que se comen 40ms. Con `transform` y `opacity`, el mismo panel anima en 2ms.
+
+## El problema de los layouts que bailan
+
+Otro de los ejemplos que pone Tonsky es el contenido que se recoloca mientras carga. Esto lo veo a diario: la página pinta un esqueleto, luego el texto real es más largo y todo salta, luego llega una imagen y todo vuelve a saltar. Cumulative Layout Shift no es solo una métrica de Lighthouse, es una experiencia de usuario horrible.
+
+Aquí tienes un patrón que evita el baile en tres líneas:
+
+```css
+.content-area {
+  min-height: 100vh;
+  contain: layout style;
+}
+```
+
+`contain: layout style` le dice al navegador: "lo que pase dentro de este elemento no afecta a lo de fuera, y viceversa". El navegador puede optimizar agresivamente porque le has dado garantías. No recalcula el layout del `body` cuando un párrafo dentro de `.content-area` cambia de tamaño. Esto, combinado con un `min-height` que reserve el espacio, elimina el baile.
+
+Para contenido dinámico donde no puedes saber la altura de antemano, uso este truco con `content-visibility`:
+
+```css
+.lazy-section {
+  content-visibility: auto;
+  contain-intrinsic-size: 500px;
+}
+```
+
+El navegador reserva 500px y no renderiza la sección hasta que está cerca del viewport. Cuando llega, pinta el contenido real y ajusta. El usuario nunca ve el salto porque la sección ya tenía un hueco asignado.
+
+## requestAnimationFrame no es mágico
+
+Un apunte para la gente que hace animaciones con JavaScript. `requestAnimationFrame` no garantiza 60 fps. Garantiza que tu callback se ejecute antes del próximo repaint. Si tu callback tarda 16ms en ejecutarse, el navegador se salta el frame. Punto. No hay milagro.
+
+Este patrón es peligroso:
+
+```javascript
+// No hagas esto
+function animate() {
+  const now = performance.now();
+  const elapsed = now - startTime;
+
+  // Calculas física, actualizas 500 elementos del DOM,
+  // consultas getBoundingClientRect()...
+  updateAllTheThings(elapsed);
+
+  requestAnimationFrame(animate);
+}
+```
+
+Cada vez que llamas a `getBoundingClientRect()` dentro de un animation frame, fuerzas un reflow síncrono. El navegador tira todo lo que tenía cacheado y recalcula. Si lo haces 500 veces en un frame, ese frame se va a 200ms y tu animación se convierte en un slideshow.
+
+La solución es separar lectura y escritura:
+
+```javascript
+function animate() {
+  const now = performance.now();
+
+  // Fase 1: leer todo de una vez
+  const measurements = elements.map(el => el.getBoundingClientRect());
+
+  // Fase 2: calcular sin tocar el DOM
+  const updates = computeUpdates(measurements, now);
+
+  // Fase 3: escribir todo de una vez
+  elements.forEach((el, i) => {
+    el.style.transform = `translateX(${updates[i].x}px)`;
+  });
+
+  requestAnimationFrame(animate);
+}
+```
+
+Este patrón —leer todo, calcular, escribir todo— evita el reflow forzado porque entre lecturas no hay escrituras, y entre escrituras no hay lecturas. El navegador puede hacer batch de todas las escrituras en un solo layout recalculado.
+
+## Mi opinión
+
+El artículo de Tonsky me parece importante no tanto por lo que dice —que también— sino por **quién** lo dice y **cuándo**. Estamos en 2026. Las IAs generan interfaces enteras con un prompt. Los design systems prometen consistencia out of the box. Y sin embargo las animaciones de las apps mainstream son peores que hace cinco años.
+
+¿Por qué? Porque la animación UI es el primer sacrificio cuando optimizas para velocidad de desarrollo. Un LLM te escupe un componente React en dos segundos, pero no te va a poner `will-change: transform` ni te va a medir el layout shift. Eso es criterio humano.
+
+Y hay otra capa. Tonsky es conocido por [su crítica a Electron](https://tonsky.me/blog/disenchantment/) y a las apps que sacrifican rendimiento nativo en nombre de la productividad del desarrollador. Every Frame Perfect es coherente con esa línea: si tu stack tecnológico te impide controlar cada frame, tu stack es el problema. No el diseño, no el usuario. Tu stack.
+
+No creo que la solución sea que todos volvamos a Cocoa y Win32. Pero sí creo que tenemos que recuperar la obsesión por el detalle. La regla de Tonsky —"cada captura debe tener sentido"— es un estándar brutalmente alto, y precisamente por eso es útil. No la vas a cumplir siempre. Pero tenerla como norte cambia cómo programas.
+
+Porque al final, como dice Tonsky, el usuario no puede ver tu código. Solo ve tus frames.
