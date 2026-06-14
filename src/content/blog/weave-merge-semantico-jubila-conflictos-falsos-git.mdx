@@ -1,0 +1,135 @@
+---
+title: "Weave: merge semántico que jubila los conflictos falsos de Git"
+date: "2026-06-14T07:47"
+tags: ["git", "merge", "tree-sitter", "rust", "herramientas"]
+excerpt: "Weave reemplaza el merge de Git por merges a nivel de entidad (funciones, clases) con tree-sitter. 31/31 en tests, cero regresiones en 4.917 merges reales."
+---
+
+Hay un tipo de dolor que todo desarrollador conoce: haces `git merge feature-branch` y Git te escupe un conflicto. Abres el archivo, miras los `<<<<<<< HEAD` y resulta que el conflicto es falso. Tú has añadido una función al principio del archivo y tu compañero ha añadido otra función al final. Los cambios no se tocan. Pero Git, que solo entiende de líneas, ha decidido que hay conflicto porque las dos ramas han modificado rangos de líneas que se solapan.
+
+Esto pasa constantemente. Y con la llegada de los agentes de código — Claude Code, Cursor, Copilot — que disparan PRs en paralelo sobre los mismos archivos, el problema se multiplica. Tres agentes añadiendo funciones independientes al mismo fichero generan tres conflictos falsos que un humano tiene que resolver manualmente.
+
+[Weave](https://github.com/Ataraxy-Labs/weave) es la respuesta a este problema. Un merge driver para Git escrito en Rust que, en lugar de comparar líneas, parsea el código con tree-sitter y hace merge a nivel de entidad: funciones, clases, métodos, claves de JSON. Si dos ramas modifican entidades distintas, Weave lo resuelve automáticamente. Solo hay conflicto cuando ambas ramas tocan la misma entidad de forma incompatible.
+
+## El problema de fondo: Git es ciego al significado
+
+Git trata todo archivo como una secuencia de líneas. Su algoritmo de merge (el famoso *ort*, antes *recursive*) compara las líneas añadidas, modificadas y eliminadas entre la base común y cada rama. Si los cambios de ambas ramas afectan a líneas adyacentes o solapadas, Git se rinde y declara conflicto. No le importa que los cambios sean ortogonales.
+
+El ejemplo canónico:
+
+```
+<<<<<<< HEAD
+export function validateToken(token: string): boolean {
+    return token.length > 0 && token.startsWith("sk-");
+}
+=======
+export function formatDate(date: Date): string {
+    return date.toISOString().split('T')[0];
+}
+>>>>>>> feature-branch
+```
+
+Dos funciones completamente independientes. Cero solapamiento semántico. Pero Git ve dos bloques de líneas añadidas en la misma zona del archivo y levanta la bandera roja. Un desarrollador tiene que intervenir para decir "quédate con las dos", algo que cualquier herramienta con comprensión sintáctica podría resolver sola.
+
+Si esto te suena a problema resuelto, no lo está. Existen herramientas como [Mergiraf](https://github.com/oraison-d-anime/mergiraf) que hacen merge a nivel de AST, pero operan sobre el árbol sintáctico completo y fallan en casos como añadir código al final de un archivo, insertar entre entidades existentes o manejar decoradores. Weave va un nivel más allá: en vez de trabajar con el AST completo, extrae entidades individuales (funciones, clases, métodos) y las empareja por identidad (nombre + tipo + ámbito) entre las tres versiones (base, ours, theirs).
+
+## Cómo funciona Weave
+
+Weave se integra como un merge driver de Git. Cuando haces `git merge`, en lugar de usar el algoritmo línea a línea de Git, Weave:
+
+1. **Parseo**: usa tree-sitter para analizar las tres versiones del archivo (base, nuestra rama, la rama entrante) y extraer entidades semánticas.
+
+2. **Emparejamiento**: empareja las entidades entre versiones por nombre, tipo y ubicación en el ámbito. Sabe que `validateToken` en la versión base es la misma entidad que `validateToken` en la versión modificada.
+
+3. **Resolución**: aplica una matriz de decisión:
+   - **Entidades distintas modificadas en cada rama** → merge automático, sin conflicto.
+   - **Misma entidad modificada en ambas ramas** → intenta merge intra-entidad; si no es posible, declara conflicto.
+   - **Una rama modifica, la otra elimina** → conflicto real, con contexto legible.
+
+El resultado es que Weave solo declara conflicto cuando hay una colisión semántica real. Todo lo demás se resuelve automáticamente.
+
+### Instalación y uso
+
+Weave está en Homebrew y se configura en segundos:
+
+```bash
+# Instalar
+brew install weave
+
+# Configurar en tu repo
+cd mi-proyecto
+weave setup
+
+# A partir de aquí, git merge usa Weave para los tipos de archivo soportados
+git merge feature-branch
+```
+
+También puedes instalarlo desde fuente con Cargo si prefieres compilarlo tú mismo:
+
+```bash
+git clone https://github.com/Ataraxy-Labs/weave
+cd weave
+cargo install --path crates/weave-cli
+cargo install --path crates/weave-driver
+```
+
+`weave setup` modifica `.gitattributes` para enrutar los tipos de archivo soportados al driver de Weave. Si solo quieres probarlo sin tocar el repo, puedes usar `weave setup --local`, que escribe la configuración en `.git/info/attributes` y solo te afecta a ti.
+
+Para usuarios de Jujutsu (`jj`), el soporte es nativo: basta con configurar Weave como merge tool y ejecutar `jj resolve --tool weave`.
+
+## Los números: 31 de 31
+
+El equipo de Ataraxy Labs ha testeado Weave contra 31 escenarios de merge en 7 lenguajes (Python, TypeScript, Rust, Go, Java, C y JSON). Los resultados:
+
+| Herramienta | Merges limpios | Tasa de acierto |
+|-------------|---------------|-----------------|
+| **Weave** | **31/31** | 100% |
+| Mergiraf v0.16.3 | 26/31 | 83% |
+| Git | 15/31 | 48% |
+
+Git falla en la mitad de los casos porque no puede distinguir entre cambios independientes y conflictos reales. Mergiraf mejora la situación pero tropieza en escenarios como añadir código al final del archivo o insertar entre entidades existentes. Weave los resuelve todos porque opera a granularidad de entidad, no de AST completo.
+
+Pero la prueba de fuego son los repositorios reales. El equipo reprodujo 4.917 merges históricos de cinco grandes repositorios open source:
+
+| Repositorio | Lenguaje | Merges | Victorias | Regresiones | Match humano |
+|-------------|----------|--------|-----------|-------------|--------------|
+| git/git | C | 1.319 | 39 | 0 | 64% |
+| TypeScript | TypeScript | 2.000 | 65 | 0 | 6% |
+| Go | Go | 1.247 | 19 | 0 | 58% |
+| CPython | C/Python | 256 | 7 | 0 | 29% |
+| Flask | Python | 56 | 14 | 0 | 57% |
+
+Cero regresiones en 4.917 merges. Cada "victoria" es un merge donde Git conflictuó pero Weave resolvió limpiamente y el resultado coincidió con lo que un desarrollador humano acabó escribiendo. En total, 144 conflictos falsos que nunca deberían haber existido.
+
+El 6% de match humano en TypeScript puede parecer bajo, pero tiene sentido: el repo de TypeScript tiene merges enormes y complejos donde los desarrolladores a menudo reescriben cosas durante la resolución manual. Lo importante es que Weave nunca introdujo errores — sus resoluciones automáticas siempre fueron sintácticamente correctas.
+
+## El MCP server: agentes que negocian merges
+
+Aquí es donde Weave da el salto de "herramienta útil" a "infraestructura para la era de los agentes". Weave incluye un servidor [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) con 15 herramientas que los agentes de IA pueden invocar directamente:
+
+- `weave_preview`: simula un merge y muestra qué pasaría.
+- `weave_claim_entities`: un agente reclama las entidades que va a modificar antes de empezar a escribir.
+- `weave_check_conflicts`: detecta si otro agente ya ha reclamado las mismas entidades.
+- `weave_resolve`: ejecuta el merge semántico real.
+
+Esto habilita un flujo de trabajo donde varios agentes trabajan en paralelo sobre el mismo código sin pisarse: cada uno reclama sus entidades, Weave detecta solapamientos antes de que se produzcan y el merge final es limpio porque las entidades modificadas son disjuntas. Es un sistema de coordinación basado en CRDTs que evita que dos agentes editen la misma función simultáneamente.
+
+## Lo que soporta y lo que no
+
+Weave entiende 28 lenguajes: TypeScript, JavaScript, Python, Go, Rust, Java, C, C++, Ruby, C#, PHP, Swift, Kotlin, Elixir, Bash, HCL/Terraform, Fortran, Dart, Perl, OCaml, Scala, Zig, Vue, Svelte, XML, ERB, JSON, YAML, TOML, CSV y Markdown.
+
+Para archivos en lenguajes no soportados, Weave se retira educadamente y deja que Git haga su merge línea a línea de siempre. No rompe nada, solo mejora lo que entiende.
+
+El límite real es que Weave no hace merge intra-entidad inteligente. Si dos ramas modifican la misma función, Weave declara conflicto (con marcadores mucho más legibles que los de Git, eso sí). No intenta adivinar cómo combinar dos implementaciones distintas de la misma función — y honestamente, es mejor así. Un merge automático de lógica de negocio sería peligroso.
+
+## Mi opinión
+
+Weave resuelve un problema que era tan ubicuo que habíamos dejado de verlo. Los conflictos falsos de Git son como el ruido de fondo de una ciudad: te acostumbras, pero cuando desaparece te das cuenta de la cantidad de fricción que generaba.
+
+Lo que más me convence es el enfoque conservador. Weave no intenta ser mágico ni hacer merge de lógica de negocio. Se limita a lo que es objetivamente seguro: si dos entidades son distintas, no hay conflicto. Si son la misma y ambas ramas las tocan, conflicto. Punto. Esta moderación es lo que explica las cero regresiones en 4.917 merges reales.
+
+El soporte MCP es el movimiento estratégico correcto. Con la explosión de agentes de código que generan PRs, el problema de los conflictos falsos va a multiplicarse por diez. Weave no solo los resuelve, sino que permite que los agentes coordinen sus ediciones antes de que ocurran.
+
+Dicho esto, 28 lenguajes es mucho para un proyecto con 1.144 estrellas y 2 issues abiertas. La calidad del parseo depende de las gramáticas de tree-sitter, que varían enormemente entre lenguajes. El soporte para TypeScript y Python probablemente sea excelente; para Fortran u OCaml, menos. Pero el diseño es sólido y la arquitectura permite añadir lenguajes sin tocar el núcleo del merge engine.
+
+Si trabajas en un equipo donde varios desarrolladores (o agentes) tocan los mismos archivos a la vez, instalar Weave son 10 segundos que te van a ahorrar horas de resolución de conflictos falsos. Y si estás montando flujos de trabajo con agentes de código, Weave debería ser parte de tu stack desde el día uno.
