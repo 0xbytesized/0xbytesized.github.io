@@ -1,0 +1,139 @@
+---
+title: "Pyodide 314.0: Python ya publica wheels WebAssembly en PyPI"
+date: "2026-06-14T01:44"
+tags: ["python", "webassembly", "pyodide", "pypi", "emscripten"]
+excerpt: "PEP 783 es oficial: cualquier paquete Python puede publicar wheels para WebAssembly en PyPI. Pyodide 314.0 lo estrena con Python 3.14, sockets en Node.js y ES modules nativos."
+---
+
+El 9 de junio de 2026 el equipo de Pyodide publicó la versión 314.0. El número no es un capricho: a partir de ahora, la versión de Pyodide sigue a la de Python. Pyodide 314.x corre sobre Python 3.14, y así será en adelante. Pero el número es lo de menos. Lo gordo es que [PEP 783](https://peps.python.org/pep-0783/) ha sido aceptada, y con ella Python estrena una capacidad que llevaba años persiguiéndose: publicar wheels compilados para WebAssembly directamente en PyPI.
+
+## El cuello de botella que desaparece
+
+Hasta ahora, si querías usar un paquete Python con partes compiladas en C/Rust dentro del navegador, dependías de que el equipo de Pyodide lo mantuviera manualmente. Ellos compilaban, empaquetaban y alojaban más de 300 paquetes — NumPy, SciPy, pandas, Polars, scikit-learn, OpenCV, Pillow, PyArrow, aiohttp, Requests, Pydantic, cryptography, orjson... La lista era impresionante, pero el modelo no escalaba. Cada paquete nuevo requería revisión manual. Era un cuello de botella mantenido por un puñado de voluntarios.
+
+Con PEP 783, cualquier maintainer puede compilar su paquete para la plataforma `pyemscripten` y publicarlo en PyPI como un wheel más. Igual que hoy publicas wheels para Linux, macOS y Windows, ahora también para WebAssembly. El ecosistema pasa de ser un jardín cuidado a mano a ser una selva que crece sola.
+
+Los platform tags quedan así:
+
+- `pyemscripten_2025_0_wasm32` — para Python 3.13 (Pyodide 0.29.x)
+- `pyemscripten_2026_0_wasm32` — para Python 3.14 (Pyodide 314.x)
+
+## Cómo se construye un wheel para WebAssembly
+
+Si mantienes un paquete Python con extensiones compiladas, publicar un wheel para Pyodide es sorprendentemente parecido a lo que ya haces. `cibuildwheel` v4.0 ya trae soporte para las ABIs de PyEmscripten:
+
+```bash
+# Con cibuildwheel v4.0+
+cibuildwheel --platform pyemscripten
+
+# O directamente con pyodide-build
+pip install pyodide-build
+pyodide build
+```
+
+El wheel resultante se sube a PyPI con `twine` como cualquier otro. Del lado del usuario, Pyodide lo instalará en runtime con `micropip`:
+
+```python
+import micropip
+await micropip.install("mi-paquete-con-codigo-rust")
+import mi_paquete_con_codigo_rust
+```
+
+Si tu paquete usa PyO3 o maturin, Victorien Plot del equipo de Pydantic ha escrito una [guía detallada](https://blog.pyodide.org/posts/314-release/) sobre cómo publicar wheels PyEmscripten. El proceso es prácticamente el mismo que para cualquier otro target de maturin.
+
+## Pyodide como ES module nativo
+
+Otro cambio importante: `pyodide.asm.js` pasa a llamarse `pyodide.asm.mjs` y se comporta como un módulo ES de verdad. Para la mayoría de usuarios esto es transparente porque `loadPyodide()` lo maneja internamente, pero hay consecuencias:
+
+- Los workers clásicos (no-module) dejan de funcionar. Tienes que usar `type: "module"`.
+- Si referenciabas `pyodide.asm.js` directamente en un bundler, toca actualizar la ruta.
+
+Para service workers que importan Pyodide estáticamente, la API cambia ligeramente:
+
+```js
+import createPyodideModule from "./pyodide.asm.mjs";
+import { loadPyodide } from "./pyodide.mjs";
+
+loadPyodide({ createPyodideModule }).then((pyodide) => {
+  // pyodide listo
+});
+```
+
+## Sockets en Node.js (experimental)
+
+Esta es una de esas features que abren puertas que ni sabías que estaban cerradas. Pyodide 314.0 trae soporte experimental para operaciones de socket en Node.js. TCP, TLS, funciones asíncronas para el webloop y modo no bloqueante. El equipo ha probado con `pymysql` (MySQL), `pg8000` (PostgreSQL) y `redis-py`.
+
+Activarlo es una línea:
+
+```js
+const pyodide = await loadPyodide();
+await pyodide.useNodeSockFS();
+
+// Ahora puedes conectar a PostgreSQL desde Pyodide en Node
+await pyodide.runPython(`
+import pg8000
+conn = pg8000.connect(database="mydb", user="me")
+results = conn.run("SELECT * FROM users LIMIT 10")
+print(results)
+`);
+```
+
+En Node.js v24 o inferior necesitas el flag `--experimental-wasm-stack-switching` para habilitar JSPI. En versiones más recientes no hace falta.
+
+## BigInts que no mienten
+
+Un problema histórico de Pyodide era el roundtrip de enteros grandes entre JavaScript y Python. Un `bigint` de JS llegaba a Python como `int`, pero al volver a JS se convertía en `number`, perdiendo silenciosamente precisión para valores por encima de 2⁵³. Lo mismo pasaba con enteros de Python mayores que 2⁵³.
+
+Pyodide 314.0 introduce `pyodide.ffi.JsBigInt`, un subtipo de `int` que resuelve esto:
+
+```python
+from pyodide.ffi import JsBigInt
+
+# Un bigint de JS ahora llega como JsBigInt
+valor = js_func_que_devuelve_bigint()
+type(valor)  # <class 'pyodide.ffi.JsBigInt'>
+
+# Al devolverlo a JS, sigue siendo bigint, no number
+js_otra_func(valor)  # recibe un bigint, no un number
+```
+
+`JsBigInt` soporta todas las operaciones de `int`, así que el código existente no necesita cambios. Solo gana precisión.
+
+## Resource management cruzado
+
+Otra mejora elegante: Pyodide ahora implementa la proposal de [Explicit Resource Management](https://github.com/tc39/proposal-explicit-resource-management) de ECMAScript en ambos lados de la frontera JS/Python.
+
+En JavaScript, `PyProxy` y `PyBufferView` implementan `[Symbol.dispose]`, así que puedes usar `using` para limpiar objetos Python automáticamente:
+
+```js
+{
+  using proxy = pyodide.runPython("open('datos.txt').read()");
+  // proxy se destruye automáticamente al salir del bloque
+}
+```
+
+En Python, si un objeto JS tiene `[Symbol.dispose]()`, puedes usarlo como context manager con `with`:
+
+```python
+with js_object as x:
+    # x[Symbol.dispose]() se llama al salir
+    ...
+```
+
+## Cambios en la stdlib
+
+La versión 314.0 revierte una decisión histórica: `ssl`, `sqlite3` y `lzma` vuelven a la biblioteca estándar. Antes estaban "unvendoreadas" para reducir el tamaño de descarga inicial, pero con PEP 783 ya no tiene sentido mantener esa separación. La contrapartida es que la descarga inicial pesa más, pero la experiencia de desarrollo es más fluida: no tienes que instalar `sqlite3` después de cargar Pyodide.
+
+OpenSSL, sin embargo, se ha eliminado de la stdlib. Era demasiado grande. El módulo `ssl` ahora usa una implementación propia con funciones básicas compatibles con la API estándar, pero sin soporte real de SSL/TLS (que en el navegador nunca funcionó del todo porque no hay sockets). `hashlib` pierde algunas funciones criptográficas que dependían de OpenSSL.
+
+Y como Pyodide 314.0 corre sobre Python 3.14, el nuevo módulo `compression.zstd` está disponible out of the box para compresión y descompresión zstd nativa.
+
+## Mi veredicto
+
+PEP 783 es de esas cosas que parecen burocráticas pero cambian la trayectoria de un ecosistema. Que un paquete Python pueda publicar un wheel para WebAssembly en PyPI con el mismo flujo que usa para Linux o macOS elimina la fricción más grande que tenía Pyodide. Ya no hace falta un equipo central bendiciendo cada paquete.
+
+Lo de los sockets en Node.js me parece infravalorado. Poder conectar Pyodide a PostgreSQL o Redis desde Node.js abre un montón de casos de uso: testing, scripting, migraciones, ETL ligero... Todo con el mismo runtime de Python que corre en el navegador.
+
+La parte que más me gusta es el detalle: `JsBigInt`, el resource management cruzado, el soporte de slices en JsProxy... Son cosas que no salen en el titular pero que hacen que trabajar con Pyodide deje de sentirse como pelear con una frontera entre dos lenguajes y empiece a sentirse como un runtime cohesivo.
+
+Si mantienes un paquete Python con extensiones nativas, publicar un wheel `pyemscripten` debería estar en tu roadmap. El coste es bajo y la audiencia potencial — cualquiera que ejecute Python en un navegador — es enorme.
