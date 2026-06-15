@@ -1,0 +1,108 @@
+---
+title: "Curl se planta: un mes sin reportes de seguridad"
+date: "2026-06-15T08:00"
+tags: ["curl", "open-source", "seguridad", "mantenimiento", "salud-mental"]
+excerpt: "Daniel Stenberg cierra curl a reportes de seguridad en julio de 2026. Tras meses de avalancha de IA, el maintainer se toma su primer descanso en 30 años."
+---
+
+import { Image } from "astro:assets";
+
+Si usas Internet en 2026, tienes curl instalado. No una vez. Varias. Tu teléfono, tu router, tu tele, tu coche, tu nevera — cualquier cosa que hable HTTP probablemente lleva libcurl dentro. Treinta mil millones de instalaciones. Treinta años de historia. Y un solo maintainer que acaba de decir: "Paro en julio. Si encuentras una vulnerabilidad, me lo cuentas en agosto".
+
+Ayer, 14 de junio de 2026, [Daniel Stenberg publicó](https://daniel.haxx.se/blog/2026/06/15/curl-summer-of-bliss/) lo que llamó el **curl summer of bliss**: el proyecto curl no aceptará reportes de seguridad durante todo julio de 2026. El formulario de Hackerone se pausa el 1 de julio a las 00:00 CEST y no se reabre hasta el 3 de agosto. El email de seguridad también será un agujero negro. La release 8.22.0 se retrasa al 2 de septiembre. Y punto.
+
+No es un capricho. Es una respuesta a cuatro meses de presión insostenible con reportes de seguridad impulsados por IA.
+
+## Treinta años sin vacaciones
+
+Daniel Stenberg fundó curl en 1996. Desde 2019 trabaja en ello a tiempo completo, con semanas de 50 horas que se alargan por las noches, fines de semana incluidos. En [otro post de mayo](https://daniel.haxx.se/blog/2026/05/26/the-pressure/), describió la situación sin adornos:
+
+> "We have been under a huge pressure for the last four months or so. Now we need some rest."
+
+Esa presión tiene nombre y apellido: reportes de vulnerabilidad generados por herramientas de IA. Stenberg llevaba años documentando el deterioro: primero fueron los LLMs tontos que inventaban bugs inexistentes, luego el spam de "AI slop reports" y desde marzo de 2026 un caos de reportes de alta calidad aparente pero que en el fondo requieren el mismo esfuerzo de triage.
+
+El resultado es brutal. Los números de la [tabla de vulnerabilidades de curl](https://curl.se/docs/vuln-table.html) lo confirman: 18 CVEs en la 8.17.0, 12 en la 8.18.0, 8 en la 8.19.0. No es que curl se esté volviendo más inseguro — es que cada vez más ojos (humanos y sintéticos) lo escrutan con más intensidad.
+
+## Cuánto curl hay en tu vida
+
+Para entender la magnitud, ejecuta esto en tu máquina:
+
+```bash
+# Cuántos binarios en tu sistema enlazan con libcurl
+ldconfig -p 2>/dev/null | grep libcurl | wc -l
+
+# ¿Qué procesos en ejecución tienen libcurl mapeada?
+sudo lsof 2>/dev/null | grep libcurl | awk '{print $1}' | sort -u
+```
+
+En mi contenedor actual el primer comando devuelve varias entradas. Pero eso es solo la superficie. libcurl está embebida en routers, impresoras, sistemas de infoentretenimiento de coches, consolas de videojuegos y equipamiento médico. Cada una de esas instalaciones ejecuta código C que maneja parsing de protocolos, negociación TLS y gestión de conexiones en paralelo.
+
+El trabajo de mantener eso seguro no es solo revisar código. Es hacer triage de cada reporte, reproducir condiciones imposibles ("necesitas un proxy SOCKSv5 con autenticación Kerberos detrás de un balanceador que haga redirect a otro proxy"), determinar el impacto real y preparar parches que no rompan ninguna de las decenas de combinaciones de SO, arquitectura y backend TLS que curl soporta.
+
+## Cómo se ve un buen reporte de vulnerabilidad
+
+Para entender lo que Stenberg y su equipo procesan a diario, vale la pena ver la diferencia entre un reporte real y el ruido generado por IA. Un reporte de calidad incluye:
+
+```bash
+# Un PoC mínimo y reproducible
+curl --tlsv1.3 --proxy http://proxy:8080 \
+     -H "Transfer-Encoding: chunked" \
+     https://target.example.com/large-payload
+```
+
+Pero la mayoría de los reportes recientes son alucinaciones estadísticamente plausibles: mezclan nombres reales de funciones con escenarios inventados, flags que no existen con versiones que jamás se lanzaron y requieren que un humano invierta horas en descartarlos.
+
+El problema no es que la IA genere reportes. Es que alguien los copia, los pega en Hackerone y espera el bounty. Mientras, el maintainer quema fines de semana separando señal de ruido.
+
+## El precedente que sienta
+
+Lo de curl no es un caso aislado. Es la primera vez que un proyecto de infraestructura crítica — de los de verdad, de los que están en treinta mil millones de dispositivos — dice públicamente "nuestra salud mental vale más que tu reporte de seguridad urgente". Y lo dice con un plan: no es un abandono, es un paréntesis con fecha de caducidad. Los contratos de soporte de pago siguen activos. Los issues y PRs en GitHub siguen abiertos.
+
+Stenberg incluso anima a otros proyectos a hacer lo mismo:
+
+> "If you and your Open Source projects also want to participate in the summer of bliss 2026: just do it and let us know."
+
+Cuesta imaginar a Linux, OpenSSL o glibc haciendo algo parecido. Pero el gesto es importante: visibiliza que mantener software que usa medio planeta no es gratis y que el voluntariado tiene un límite.
+
+## Lo que libcurl hace por ti sin que lo sepas
+
+Para cerrar con código real, aquí tienes un ejemplo mínimo de libcurl en C — el tipo de código que ejecutan treinta mil millones de dispositivos:
+
+```c
+#include <curl/curl.h>
+#include <stdio.h>
+
+static size_t write_callback(void *data, size_t size,
+                             size_t nmemb, void *userp) {
+    fwrite(data, size, nmemb, stdout);
+    return size * nmemb;
+}
+
+int main(void) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return 1;
+
+    curl_easy_setopt(curl, CURLOPT_URL,
+                     "https://curl.se");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                     write_callback);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK)
+        fprintf(stderr, "curl_easy_perform() failed: %s\n",
+                curl_easy_strerror(res));
+
+    curl_easy_cleanup(curl);
+    return 0;
+}
+```
+
+Cada una de esas funciones — `curl_easy_init`, `curl_easy_setopt`, `curl_easy_perform`, `curl_easy_strerror` — es una API real que existe desde hace décadas. Y el código que las implementa tiene que manejar HTTP/1.1, HTTP/2, HTTP/3, WebSocket, FTP, SMTP, IMAP, MQTT, SMB, LDAP y una docena más de protocolos, cada uno con sus edge cases, sus CVEs y sus parches.
+
+## Mi veredicto
+
+Stenberg tiene razón. Y llega tarde.
+
+El open source lleva años romantizando el burnout del maintainer como si fuera una medalla. La presión no viene solo de las empresas que construyen negocios sobre tu código sin contribuir — ahora se suma una avalancha de reportes sintéticos que nadie filtró antes de enviar. La industria necesita mecanismos para que el triage de seguridad no recaiga siempre sobre las mismas tres personas y el gesto de curl es un primer paso para normalizar que los maintainers también son humanos con derecho a desconectar.
+
+Si tu empresa depende de curl (y estadísticamente es así), julio de 2026 es un buen mes para revisar qué tal llevas tus dependencias. Porque el tipo que las mantiene estará en la playa. Y se lo ha ganado.
