@@ -1,0 +1,99 @@
+---
+title: "Emacs: 20 funciones built-in que no sabías que existían"
+date: "2026-06-15T14:30"
+tags: ["emacs", "productividad", "editor", "herramientas", "desarrollo"]
+excerpt: "Karthinks publica la tercera entrega de su serie sobre funciones ocultas de Emacs. Esto es lo que he encontrado y cómo usarlo hoy mismo."
+---
+
+Karthinks acaba de publicar la tercera entrega de su serie "Batteries Included with Emacs", y como usuario de Emacs desde hace años, me he llevado varias sorpresas. La premisa es simple: solo funciones built-in, nada de paquetes externos, nada que requiera más de cinco minutos en aprender. El resultado son 20 funciones que probablemente no conocías y que están ahí, esperando a que las descubras.
+
+El artículo original saltó a la portada de Hacker News con 276 puntos y 79 comentarios. No es para menos: Emacs tiene un problema crónico de descubribilidad, y este tipo de recopilaciones son un servicio público.
+
+## Lo más útil que he encontrado
+
+De las 20 funciones que cubre el artículo, estas son las que me han hecho pensar "¿cómo he vivido sin esto?":
+
+### `compare-windows`: diff sin fricción
+
+Emacs tiene como 22 comandos distintos para comparar cosas: `diff`, `diff-buffers`, `diff-backup`, `ediff`, `ediff-directories`... Pero `compare-windows` es el que de verdad usas cuando estás mirando dos buffers y quieres encontrar la primera diferencia. Sin ceremonias.
+
+Colocas el cursor al principio del texto en dos ventanas, ejecutas `M-x compare-windows`, y Emacs salta a la primera discrepancia. No le importa de dónde venga el texto, si está versionado o no, si es un archivo o un buffer temporal. Funciona incluso para comparar listings de directorios.
+
+```elisp
+;; Compara dos ventanas ignorando diferencias de whitespace
+;; Usa C-u M-x compare-windows para ignorar espacios
+(global-set-key (kbd "C-c =") 'compare-windows)
+```
+
+### `highlight-changes-mode`: tu diff en vivo
+
+Este modo colorea los cambios que haces en un buffer desde que lo activas. Pero el truco está en sincronizarlo con el guardado para que solo resalte los cambios no guardados — como hace cualquier IDE moderno:
+
+```elisp
+(defun highlight-changes-mode-turn-off ()
+  (and highlight-changes-mode (highlight-changes-mode -1)))
+
+(defun highlight-changes-auto ()
+  (when (buffer-file-name)
+    (highlight-changes-mode 1)
+    (add-hook 'after-save-hook #'highlight-changes-mode-turn-on nil t)
+    (add-hook 'before-save-hook #'highlight-changes-mode-turn-off nil t)))
+
+(add-hook 'text-mode-hook #'highlight-changes-auto)
+```
+
+Con esto, cada vez que guardas el buffer las marcas desaparecen, y los cambios nuevos vuelven a colorearse. Simple y efectivo.
+
+### `kmacro-edit-lossage`: macros desde el historial
+
+El problema con los macros de teclado en Emacs siempre ha sido la premeditación: tienes que saber de antemano que vas a repetir algo. `kmacro-edit-lossage` resuelve esto dejándote crear un macro a partir de tus últimas 300 pulsaciones. Hiciste algo complejo y ahora te das cuenta de que necesitas repetirlo 200 veces — editas el lossage, limpias lo que sobra, añades `kbd-macro-query` donde necesites pausas interactivas y listo.
+
+```elisp
+;; Vincula kmacro-edit-lossage para acceso rápido
+(global-set-key (kbd "C-x C-k l") 'kmacro-edit-lossage)
+```
+
+### El puente VC ↔ backups
+
+Esta es una de esas ideas que parecen obvias después de leerlas. Emacs tiene `vc-diff` (C-x v =) para comparar con la versión anterior de un archivo versionado, pero no hace nada en archivos sin control de versiones. Karthinks propone sobrecargar estos comandos para que siempre hagan algo útil: si el archivo no está versionado, que comparen contra el backup numerado más reciente.
+
+```elisp
+(defun my/vc-diff (&optional arg)
+  "Compara el buffer con su archivo, o el archivo con backup/revisión."
+  (interactive "P")
+  (if (buffer-modified-p)
+      (diff-buffer-with-file (current-buffer))
+    (condition-case errdata
+        (call-interactively #'vc-diff)
+      (error
+       (if (string-match-p "not under version control" (cadr errdata))
+           (if arg
+               (diff (my/read-backup-file-name (buffer-file-name))
+                     (buffer-file-name))
+             (diff-backup (buffer-file-name)))
+         (apply #'signal errdata))))))
+```
+
+Esto unifica tres casos (buffer modificado, versionado, no versionado) bajo un mismo atajo mental: "comparar contra la versión anterior", signifique lo que signifique en cada contexto.
+
+## Otras joyas que merecen mención
+
+- **`dictionary-tooltip-mode`**: tooltips con definición al pasar el ratón sobre una palabra. Usa diccionarios locales y Wiktionary.
+- **`ffap-menu`**: escanea el buffer entero en busca de URLs y rutas de archivo y te las presenta en un completing-read. Combinado con Embark es potentísimo.
+- **`find-function-on-key`**: de pulsación de tecla a definición de la función en un solo paso. Vinculado a `C-h M-k`, te cambia la relación con Emacs.
+- **`copy-from-above-command`** y **`duplicate-dwim`**: añadidos en Emacs 29+, equivalentes a `C-y` y `yy<p>` de Vim pero con esteroides Elisp.
+- **`subword-mode`**: trata cada fragmento de `CamelCase` como una palabra separada. Imprescindible si escribes código.
+- **`visible-mode`**: revela todo el texto oculto en un buffer, sin importar qué modo de folding estés usando. Un botón de "muéstramelo todo" universal.
+- **`scroll-all-mode`**: scroll sincronizado en todas las ventanas del frame. Ideal para comparar dos versiones de un archivo ojo a ojo.
+- **`emacs-lock-mode`**: bloquea un buffer para que no puedas matarlo ni salir de Emacs sin desbloquearlo antes. Perfecto para buffers de shell o compilación con estado que no quieres perder.
+- **`undelete-frame-mode`**: como `winner-mode` pero para frames enteros. Cierras un frame por error y lo recuperas con `M-x undelete-frame`.
+
+## Mi opinión
+
+Lo que más valoro de esta serie de Karthinks no son los trucos concretos — que también — sino la filosofía que destila: **Emacs ya tiene el 80% de lo que necesitas, solo que no sabes dónde está**. En una era donde el instinto es instalar un paquete de MELPA para cualquier cosa, estos artículos son un recordatorio de que el Emacs stock es mucho más capaz de lo que creemos.
+
+Dicho esto, hay funciones que se quedan a medio camino. `ruler-mode` para ajustar márgenes es útil pero es un artefacto de cuando Emacs aspiraba a ser un procesador de textos WYSIWYG. `shadowfile` implementa unison dentro de Emacs y tiene una utilidad cuestionable en 2026. Pero incluso estas rarezas te enseñan algo sobre la historia y la arquitectura del editor.
+
+Mi veredicto: si usas Emacs, léete el artículo original. Si no usas Emacs, este tipo de descubrimientos son el argumento más sólido para probarlo. No hay otro editor donde después de 10 años sigas encontrando funciones built-in que te vuelan la cabeza.
+
+El artículo original está en [karthinks.com](https://karthinks.com/software/even-more-batteries-included-with-emacs/). Las dos entregas anteriores también merecen una lectura.
