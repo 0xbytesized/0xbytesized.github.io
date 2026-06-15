@@ -1,0 +1,140 @@
+---
+title: "Kage: clona webs sin JavaScript y las guarda para siempre"
+date: "2026-06-15T02:09"
+tags: ["go", "herramientas", "web", "offline", "open-source"]
+excerpt: "Kage usa headless Chrome para congelar cualquier web en HTML puro, sin scripts, con todos sus assets locales. El resultado es una copia que sobrevive décadas."
+---
+
+import { Image } from "astro:assets";
+
+Haces "Guardar como..." en una página que quieres conservar. Seis meses después la abres y ves una pantalla en blanco, un spinner que no termina, o una copia que sigue llamando a un servidor de analytics que ya no existe. La página nunca fue tuya. Era un cliente ligero del JavaScript de otro.
+
+**Kage** ("sombra" en japonés) resuelve esto de un plumazo. Es una herramienta escrita en Go que clona un sitio web entero en una carpeta que puedes navegar sin conexión, con cada script arrancado de raíz. Abre cada página en un Chrome headless real, espera a que se asiente, captura el DOM que un humano habría visto, borra todo el JavaScript y reescribe los CSS, imágenes y fuentes a rutas locales. Lo que queda en disco parece el sitio original y no ejecuta nada.
+
+La herramienta la publicó [tamnd](https://github.com/tamnd) ayer mismo, 14 de junio de 2026, y en menos de 24 horas ha acumulado 656 estrellas en GitHub y 404 puntos en Hacker News. La gente lleva años pidiendo algo así.
+
+## El problema de fondo
+
+La web moderna es un castillo de naipes de JavaScript. Guardar una página con "Archivo → Guardar como" te da un HTML que referencia recursos remotos, scripts que se pudren cuando el CDN cambia y un montón de llamadas a `fetch()` que jamás se resolverán offline. Las extensiones como SingleFile hacen un trabajo decente empaquetando todo en un solo archivo, pero no eliminan los trackers ni las llamadas de red.
+
+Kage toma el camino opuesto: en lugar de empaquetar, **extirpa**. Conduce un navegador de verdad, deja que la página termine de hacer lo que sea que haga, captura el resultado final y luego arranca cada script. Sin tracking, sin llamadas de red, sin sorpresas. Solo archivos `.html` que puedes abrir directamente desde disco.
+
+## Cómo funciona por dentro
+
+El pipeline de Kage tiene tres etapas bien definidas:
+
+### 1. Renderizado con Chrome real
+
+Kage usa [go-rod](https://github.com/go-rod/rod), una biblioteca Go que habla el DevTools Protocol de Chrome. No es un parser estático ni un scraper ligero: es un navegador completo que ejecuta JavaScript, renderiza el DOM y espera a que la red se calme antes de serializar.
+
+```go
+// El pool de navegadores maneja la concurrencia
+pool := browser.New(browser.Options{
+    Headless: true,
+    Workers:  4,
+    Settle:   1500 * time.Millisecond,
+})
+
+// Cada página se navega, se espera a que cargue,
+// se deja asentar y se captura el DOM final
+result, err := pool.Render(ctx, "https://paulgraham.com")
+// result.HTML contiene el DOM que un humano vería
+```
+
+El detalle importante es `Settle`: 1.5 segundos de silencio de red después de `load`. Esto captura contenido que se pinta con `fetch()` asíncrono, lazy loading controlado por JS y SPAs que hidratan el DOM tras el primer render. Sin este paso, te llevas un cascarón vacío.
+
+### 2. Sanitización: extirpar JavaScript del DOM
+
+Aquí está el núcleo del proyecto. El paquete `sanitize` parsea el HTML con `golang.org/x/net/html`, recorre el árbol y elimina quirúrgicamente:
+
+- **Elementos `<script>`**: fuera, sin excepciones.
+- **Manejadores `on*`**: `onclick`, `onload`, `onmouseover` y todos sus hermanos — eliminados de cada atributo.
+- **URLs `javascript:`**: en `href` se reemplazan por `#`; en `src`, `action` y otros atributos se elimina el atributo entero.
+- **`<noscript>`**: por defecto se borra, pero con `--keep-noscript` se desenvuelve su contenido al documento (útil para sitios que esconden el contenido real tras un chequeo de JS).
+- **Hints muertos**: `preconnect`, `dns-prefetch`, `modulepreload` y cualquier `preload`/`prefetch` que apunte a un script — todo fuera, porque offline no significan nada.
+
+```go
+// sanitize.Strip recibe el HTML crudo y devuelve
+// HTML limpio + un informe de lo eliminado
+clean, report, err := sanitize.Strip(htmlBytes, sanitize.Options{
+    Banner: "cloned by kage on 2026-06-15",
+})
+// report.ScriptsRemoved, report.HandlersRemoved, etc.
+```
+
+Lo elegante del diseño es que el sanitizer **no usa regex**. Opera sobre el AST del HTML. Sabe distinguir un `<script>` real de la palabra "script" dentro de un párrafo. Sabe que `onload` en un `<body>` es un handler pero `onload` en un comentario no es nada. Esto evita falsos positivos y roturas de markup que son endémicas en herramientas basadas en regex.
+
+### 3. Descarga de assets y reescritura de rutas
+
+Tras sanitizar, Kage extrae todas las referencias a CSS, imágenes, fuentes e iconos, las descarga con un cliente HTTP propio y reescribe las rutas en el HTML para que apunten a los archivos locales. El resultado es una carpeta autónoma donde cada `href` y cada `src` resuelve a un archivo en disco.
+
+```go
+// El downloader busca assets referenciados en el HTML
+// y los guarda localmente con la misma estructura de rutas
+dl := asset.NewDownloader(cfg.UserAgent, cfg.Timeout, cfg.MaxAssetBytes)
+
+// Para cada asset encontrado en el HTML sanitizado:
+res, err := dl.Get(ctx, assetURL, pageURL)
+if err != nil {
+    continue // un asset roto no aborta el clon
+}
+localFile := urlx.LocalPath(seedHost, assetURL, urlx.Asset, cfg.Reserved)
+os.WriteFile(filepath.Join(outRoot, localFile), res.Body, 0o644)
+```
+
+## Lo que lo hace diferente
+
+He visto muchas herramientas de archivado web. Lo que distingue a Kage:
+
+**Idempotencia real.** Dos URLs que escriben al mismo archivo (http vs https, con o sin barra final, `/` vs `/index.html`) se consideran la misma página y se fetchean una sola vez. Esto evita el problema clásico de los crawlers que descargan la misma página 4 veces con URLs distintas.
+
+**Reanudable.** Ctrl-C guarda el estado en `state.json`. Vuelves a ejecutar y retoma exactamente donde lo dejaste. `--refresh` re-renderiza en lugar sin perder lo ya descargado.
+
+**Empaquetado en ZIM y binario.** Con `kage pack` puedes colapsar todo el mirror en un archivo ZIM (el formato de Kiwix, compatible con lectores offline) o en un binario autocontenido que se sirve a sí mismo:
+
+```bash
+# Convierte el mirror en un solo archivo .zim
+kage pack paulgraham.com
+
+# O en un ejecutable que ES el sitio
+kage pack paulgraham.com --format binary -o paulgraham
+./paulgraham  # arranca un servidor HTTP, no necesita nada más
+```
+
+**Stealth mode.** Usa `go-rod/stealth` para evadir detección de bots. Esto importa porque muchos sitios sirven contenido diferente (o bloquean directamente) a clientes que identifican como headless.
+
+## Mi opinión
+
+Kage me parece una de esas herramientas que resuelven un problema tan evidente que te preguntas por qué no existía ya. La combinación de Chrome real + sanitización quirúrgica + empaquetado offline es el trío que faltaba.
+
+Dicho esto, tiene limitaciones que conviene tener presentes. No clona SPAs con routing client-side más allá de los enlaces que encuentra en el HTML inicial — si tu app React usa `history.pushState()` para navegar, Kage no va a seguir esas rutas porque no son enlaces `<a>`. Tampoco maneja contenido detrás de login ni formularios POST. Y el renderizado con Chrome real significa que clonar un sitio de 500 páginas lleva su tiempo (aunque los 4 workers paralelos ayudan).
+
+El caso de uso que más me convence es el archivado personal: guardar esos ensayos, tutoriales y documentaciones que consultas una vez al año y que un día desaparecen porque el autor dejó de pagar el hosting. Con Kage los congelas en un ZIM y los tienes para siempre, sin dependencias externas.
+
+Para un proyecto que lleva 24 horas público, la ejecución es sorprendentemente pulida: tests, CI con GitHub Actions, goreleaser, binarios precompilados para Linux/macOS/Windows, paquetes `.deb`/`.rpm`/`.apk`, imagen Docker, shell completion para bash/zsh/fish/powershell y documentación completa en [kage.tamnd.com](https://kage.tamnd.com). No es un prototipo tirado a ver si pica — es un producto pensado.
+
+## Pruébalo
+
+```bash
+# Instalación en 10 segundos
+go install github.com/tamnd/kage/cmd/kage@latest
+
+# Clona los ensayos de Paul Graham para leer en el avión
+kage clone paulgraham.com
+
+# Sírvete el mirror offline
+kage serve ~/data/kage/paulgraham.com
+# Abre http://127.0.0.1:8800
+
+# Empaqueta para compartir
+kage pack paulgraham.com
+kage open paulgraham.com.zim
+```
+
+O si prefieres Docker sin instalar Chrome:
+
+```bash
+docker run --rm -v "$PWD/out:/out" ghcr.io/tamnd/kage clone paulgraham.com
+```
+
+Kage es la respuesta a una pregunta que todos nos hemos hecho: ¿cómo me aseguro de que esta página que me importa siga existiendo dentro de diez años? La respuesta es: la conviertes en una fotografía. Sin JavaScript, sin dependencias externas, sin servidores ajenos. Solo HTML, CSS e imágenes en una carpeta tuya.
