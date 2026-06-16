@@ -1,0 +1,152 @@
+---
+title: "Cuando el compilador se pasa de listo: 256 KB para 64 KB"
+date: "2026-06-16T08:36"
+tags: ["compiladores", "x86", "emulación", "optimización", "JIT"]
+excerpt: "El compilador desenrolló un bucle de inicialización en 65.536 instrucciones. El equipo de emulación x86 de Microsoft se ofendió tanto que parcheó el binario en caliente."
+---
+
+Raymond Chen, el ingeniero que lleva más de 30 años documentando las tripas de Windows en su blog _The Old New Thing_, publicó ayer una anécdota que me ha hecho soltar una carcajada y luego quedarme pensando un buen rato. Es de esas historias que solo pueden pasar cuando juntas compiladores demasiado agresivos, código legacy imposible de tocar y emuladores que funcionan como JITs.
+
+La historia la contó un colega suyo del equipo de emulación x86 de Microsoft. En una de esas sesiones de "batallitas" entre ingenieros, salió a la luz un caso real que raya en lo absurdo.
+
+## El contexto: emular x86 no es interpretar, es compilar
+
+Windows ha incluido emuladores de x86-32 en varias arquitecturas a lo largo de su historia. No sé exactamente para qué procesador era este emulador en concreto —Chen no lo revela—, pero el mecanismo es el mismo que hemos visto en proyectos como Rosetta 2 de Apple o el extinto Itanium de Intel: **traducción binaria**.
+
+La idea es simple y brillante: tratas el código x86 como si fuera un bytecode cualquiera y lo compilas _on the fly_ a instrucciones nativas del procesador host. No interpretas instrucción por instrucción —eso sería lentísimo—, sino que generas código nativo equivalente y lo ejecutas directamente. Es, en esencia, un **compilador JIT** aplicado a binarios ya compilados.
+
+```c
+// Conceptual: así funciona un traductor binario mínimamente
+// No es código real de Microsoft, es una ilustración del concepto
+
+typedef struct {
+    uint8_t* x86_code;
+    size_t    x86_len;
+} TranslationUnit;
+
+typedef struct {
+    uint8_t* native_code;
+    size_t    native_len;
+} TranslatedBlock;
+
+// El emulador lee instrucciones x86 y emite código nativo
+TranslatedBlock translate_basic_block(TranslationUnit* unit) {
+    TranslatedBlock result = {0};
+    x86_decoder_state state = init_decoder(unit->x86_code);
+
+    while (has_more_instructions(&state)) {
+        x86_instruction inst = decode_next(&state);
+        emit_native_equivalent(&result, &inst);
+    }
+
+    return result;
+}
+```
+
+El traductor binario no se limita a copiar instrucciones. Puede reordenar, eliminar redundancias y aplicar optimizaciones propias del JIT. Y aquí es donde la historia se pone interesante.
+
+## El crimen: 256 KB de código para 64 KB de datos
+
+El equipo se topó con un programa que necesitaba reservar unos 64 KB en la pila e inicializarlos. La forma estándar de hacer esto en ensamblador x86 es:
+
+1. Hacer un _stack probe_ para asegurarte de que hay 64 KB disponibles (tocas cada página de a 4 KB para forzar al SO a comprometer la memoria).
+2. Restar 65536 al puntero de pila (`ESP`/`RSP`).
+3. Inicializar el buffer con un bucle compacto de unas pocas instrucciones.
+
+Algo así:
+
+```asm
+; Forma normal y sensata de inicializar 64 KB en la pila
+; Paso 1: stack probe (omitido por brevedad)
+; Paso 2: reservar espacio
+    sub esp, 65536
+
+; Paso 3: inicializar con un bucle de 4 instrucciones
+    mov ecx, 16384          ; 65536 / 4 = 16384 dwords
+    mov edi, esp
+    xor eax, eax
+    rep stosd               ; escribe eax (0) en edi, ecx veces
+```
+
+Cuatro instrucciones. Cuatro. El bucle ocupa unos 16 bytes y ejecuta `rep stosd` que rellena 4 bytes por iteración usando el hardware del procesador.
+
+Pero el compilador que generó el binario original decidió que un bucle era "demasiado mundano". Así que **desenrolló el bucle por completo**: 65.536 instrucciones individuales de "escribe un byte en memoria", cada una de 4 bytes.
+
+```asm
+; Lo que el compilador GENERÓ REALMENTE
+; (ilustración conceptual de las primeras instrucciones)
+    mov byte ptr [esp], 0
+    mov byte ptr [esp+1], 0
+    mov byte ptr [esp+2], 0
+    mov byte ptr [esp+3], 0
+    mov byte ptr [esp+4], 0
+    mov byte ptr [esp+5], 0
+    ; ... 65.530 instrucciones más ...
+    mov byte ptr [esp+65535], 0
+```
+
+El resultado: **256 kilobytes de código máquina para inicializar 64 kilobytes de datos**. Una ratio de 4:1 entre código y datos. El compilador generó cuatro veces más código que los datos que pretendía inicializar.
+
+## La venganza del emulador
+
+El equipo de emulación se ofendió. No es broma: Chen usa la palabra "offended". Y no me extraña. Imagina estar depurando el rendimiento de tu traductor binario, ver que cierto programa va inexplicablemente lento, abrir el binario y encontrarte con **65.536 instrucciones consecutivas de `mov byte ptr [esp+N], 0`**.
+
+No podían modificar el binario original —era código de terceros, legacy, intocable—. Pero sí podían modificar su traductor. Así que añadieron **detección de patrones**: cuando el JIT identificaba esta función concreta, la reemplazaba en caliente por el bucle compacto de cuatro instrucciones que debería haber sido desde el principio.
+
+```c
+// Conceptual: el parche que el emulador aplicaba al detectar el patrón
+// No es código real de Microsoft
+
+bool detect_unrolled_init(TranslationUnit* unit) {
+    // Detecta secuencias de MOV byte ptr [reg+N], 0 consecutivos
+    if (unit->x86_len < 256 * 1024) return false;
+
+    uint8_t* p = unit->x86_code;
+    size_t count = 0;
+
+    for (size_t i = 0; i < unit->x86_len - 4; i += 4) {
+        // Patrón: C6 44 24 XX 00 = mov byte ptr [esp+XX], 0
+        if (p[i] == 0xC6 && p[i+1] == 0x44 && p[i+2] == 0x24 && p[i+4] == 0x00) {
+            count++;
+        } else {
+            break;  // secuencia rota, no es el patrón
+        }
+    }
+
+    return count > 1000;  // umbral: más de 1000 stores consecutivos
+}
+
+TranslatedBlock translate_with_fixup(TranslationUnit* unit) {
+    if (detect_unrolled_init(unit)) {
+        // Reemplazar por el bucle compacto equivalente
+        return emit_tight_loop_init(unit);
+    }
+    return translate_basic_block(unit);
+}
+```
+
+Esto es poesía ingenieril. Un JIT que no solo traduce código, sino que **corrige las meteduras de pata de un compilador ajeno** en tiempo de ejecución. El emulador haciendo de ángel de la guarda del rendimiento.
+
+## ¿Qué compilador fue?
+
+Chen no lo dice. Pero podemos especular. La historia habla de x86-32, así que estamos en la era pre-x64. Los compiladores de aquella época con optimizaciones agresivas de desenrollado incluían:
+
+- **Intel C++ Compiler (ICC)**: conocido por optimizaciones extremadamente agresivas, a veces contraproducentes. Era capaz de desenrollar bucles hasta límites absurdos si el heurístico decidía que "merecía la pena".
+- **GCC con `-funroll-all-loops`**: una flag que existió durante años y que básicamente le decía al compilador "desenrolla todo, no me importa el tamaño del binario". Un programador con esta flag activada por error podría generar exactamente este desastre.
+- **MSVC en modo release extremo**: menos probable, pero no imposible con las flags correctas.
+
+Mi apuesta personal es ICC. Era el compilador favorito para código que necesitaba exprimir cada ciclo de CPU en los 90 y principios de los 2000; sus heurísticos de desenrollado eran notoriamente agresivos. He visto binarios generados por ICC donde un bucle de `memset` de 4 KB se convertía en un bloque de código de 16 KB. Escalar eso a 64 KB de datos produciendo 256 KB de código encaja perfectamente con el perfil.
+
+## Mi opinión
+
+Esta historia me parece una cápsula del tiempo perfecta. Captura tres realidades del desarrollo de software que siguen vigentes hoy:
+
+**Primero**, las optimizaciones automáticas sin supervisión humana pueden ser contraproducentes. El compilador "sabía" que desenrollar bucles elimina la sobrecarga del contador y el salto condicional. Pero nadie le puso un límite de cordura. Hoy, con LLMs generando código, veo el mismo patrón: herramientas que optimizan sin entender el contexto. Un modelo puede generarte una "optimización" que técnicamente funciona pero que ningún humano cuerdo escribiría.
+
+**Segundo**, el software legacy es un museo de horrores que no podemos tocar. El equipo de emulación no podía modificar el binario original. ¿Cuántas veces te has encontrado con código que sabes que está mal pero que no puedes cambiar porque "funciona en producción" y nadie entiende qué rompería? La solución del equipo —parchearlo en la capa de compatibilidad— es exactamente lo que hacemos hoy con polyfills, wrappers y capas de abstracción.
+
+**Tercero**, me encanta la mentalidad del equipo. No se limitaron a documentar el problema o a quejarse. Se ofendieron. Lo tomaron como algo personal. Y escribieron código para corregirlo. Ese nivel de orgullo por el oficio es cada vez más raro en una industria donde todo va a contrarreloj. A veces hay que parar, mirar un binario y decir "esto no puede seguir así", aunque el problema no sea técnicamente tuyo.
+
+La anécdota también me recuerda que los JITs y emuladores son unas de las piezas de software más infravaloradas que existen. Rosetta 2 traduciendo x86 a ARM en tiempo real, el emulador de Xbox 360 corriendo juegos de la original Xbox, Wine traduciendo llamadas de Win32 a POSIX... todos ellos hacen magia negra a diario y nadie les da las gracias. Este equipo en concreto no solo tradujo código: lo mejoró.
+
+Si alguna vez te encuentras con un binario que hace algo inexplicablemente ineficiente, recuerda: en algún lugar, un emulador ya lo ha visto antes y probablemente lo ha arreglado sin que nadie se entere.
