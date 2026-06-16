@@ -1,0 +1,97 @@
+---
+title: "npm install y te hackean: el backdoor de LinkedIn"
+date: "2026-06-16T02:32"
+tags: ["seguridad", "npm", "supply-chain", "nodejs", "linkedin"]
+excerpt: "Un falso recruiter de LinkedIn enviaba un repo GitHub con una puerta trasera que se ejecutaba automáticamente al hacer npm install. Así funcionaba."
+---
+
+Hace unos días, Roman Imankulov —un desarrollador Python full-stack— recibió un mensaje de LinkedIn que parecía rutinario. Una reclutadora de una startup crypto le pedía revisar un repo público de GitHub. El mensaje incluía una instrucción concreta: "échale un ojo al problema de los módulos deprecated de Node".
+
+Lo que parecía una oportunidad laboral era en realidad una trampa cuidadosamente diseñada. El repo contenía un backdoor que se ejecutaba automáticamente al hacer `npm install`. Sin pedir permisos, sin alertas, sin nada.
+
+## El cebo: una oferta demasiado normal
+
+El modus operandi es inquietantemente sencillo. La reclutadora —cuyo perfil pertenecía en realidad a una periodista cultural sin background técnico— intercambió varios mensajes durante días. Describió un proof-of-concept roto, habló de stacks, mencionó la necesidad de un lead engineer. Todo sonaba legítimo.
+
+Luego soltó el repo. Público, inofensivo a simple vista. Un frontend React con backend Node. La trampa no estaba en el código de producción, sino en `app/test/index.js`, un archivo de unas 250 líneas disfrazado de suite de tests.
+
+## Cómo funcionaba el backdoor
+
+El archivo `app/test/index.js` construía una URL a partir de fragmentos repartidos por el código:
+
+```javascript
+// Fragmentos dispersos entre tests comentados
+const protocol = "https";
+const domain = "store";
+const separator = "://";
+const path = "/icons/";
+const token = "77";
+const subdomain = "rest-icon-handler";
+const bearertoken = "logo";
+
+const callbackUrl = `${protocol}${separator}${subdomain}.${domain}${path}${token}`;
+// Resultado: https://rest-icon-handler.store/icons/77
+```
+
+Esos fragmentos, inocentes por separado, ensamblaban una URL de callback. El payload real, enterrado entre bloques de tests comentados, ejecutaba cualquier cosa que el servidor remoto devolviese. Un segundo stage listo para desplegarse.
+
+El detalle clave es cómo se activaba. No hacía falta ejecutar los tests. El archivo principal `app/index.js` contenía:
+
+```javascript
+// app/index.js — el punto de entrada
+const express = require('express');
+const test = require('./test'); // ← esto ejecuta app/test/index.js completo
+const app = express();
+// ...
+```
+
+Y `package.json` lo cableaba al script `prepare`:
+
+```json
+{
+  "name": "crypto-poc-frontend",
+  "scripts": {
+    "prepare": "node app/index.js",
+    "start": "node app/server.js"
+  }
+}
+```
+
+El script `prepare` es el arma silenciosa. npm lo ejecuta **automáticamente** después de `npm install`, sin preguntar. No necesitas hacer nada más. Clonas el repo, instalas dependencias y el backdoor se ejecuta solo.
+
+## Las identidades robadas
+
+El atacante no solo escondió código. También suplantó personas reales.
+
+Los 39 commits del repo estaban firmados con el nombre y email de un desarrollador legítimo: un ingeniero full-stack con perfil de LinkedIn, web personal y GitHub con historial real. Cuando Roman le contactó haciéndose pasar por alguien que había "heredado" el código, el desarrollador confirmó que nunca había trabajado para esa empresa. Ya le habían suplantado antes y había tenido que denunciar otro repo falso.
+
+El perfil de la reclutadora también era robado: pertenecía a una periodista cultural conocida, sin absolutamente nada técnico en su trayectoria. Cuando Roman le dijo que no conseguía instalar el proyecto, la "periodista" se transformó instantáneamente en una experta en versiones de Node y configuración de npm. El teatro era completo.
+
+## Cómo lo detectó
+
+Roman no clonó el repo en su máquina. Algo le olió mal y decidió ser paranoico. Alquiló un VPS desechable en Hetzner, clonó el repo allí y apuntó un agente de IA (Pi) en modo solo-lectura, con acceso únicamente a herramientas de lectura de archivos:
+
+```bash
+# Solo lectura, sin ejecución, sin red
+pi --tools read,grep,find,ls
+```
+
+Le pidió al agente que revisase el código y señalase cualquier cosa sospechosa. El agente se detuvo casi de inmediato en `app/test/index.js`. En segundos, identificó la URL ensamblada, el payload oculto y el mecanismo de activación.
+
+Este es un patrón que merece la pena copiar. Un agente en modo solo-lectura no puede ejecutar código, no puede hacer requests de red, no puede instalar paquetes. Es un auditor ciego pero minucioso que no se distrae con la pátina de "código de principiante desordenado" con la que el atacante disfrazó el backdoor.
+
+## Mi opinión
+
+Este ataque me parece especialmente peligroso porque explota tres mecanismos que casi ningún desarrollador revisa:
+
+1. **El script `prepare` de npm.** Todo el mundo sabe que `npm install` ejecuta scripts de post-install de las dependencias, pero casi nadie recuerda que también ejecuta `prepare` del proyecto que estás instalando. Es un vector de ataque infravalorado.
+
+2. **La confianza en el código "de tests".** Los tests son territorio sagrado. Nadie los audita con la misma paranoia que el código de producción. Un archivo llamado `test/index.js` con 250 líneas de tests comentados activa cero alarmas en una revisión rápida.
+
+3. **La ingeniería social multicapa.** No basta con un perfil falso de LinkedIn. El atacante suplantó dos identidades reales (reclutadora y desarrollador), mantuvo conversaciones durante días y construyó un repo con 39 commits para dar sensación de proyecto vivo. El nivel de esfuerzo indica que esto no es un script kiddie aburrido.
+
+Lo que más me inquieta es que el repo seguía online en GitHub cuando Roman publicó su artículo. Lo reportó y no había pasado nada. GitHub tarda en reaccionar ante este tipo de ataques, y mientras tanto cualquier desarrollador desprevenido puede clonarlo.
+
+La lección práctica es clara: si alguien te pide revisar un repo por LinkedIn, no lo clones en tu máquina de trabajo. Usa una VM desechable, un contenedor aislado, o un agente en modo solo-lectura. Y revisa siempre los scripts `prepare` y `postinstall` del `package.json` antes de ejecutar `npm install`. Son tres segundos que te pueden ahorrar un disgusto.
+
+Roman tuvo suerte y olfato. El próximo desarrollador puede no tenerlos.
