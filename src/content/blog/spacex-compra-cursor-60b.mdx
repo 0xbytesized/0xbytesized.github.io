@@ -1,0 +1,118 @@
+---
+title: "SpaceX compra Cursor por $60B: tu IDE ya es de Elon Musk"
+date: "2026-06-16T14:40"
+tags: ["cursor", "spacex", "elon-musk", "ai", "ides"]
+excerpt: "SpaceX compra Cursor por 60.000 millones de dólares tras su IPO histórica. La empresa de cohetes de Elon Musk ya es dueña de tu editor de código."
+---
+
+SpaceX acaba de anunciar la compra de Cursor —el IDE con inteligencia artificial que usan miles de developers a diario— por **60.000 millones de dólares**. La noticia llega apenas unos días después de que la empresa de cohetes de Elon Musk saliera a bolsa en el Nasdaq con la mayor IPO de la historia, valorada en más de 2 billones de dólares.
+
+Cursor, desarrollado por Anysphere, es el agente de código que se ha colado en los flujos de trabajo de empresas como Stripe, Adobe y NVIDIA. Jensen Huang, CEO de NVIDIA, lo ha descrito como su "servicio de IA empresarial favorito". Y ahora pertenece a una empresa que fabrica cohetes.
+
+## Lo que ha pasado
+
+El acuerdo no surge de la nada. SpaceX y Cursor llevan colaborando desde abril de 2026, cuando anunciaron una asociación con una cláusula muy particular: SpaceX tendría derecho a comprar Cursor por 60.000 millones o pagar 10.000 millones por el trabajo conjunto realizado. Han elegido la primera opción.
+
+La operación se cerrará a finales de septiembre de 2026. Los accionistas de Cursor recibirán acciones de SpaceX por valor de 60.000 millones de dólares. Para ponerlo en contexto: SpaceX recaudó 85.700 millones en su IPO del viernes pasado. Comprar Cursor les cuesta menos de lo que ganaron al salir a bolsa.
+
+SpaceX ya no es solo cohetes. La empresa también fabrica y lanza satélites Starlink y este año absorbió xAI, la empresa de IA de Musk responsable del chatbot Grok. Con Cursor, SpaceX mete la cabeza de lleno en el mercado de herramientas para developers.
+
+## Qué es Cursor y por qué importa
+
+Cursor no es un editor de texto cualquiera. Es un fork de VS Code que integra modelos de lenguaje directamente en el flujo de trabajo del desarrollador. Puedes seleccionar un bloque de código, pedirle que lo explique, que lo refactorice o que escriba una función entera desde cero. Tiene un modo "Composer" que actúa como agente autónomo: le das una tarea y él planifica, escribe, ejecuta tests y corrige errores en bucle.
+
+La clave de Cursor está en haber respondido a una pregunta que nadie más resolvió bien: **¿cómo quiere un desarrollador normal interactuar con la IA?** La respuesta fue un editor donde la IA no es un chatbot separado, sino una extensión natural del cursor del teclado.
+
+```typescript
+// Ejemplo típico de uso de Cursor: seleccionas esto
+// y pulsas Ctrl+K para pedirle que lo optimice
+
+function processOrders(orders: Order[]): Summary {
+  const summaries: Summary[] = [];
+  for (let i = 0; i < orders.length; i++) {
+    const order = orders[i];
+    if (order.status === "pending") {
+      const summary = {
+        id: order.id,
+        total: order.items.reduce((sum, item) => sum + item.price, 0),
+        count: order.items.length,
+      };
+      summaries.push(summary);
+    }
+  }
+  return {
+    total: summaries.reduce((sum, s) => sum + s.total, 0),
+    count: summaries.length,
+  };
+}
+```
+
+El modelo te sugiere algo como esto:
+
+```typescript
+// Cursor propone: filter + map encadenados, sin bucles manuales
+function processOrders(orders: Order[]): Summary {
+  const pending = orders
+    .filter((o) => o.status === "pending")
+    .map((o) => ({
+      id: o.id,
+      total: o.items.reduce((sum, item) => sum + item.price, 0),
+      count: o.items.length,
+    }));
+
+  return {
+    total: pending.reduce((sum, s) => sum + s.total, 0),
+    count: pending.length,
+  };
+}
+```
+
+No es magia. Es un modelo de lenguaje aplicado a código con contexto completo del proyecto. Pero la integración es tan fluida que cuesta volver a un editor sin IA después de probarlo.
+
+## La pieza del puzle: Colossus
+
+El anuncio de la asociación en abril incluía una frase que ahora cobra todo el sentido:
+
+> "La combinación del producto líder de Cursor y su distribución entre ingenieros de software expertos con el superordenador de entrenamiento Colossus de SpaceX —equivalente a un millón de H100— nos permitirá construir los modelos más útiles del mundo."
+
+Colossus es el clúster de GPUs que xAI construyó en Memphis. Originalmente diseñado para entrenar a Grok, ahora pasa a ser parte del arsenal de SpaceX. La idea es simple: usar la telemetría de millones de sesiones de Cursor —cómo escriben código los developers, qué prompts funcionan, qué refactors aceptan y cuáles rechazan— para entrenar modelos cada vez más precisos.
+
+Es un ciclo que se retroalimenta: más usuarios generan mejores datos de entrenamiento, mejores datos producen mejores modelos y mejores modelos atraen a más usuarios.
+
+## Los números que marean
+
+Para entender la escala de esta operación, hay que mirar las cifras:
+
+- **$60B**: precio de compra de Cursor
+- **$2.9B**: valor de mercado de SpaceX tras la IPO (superó a Amazon)
+- **$135**: precio de salida de las acciones de SpaceX; ahora han subido un 66%
+- **$85.7B**: lo que SpaceX recaudó en su IPO
+- **-$9B**: pérdidas de SpaceX en 2025 y 2026 por inversión en IA e infraestructura
+
+SpaceX no es rentable. Pierde dinero operativamente. Pero los mercados están valorando expectativas futuras, no resultados presentes. La compra de Cursor es una apuesta a que el futuro del desarrollo de software pasa por agentes de IA integrados en el editor.
+
+## Qué significa esto para los developers
+
+Que una empresa de cohetes compre tu editor de código es raro. Pero hay implicaciones concretas:
+
+**Lo bueno:** acceso a recursos de computación que ninguna startup de herramientas para developers podría soñar. Si Cursor puede entrenar modelos con un clúster de un millón de H100, la calidad de las sugerencias debería mejorar drásticamente.
+
+**Lo incierto:** ¿qué pasa con la independencia del producto? Cursor ha funcionado hasta ahora como herramienta agnóstica: puedes usarlo con modelos de OpenAI, Anthropic o Google. ¿Seguirá siendo así bajo SpaceX, que tiene su propio modelo (Grok) y su propia agenda?
+
+**Lo preocupante:** la concentración de poder. Un solo conglomerado —SpaceX/xAI/Starlink— controlaría cohetes, satélites, un modelo de IA polémico y ahora la herramienta con la que miles de developers escriben código a diario. La telemetría de cómo programas, qué librerías usas y qué errores cometes estaría bajo el mismo techo que Grok.
+
+## Mi opinión
+
+Cursor me gusta. Es el agente de código mejor integrado que he probado. La fluidez de seleccionar código y transformarlo sin salir del editor es algo que VS Code con Copilot nunca logró igualar.
+
+Pero la compra me deja intranquilo. No por Musk en particular —al final cualquier gran corporación genera las mismas dudas— sino por el patrón: las herramientas que usamos para construir software se están concentrando en muy pocas manos. GitHub es de Microsoft. Copilot es de Microsoft. npm es de Microsoft. Y ahora Cursor es de SpaceX.
+
+El contraargumento es que Cursor siempre fue privativo. No era open source antes de la compra ni lo será después. Si querías independencia real, ya estabas usando otra cosa. Pero la diferencia entre una startup independiente y una división de un conglomerado de 2.9 billones de dólares es sustancial.
+
+Dicho esto, el producto probablemente mejorará a corto plazo. El acceso a Colossus es un salto generacional en capacidad de cómputo. Si el equipo de Cursor mantiene autonomía técnica, los próximos meses podrían traer avances significativos en la calidad del agente.
+
+Lo seguiremos de cerca. Porque al final, el editor donde escribes código dice mucho sobre quién controla cómo se construye el software.
+
+---
+
+**Fuente:** [BBC News — Musk's SpaceX buys AI coding start-up for $60bn days after IPO](https://www.bbc.com/news/articles/cvgd5g7d7gyo), publicado el 16 de junio de 2026 por Archie Mitchell.
