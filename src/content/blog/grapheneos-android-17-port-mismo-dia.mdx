@@ -1,0 +1,122 @@
+---
+title: "GrapheneOS ya corre en Android 17: el día del lanzamiento"
+date: "2026-06-17T08:00"
+tags:
+  - android
+  - seguridad
+  - privacidad
+  - open-source
+  - grapheneos
+excerpt: "Android 17 se lanza hoy y GrapheneOS ya tiene el port listo. El sistema operativo más seguro del ecosistema Android llega antes que los fabricantes comerciales."
+---
+
+Hoy es el día oficial de lanzamiento de Android 17. Google empieza a desplegar la OTA en sus Pixel, los fabricantes se pondrán las pilas en las próximas semanas y los usuarios del común esperarán meses para ver la actualización. Pero hay un proyecto que ya tiene el port terminado: **GrapheneOS**.
+
+El equipo de GrapheneOS anunció en su foro que han completado el port a Android 17 para todos los dispositivos soportados y que el código está siendo empujado a sus repositorios públicos. El primer release oficial basado en Android 17 llegará mañana. Para un proyecto mantenido por un equipo pequeño y financiado con donaciones, hacer un port el mismo día del lanzamiento de AOSP es una barbaridad de ingeniería.
+
+## Qué es GrapheneOS y por qué debería importarte
+
+GrapheneOS es un sistema operativo móvil basado en AOSP (Android Open Source Project) centrado en privacidad y seguridad. No es una ROM con cuatro tweaks cosméticos y un launcher alternativo: es una reconstrucción profunda del sistema con mitigaciones de exploits, reducción de superficie de ataque y un modelo de permisos mucho más granular que el Android stock.
+
+Algunas de sus características clave:
+
+- **Hardened malloc**: un allocator de memoria endurecido contra heap exploits
+- **Sandboxed Google Play**: los servicios de Google corren dentro de la sandbox de apps normal, sin acceso privilegiado al sistema
+- **Storage Scopes**: control granular de a qué archivos puede acceder cada app
+- **Contact Scopes**: permiso para limitar apps a contactos específicos, no a toda la agenda
+- **Network y Sensors permission**: toggles para cortar acceso a red o sensores por app
+- **Auto-reboot**: reinicio automático tras inactividad para volver al estado BFU (Before First Unlock)
+- **Duress PIN**: un PIN secundario que borra el dispositivo al introducirlo
+- **PIN scrambling**: el teclado de PIN se reordena aleatoriamente para frustrar shoulder-surfing
+- **Vanadium**: un WebView y navegador por defecto endurecido
+
+La lista completa es larga, pero el patrón es claro: GrapheneOS no confía en las apps y te da los mandos para que tú tampoco tengas que hacerlo.
+
+## Android 17 adopta ideas que GrapheneOS ya tenía
+
+Lo interesante del lanzamiento de hoy es que varias de las "novedades" de privacidad de Android 17 son cosas que GrapheneOS implementó hace años.
+
+Android 17 introduce **Contact Scopes**: permisos para limitar qué contactos ve una app en lugar de darle acceso a toda la agenda. GrapheneOS tiene esto desde 2022. También añade permisos de ubicación temporales y más control granular sobre qué datos compartes. Mismo patrón: GrapheneOS lleva años permitiendo que el usuario decida exactamente qué archivos ve cada app con Storage Scopes, mientras que Android stock hasta ahora iba por detrás.
+
+No es la primera vez que Google adopta ideas que GrapheneOS probó antes. El proyecto ha contribuido upstream a AOSP, al kernel Linux y a LLVM durante años. Pero ver cómo Android 17 presenta como novedad características que GrapheneOS lleva madurando desde hace tres versiones de Android deja claro quién marca el ritmo en privacidad móvil.
+
+## El dato que más dice: Pixel 6 y 6 Pro
+
+Google no va a dar Android 17 al Pixel 6 ni al Pixel 6 Pro. Se acabó el soporte oficial para esos dispositivos. GrapheneOS sí.
+
+La lista de dispositivos soportados por GrapheneOS en Android 17 incluye:
+
+- Pixel 6a, 7, 7a, 8, 8a, 8 Pro
+- Pixel 9, 9 Pro, 9 Pro XL, 9 Pro Fold, 9a
+- Pixel 10, 10 Pro, 10 Pro XL, 10 Pro Fold, 10a
+- Pixel Fold, Pixel Tablet
+
+Veintidós dispositivos, desde el Pixel 6a hasta el 10 Pro Fold. Mientras Google decide que tu Pixel 6 de 2021 ya no merece actualizaciones, GrapheneOS te da Android 17 con todas sus mitigaciones de seguridad. Esto no es caridad: es una declaración de principios sobre lo que significa mantener un dispositivo seguro.
+
+## Cómo funciona Storage Scopes en la práctica
+
+Una de las features más potentes de GrapheneOS es Storage Scopes. En Android stock, cuando una app pide acceso al almacenamiento, o se lo das todo o no le das nada. Con Storage Scopes, puedes conceder acceso a archivos o carpetas específicas.
+
+Para una app de mensajería, podrías darle acceso solo a `DCIM/Messenger/` y nada más. Para un editor de fotos, solo a la carpeta donde guardas las imágenes que quieres editar. La app no ve el resto de tu almacenamiento.
+
+En código, desde el lado del desarrollador, la app solicita acceso igual que siempre:
+
+```java
+// La app pide acceso al almacenamiento como siempre
+Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+startActivityForResult(intent, REQUEST_CODE_STORAGE);
+```
+
+La diferencia está en el sistema: GrapheneOS intercepta esta petición y permite al usuario decidir si conceder acceso completo, acceso por scopes, o denegarlo. La app no sabe la diferencia — simplemente recibe un URI tree limitado a lo que el usuario decidió.
+
+```java
+// La app trabaja con el URI tree que el sistema le devuelve
+// En GrapheneOS, este URI solo apunta a lo que el usuario autorizó
+@Override
+protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+    if (requestCode == REQUEST_CODE_STORAGE && resultCode == RESULT_OK) {
+        Uri treeUri = data.getData();
+        // En GrapheneOS: este treeUri está limitado por Storage Scopes
+        // En AOSP stock: este treeUri puede ser todo el almacenamiento
+        getContentResolver().takePersistableUriPermission(treeUri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION |
+            Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    }
+}
+```
+
+El usuario tiene el control real, y la app ni se entera. Así debería funcionar siempre.
+
+## Contact Scopes: el mismo principio para la agenda
+
+Android 17 por fin implementa algo parecido para los contactos. La API es similar en espíritu:
+
+```kotlin
+// Android 17: la app puede pedir acceso parcial a contactos
+// El sistema muestra un picker para que el usuario elija qué contactos compartir
+val lookupUri = ContactsContract.Contacts.CONTENT_LOOKUP_URI
+
+// Con el nuevo permiso granular, la app solo recibe los contactos
+// que el usuario seleccionó explícitamente
+val cursor = contentResolver.query(
+    lookupUri,
+    null, null, null, null
+)
+// cursor solo contiene los contactos autorizados
+```
+
+En GrapheneOS esto ya funcionaba antes, y con más granularidad: podías definir qué grupos de contactos ve cada app, no solo contactos individuales. Android 17 da el primer paso; GrapheneOS lleva varios.
+
+## Mi veredicto
+
+GrapheneOS es uno de esos proyectos que demuestra que el open source bien hecho puede ir por delante de la industria. No tiene los recursos de Google, no tiene acceso al código interno de los servicios de Play, no tiene un ejército de ingenieros. Pero tiene algo más valioso: un modelo de amenaza claro y la disciplina para no desviarse.
+
+Que hayan porteado Android 17 el mismo día del lanzamiento no es un golpe de suerte. Es el resultado de años de construir sobre AOSP de forma limpia, contribuyendo upstream y manteniendo el código base cerca del trunk. Cuando Google suelta el código, GrapheneOS ya sabe exactamente dónde aplicar sus parches.
+
+Lo que más me gusta de esta historia es lo que dice sobre la longevidad del hardware. Un Pixel 6 de hace cinco años, que Google ya considera obsoleto, recibe Android 17 con todas las mitigaciones de GrapheneOS. En un mundo donde los fabricantes acortan el soporte para venderte el siguiente modelo, un proyecto comunitario te dice que tu dispositivo sigue siendo válido.
+
+Si tienes un Pixel compatible y te importa la privacidad, instalar GrapheneOS es una de las mejores decisiones que puedes tomar. El instalador web te lo pone fácil, y el sistema es perfectamente usable como daily driver. No es para todo el mundo — algunas apps que dependen de Google Play Services de forma invasiva pueden dar problemas — pero para quien valora el control sobre sus datos, no hay alternativa seria en el ecosistema Android.
+
+---
+
+**Fuente original:** [GrapheneOS Discussion Forum](https://discuss.grapheneos.org/d/36469-grapheneos-has-been-ported-to-android-17-and-official-releases-are-coming-soon) — anuncio oficial del equipo de GrapheneOS.
