@@ -1,0 +1,121 @@
+---
+title: "cuTile Rust: NVIDIA libera su DSL para kernels GPU en Rust"
+date: "2026-06-17T02:49"
+tags: ["rust", "gpu", "nvidia", "cuda", "open-source"]
+excerpt: "NVlabs publica cuTile Rust, un DSL tile-based que extiende el ownership de Rust a la GPU. Kernels memory-safe, data-race-free y al 92% del peak del hardware."
+---
+
+NVIDIA Labs acaba de publicar [cuTile Rust](https://github.com/nvlabs/cutile-rs), un DSL tile-based para escribir kernels GPU en Rust idiomático. La promesa es ambiciosa: llevar el sistema de ownership de Rust al otro lado de la frontera GPU, eliminando data races y accesos inválidos a memoria **sin perder rendimiento**. Y los números del paper lo respaldan: 2 PFlop/s en GEMM sobre una B200, el 92% del peak teórico.
+
+No es un wrapper fino sobre CUDA C++. Es un sistema completo que captura el AST de Rust, lo compila JIT a CUDA Tile IR y genera cubins GPU en tiempo de ejecución. Vamos a ver qué significa esto y por qué es importante.
+
+## El problema: la GPU no entiende de borrow checker
+
+Programar GPUs siempre ha sido territorio hostil. CUDA C++ te da control total, pero también libertad total para dispararte en el pie: accesos concurrentes a la misma región de memoria, carreras entre hilos, buffers que se solapan sin que nadie te avise. Herramientas como `cuda-memcheck` existen, pero son reactivas — encuentras el error después de que ocurra.
+
+Rust resolvió este problema en CPU con el borrow checker: ownership, borrowing y lifetimes que el compilador verifica en tiempo de compilación. Pero la GPU es un animal distinto. Lanzas miles de threads simultáneos, cada uno accediendo a porciones de tensores, y el modelo de ownership de Rust no cruza la frontera del launch kernel.
+
+cuTile Rust tiende un puente sobre ese abismo.
+
+## Cómo funciona: particiones, tiles y ownership que cruza el launch
+
+La idea central es elegante: **dividir los tensores mutables en particiones disjuntas antes del launch**. Cada tile del grid recibe una partición exclusiva, y los tensores inmutables se comparten como lectura. El compilador garantiza que dos tiles nunca escriben en la misma dirección de memoria.
+
+```rust
+use cutile::prelude::*;
+
+#[cutile::module]
+mod kernel {
+    use cutile::core::*;
+
+    #[cutile::entry()]
+    fn saxpy<const S: [i32; 2]>(
+        y: &mut Tensor<f32, S>,
+        a: f32,
+        x: &Tensor<f32, { [-1, -1] }>,
+    ) {
+        let tile_a = a.broadcast(y.shape());
+        let tile_x = load_tile_like(x, y);
+        let tile_y = y.load();
+        y.store(tile_a * tile_x + tile_y);
+    }
+}
+```
+
+Fíjate en los tipos: `&mut Tensor<f32, S>` para el output mutable, `&Tensor<f32, {[-1, -1]}>` para el input compartido. El macro `#[cutile::module]` transforma esta función en un kernel GPU y genera un launcher host-side. Las shapes con `-1` indican dimensiones que se infieren en tiempo de compilación JIT.
+
+Desde el host, el código es igual de limpio:
+
+```rust
+let x = api::ones::<f32>(&[1024]);
+let y = api::ones::<f32>(&[1024]);
+let z = api::zeros::<f32>(&[1024]).partition([128]);
+
+let (_z, _x, _y) = kernel::saxpy(z, 2.0, x).sync()?;
+```
+
+La llamada a `.partition([128])` divide el tensor de salida en 8 trozos de 128 elementos. El launcher infiere automáticamente un grid de `(8, 1, 1)`. El `.sync()` dispara la compilación JIT y la ejecución. Y lo crucial: el compilador **sabe** que cada tile escribe en su trozo exclusivo. No hay solapamientos posibles.
+
+## GEMM en 30 líneas, compitiendo con cuBLAS
+
+El ejemplo estrella del repo es una multiplicación de matrices general (GEMM) que usa tensor cores:
+
+```rust
+#[cutile::entry(print_ir = true)]
+fn gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i32>(
+    z: &mut Tensor<E, { [BM, BN] }>,
+    x: &Tensor<E, { [-1, K] }>,
+    y: &Tensor<E, { [K, -1] }>,
+) {
+    let part_x = x.partition(const_shape![BM, BK]);
+    let part_y = y.partition(const_shape![BK, BN]);
+    let pid: (i32, i32, i32) = get_tile_block_id();
+    let mut tile_z = load_tile_mut(z);
+    for i in 0i32..(K / BK) {
+        let tile_x = part_x.load([pid.0, i]);
+        let tile_y = part_y.load([i, pid.1]);
+        tile_z = mma(tile_x, tile_y, tile_z);
+    }
+    z.store(tile_z);
+}
+```
+
+En ~30 líneas de Rust tienes un GEMM que el paper reporta a **2.07 PFlop/s en B200** para matrices 8192×8192 en f16 — a 0.3% del rendimiento de una implementación equivalente en CUDA Tile IR de bajo nivel. Es decir, la seguridad no cuesta nada medible.
+
+La clave está en `mma()`, que mapea directamente a las instrucciones de tensor core de NVIDIA. El loop sobre `K/BK` recorre los tiles de las matrices de entrada, acumulando en `tile_z`. Todo verificable en tiempo de compilación: shapes, accesos, particiones.
+
+## Grout: inference de Qwen3 a 171 tok/s en una RTX 5090
+
+El paper no se queda en benchmarks sintéticos. NVIDIA colaboró con Hugging Face para construir [Grout](https://github.com/huggingface/grout), un motor de inference para Qwen3 escrito enteramente en Rust con cuTile Rust.
+
+Los números en batch-1 decode:
+
+- **Qwen3-4B**: 171 tokens/s en una NVIDIA GeForce RTX 5090
+- **Qwen3-32B**: 82 tokens/s en una B200
+
+Son cifras competitivas con motores de inference consolidados, conseguidas con kernels memory-safe escritos en Rust. El análisis de roofline HBM confirma que Grout está operando cerca del límite de ancho de banda de memoria, que es el cuello de botella real en decode.
+
+## Lo que cuTile Rust no es (todavía)
+
+Conviene ser claro: el proyecto está en fase temprana. El README lo advierte: "expect bugs, incomplete features, and API breakage". No es un reemplazo directo de CUDA C++ para producción hoy.
+
+Algunas limitaciones actuales:
+
+- **GPU mínima**: compute capability `sm_80` (A100 para arriba). Las consumer con `sm_80+` incluyen RTX 30/40/50 series.
+- **CUDA 13.3 recomendado**: necesitas el toolchain más reciente de NVIDIA.
+- **Linux solamente**: testado en Ubuntu 24.04.
+- **Tile-based, no SIMT**: cuTile Rust opera a nivel de tiles, no de threads individuales. Si necesitas control fino por thread, no es tu herramienta.
+
+Pero la dirección es clara. NVIDIA está invirtiendo en hacer de Rust un ciudadano de primera en GPU computing. No es un experimento académico aislado: el paper, el repo público, la colaboración con Hugging Face y los benchmarks contra cuBLAS indican que va en serio.
+
+## Mi veredicto
+
+cuTile Rust me parece uno de los proyectos más interesantes que han salido de NVlabs. No por el rendimiento — que es excelente — sino por el modelo mental que propone.
+
+Llevamos décadas aceptando que programar GPUs implica renunciar a las garantías de seguridad que exigimos en CPU. La respuesta siempre ha sido "así es el hardware, aguántate". cuTile Rust demuestra que esa dicotomía es falsa. Puedes tener kernels que corren al 92% del peak del hardware **y** que el compilador verifica como memory-safe.
+
+El DSL tile-based es el acierto arquitectónico. En lugar de intentar que el borrow checker entienda miles de threads individuales — una pesadilla —, cuTile Rust eleva la abstracción a tiles y particiones. Cada tile tiene ownership exclusivo de su trozo del output. El compilador solo tiene que verificar que las particiones no se solapan, y eso es mecánicamente verificable.
+
+La colaboración con Hugging Face en Grout sugiere que esto no se queda en paper. Hay gente construyendo software real con estas herramientas. Y el hecho de que sea Apache 2.0 y esté en GitHub significa que cualquiera puede experimentar.
+
+Mi predicción: en dos años, escribir kernels GPU en Rust con garantías de seguridad será tan normal como escribir servicios web en Rust lo es hoy. cuTile Rust es el primer paso serio en esa dirección, y viene de quien mejor conoce el hardware.
