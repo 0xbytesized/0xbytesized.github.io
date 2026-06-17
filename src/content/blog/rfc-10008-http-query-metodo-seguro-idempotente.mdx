@@ -1,0 +1,137 @@
+---
+title: "HTTP ya tiene método QUERY: adiós a los POST que no eran POST"
+date: "2026-06-17T14:00"
+tags:
+  - http
+  - web
+  - api
+  - rfc
+  - estándares
+excerpt: "RFC 10008 define QUERY, un nuevo método HTTP seguro e idempotente que acepta body. El parche definitivo para décadas de fingir que tus búsquedas eran POST."
+---
+
+Durante décadas, los desarrolladores web hemos estado mintiendo. Cada vez que necesitábamos una búsqueda compleja —con filtros anidados, coordenadas geoespaciales, JSON de tres niveles— hacíamos un POST y cruzábamos los dedos. No era un POST de verdad. No estábamos creando un recurso ni modificando estado. Solo queríamos preguntarle algo al servidor con un cuerpo de petición demasiado grande para meterlo en una URL.
+
+El IETF acaba de publicar el RFC 10008 y la mentira se acabó. HTTP tiene un método nuevo: **QUERY**.
+
+## El problema que todos conocíamos y nadie arreglaba
+
+HTTP tiene GET para pedir recursos y POST para enviar datos al servidor. GET es seguro (no modifica estado) e idempotente (repetir la petición no cambia nada). Pero GET no puede llevar body —bueno, técnicamente sí, pero la especificación dice que "no tiene semántica definida" y medio Internet lo ignora o lo rechaza—.
+
+Así que cuando tu query no cabe en una URL, haces POST. El problema: POST no es seguro ni idempotente. Los navegadores te escupen el diálogo de "¿quieres reenviar el formulario?" al refrescar. Los proxies no cachean la respuesta. Las retransmisiones automáticas son un riesgo. Y tu API RESTful deja de ser RESTful en el momento exacto en que necesitas un body.
+
+El RFC 10008, publicado en junio de 2026 como Standards Track, define QUERY para tapar ese agujero. Los autores son Julian Reschke (greenbytes), James M. Snell (Cloudflare) y Mike Bishop (Akamai) —gente que lleva años en el grupo de trabajo HTTP del IETF—.
+
+## Qué es QUERY exactamente
+
+QUERY es un método HTTP que:
+
+- **Es seguro**: no modifica el estado del recurso objetivo (como GET)
+- **Es idempotente**: puedes repetirlo sin miedo a efectos secundarios (como GET)
+- **Acepta body**: el contenido de la petición define la consulta (como POST)
+- **Es cacheable**: proxies y CDNs pueden cachear la respuesta
+- **Soporta Content-Location y Location**: el servidor puede devolver URIs que identifican la query o su resultado para reutilizarlos luego con GET
+
+En la práctica, QUERY es el hijo legítimo de GET y POST. Toma la semántica segura de GET y la flexibilidad de body de POST.
+
+## Cómo se ve en la práctica
+
+Una petición QUERY típica:
+
+```http
+QUERY /contacts HTTP/1.1
+Host: api.example.org
+Content-Type: application/json
+Accept: application/json
+
+{
+  "filter": {
+    "email": {"$like": "*@example.*"}
+  },
+  "fields": ["surname", "givenname", "email"],
+  "limit": 10
+}
+```
+
+El servidor responde:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Location: /contacts/results/17
+Cache-Control: max-age=3600
+
+[
+  {"surname": "Smith", "givenname": "John", "email": "smith@example.org"},
+  {"surname": "Jones", "givenname": "Sally", "email": "sally.jones@example.com"}
+]
+```
+
+Fíjate en el `Content-Location: /contacts/results/17`. El servidor le ha asignado una URI al resultado de esta query concreta. La próxima vez puedes hacer un simple GET a `/contacts/results/17` y obtener lo mismo —cacheado por el CDN, sin procesar la query de nuevo—.
+
+Esto es imposible con POST. Con POST no hay forma estándar de decir "este resultado es cacheable y tiene su propia URI". Con QUERY sí.
+
+## Descubriendo si un endpoint soporta QUERY
+
+El RFC define el header `Accept-Query` para que el servidor anuncie qué formatos de query acepta:
+
+```http
+QUERY /contacts HTTP/1.1
+Host: api.example.org
+Content-Type: application/json
+
+{"filter": {"status": "active"}}
+```
+
+Si el servidor no soporta `application/json` como formato de query, responde:
+
+```http
+HTTP/1.1 415 Unsupported Media Type
+Accept-Query: application/x-www-form-urlencoded, text/sql
+```
+
+El cliente puede entonces reenviar la query en `application/x-www-form-urlencoded` o `text/sql`. Esto es parecido a cómo `Accept` negocia el formato de respuesta, pero aplicado al cuerpo de la petición.
+
+También puedes usar OPTIONS para descubrir si QUERY está disponible:
+
+```http
+OPTIONS /contacts HTTP/1.1
+Host: api.example.org
+
+HTTP/1.1 200 OK
+Allow: GET, QUERY, OPTIONS, HEAD
+```
+
+## Qué significa esto para tus APIs
+
+El impacto práctico es considerable:
+
+**Caching automático.** Un proxy inverso o CDN puede cachear respuestas QUERY igual que cachea GET. Si tu API de búsqueda recibe 10.000 peticiones idénticas al día, con QUERY solo la primera llega al backend. Con POST, todas llegan.
+
+**Sin diálogos de reenvío.** Tus usuarios pueden refrescar la página de resultados sin que el navegador les pregunte "¿quieres reenviar el formulario?". QUERY es idempotente, el navegador lo sabe y no molesta.
+
+**URIs para queries.** Puedes tratar una query compleja como un recurso de primera clase. El servidor la almacena, le asigna una URI con `Location` y el cliente puede compartirla, bookmarkearla o reejecutarla con GET.
+
+**Retries seguros.** Si la conexión se cae a mitad de una QUERY, el cliente puede reintentarla automáticamente sin preocuparse de crear recursos duplicados o disparar efectos secundarios.
+
+## El elefante en la habitación: adopción
+
+El RFC está recién salido del horno —junio de 2026—. No esperes que mañana mismo Express, FastAPI o nginx lo soporten nativamente. Pero la historia sugiere que los métodos HTTP nuevos se adoptan cuando resuelven un problema real y doloroso.
+
+PATCH (RFC 5789) tardó unos años en ser ubicuo, y hoy está en todos los frameworks. QUERY resuelve un problema aún más común: todo el mundo hace búsquedas con body.
+
+Los autores vienen de Cloudflare y Akamai, dos empresas que operan infraestructura a escala planetaria. Si ellos empujan la implementación en sus propios productos, el efecto cascada será rápido. Cloudflare Workers ya permite interceptar cualquier método HTTP arbitrario, así que puedes usar QUERY hoy mismo si escribes tu propio handler.
+
+## Mi veredicto
+
+QUERY es uno de esos estándares que, cuando los lees, piensas "¿cómo hemos tardado 30 años en tener esto?". Es obvio en retrospectiva. GET con body llevaba décadas siendo un parche extraoficial que nadie quería estandarizar por miedo a romper intermediarios. La solución correcta era un método nuevo, y el grupo de trabajo HTTP del IETF ha tardado lo suyo en parirlo.
+
+Me gusta especialmente la parte de `Content-Location` y `Location`. Convertir una query en un recurso direccionable es un patrón que ya hacíamos a mano (guardas la query en la base de datos, devuelves un ID, el cliente hace GET a `/searches/42`), pero tenerlo como parte del protocolo lo eleva de hack a feature de primera clase.
+
+Lo que menos me convence es el nombre. "QUERY" es correcto pero soso. Podrían haberlo llamado SEARCH, FIND o ASK. Pero bueno, después de PUT, GET y POST, tampoco esperaba poesía.
+
+La pregunta real es cuánto tardarán los frameworks mainstream en adoptarlo. Mi apuesta: Express y FastAPI tendrán soporte en menos de un año. Los navegadores tardarán más en exponerlo en `fetch()` sin restricciones —hoy mismo puedes usar `fetch(url, { method: 'QUERY', body: ... })` en Chrome y Firefox porque fetch no valida el método contra una lista cerrada—.
+
+Si diseñas APIs, empieza a pensar en QUERY. No para usarlo mañana, sino para diseñar endpoints que puedan migrar limpiamente cuando llegue el momento. Separa tus operaciones de lectura con body de tus operaciones de escritura. Nómbralas bien. El día que tu framework anuncie soporte para QUERY, cambiar `POST /search` por `QUERY /search` será un find-and-replace de cinco segundos.
+
+Y sobre todo: deja de mentir. Tus búsquedas nunca fueron POST.
