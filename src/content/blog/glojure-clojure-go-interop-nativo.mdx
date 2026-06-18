@@ -1,0 +1,126 @@
+---
+title: "Glojure: Clojure ya corre sobre Go con interop nativo"
+date: "2026-06-18T09:09"
+tags: ["clojure", "go", "lisp", "interop", "lenguajes"]
+excerpt: "Glojure v0.6.5 trae un intérprete de Clojure sobre el runtime de Go con interop bidireccional completo. Puedes llamar a cualquier paquete Go desde Clojure y viceversa."
+---
+
+Hace unos días me topé con [Glojure](https://github.com/glojurelang/glojure) en Hacker News y me quedé mirando la pantalla unos segundos. Un intérprete de Clojure que corre sobre el runtime de Go, con interop completo en ambas direcciones. No es un compilador que traduce Clojure a Go y luego compila. Es un intérprete tree-walking que vive dentro del runtime de Go y puede llamar a cualquier paquete Go directamente.
+
+La idea es tan obvia en retrospectiva que sorprende que no se haya popularizado antes. Clojure ya demostró que el modelo "Lisp hosted" funciona: Clojure sobre JVM te da acceso a todo el ecosistema Java. ¿Por qué no hacer lo mismo con Go?
+
+## Qué es Glojure exactamente
+
+Glojure es un intérprete de Clojure escrito en Go. No es un port, no es un compilador cruzado, no es un transpilador. Es un intérprete tree-walking que analiza s-expressions, las evalúa, y cuando encuentra una llamada a una función de Go, la ejecuta directamente.
+
+El proyecto lo mantiene [Ingy döt Net](https://github.com/ingydotnet) y acaba de publicar la versión v0.6.5 el 16 de junio de 2026. Tiene más de 620 estrellas en GitHub y una comunidad pequeña pero activa.
+
+Lo que lo diferencia de otros intentos de llevar Clojure a Go es el interop. Otros proyectos compilaban Clojure a Go y luego ejecutaban el binario resultante. Glojure no: vive dentro del runtime de Go y puede llamar a funciones Go directamente, sin serialización, sin FFI, sin marshalling.
+
+## Cómo funciona el interop
+
+El sistema de interop es ingenioso. Glojure genera automáticamente bindings para los paquetes de la librería estándar de Go usando `gen-import-interop`, una herramienta que lee los exports de cualquier paquete Go mediante el paquete `go/importer` y genera código Go que registra esas funciones en el namespace de Clojure.
+
+Los nombres de paquete Go usan `:` en lugar de `/` para evitar conflictos con la sintaxis de namespaces de Clojure. Así, `net/http` se convierte en `net:http`:
+
+```clojure
+;; Llamar a fmt.Sprintf desde Clojure
+(println (fmt.Sprintf "Métodos HTTP: %v" [net:http.MethodGet net:http.MethodPost]))
+;; => Métodos HTTP: ["GET" "POST"]
+```
+
+Esto significa que puedes usar cualquier paquete de la stdlib de Go — `fmt`, `net/http`, `crypto`, `encoding/json`, `sync`, `time` — directamente desde Clojure, sin escribir una línea de Go.
+
+Pero lo realmente potente es que también funciona al revés. Puedes embeber Glojure en tu aplicación Go y exponer tus propias funciones:
+
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/glojurelang/glojure/pkg/glj"
+    "github.com/glojurelang/glojure/pkg/runtime"
+)
+
+func greet(name string) string {
+    return fmt.Sprintf("Hola, %s desde Go!", name)
+}
+
+func main() {
+    // Exponer una función Go a Clojure
+    greetVar := glj.Var("user", "greet-from-go")
+    greetVar.SetRoot(greet)
+
+    // Usarla desde Clojure
+    result := runtime.ReadEval(`(greet-from-go "Clojure")`)
+    fmt.Println(result) // "Hola, Clojure desde Go!"
+
+    // Definir una función en Clojure y llamarla desde Go
+    runtime.ReadEval(`(defn add [x y] (+ x y))`)
+    addFn := glj.Var("user", "add")
+    sum := addFn.Invoke(10, 32)
+    fmt.Printf("Suma: %v\n", sum) // Suma: 42
+}
+```
+
+Esto abre posibilidades interesantes: scripting en Clojure para aplicaciones Go, plugins definidos por el usuario, configuración programable. Imagina una CLI escrita en Go cuya lógica de negocio vive en scripts Clojure que el usuario puede modificar sin recompilar.
+
+## Un servidor HTTP en 7 líneas
+
+Para que veas lo natural que resulta, aquí tienes un servidor HTTP completo escrito en Glojure:
+
+```clojure
+(ns example.server)
+
+(defn echo-handler
+  [w r]
+  (io.Copy w (.Body r))
+  nil)
+
+(net:http.Handle "/" (net:http.HandlerFunc echo-handler))
+(println "Servidor en :8080...")
+(net:http.ListenAndServe ":8080" nil)
+```
+
+Lo ejecutas con `glj server.glj` y tienes un servidor HTTP funcionando. Sin compilar, sin `go build`, sin esperar. La función `echo-handler` recibe un `http.ResponseWriter` y un `http.Request` de Go y los manipula directamente desde Clojure.
+
+Fíjate en `(.Body r)`: es la sintaxis de interop de Clojure para acceder a campos y métodos de objetos host. Aquí el host es Go, no Java, pero la sintaxis es la misma. Esto hace que cualquier clojurista se sienta en casa inmediatamente.
+
+## La experiencia REPL
+
+El REPL de Glojure está sorprendentemente pulido para ser un proyecto en v0.6:
+
+- Modos de edición vi y emacs (vi por defecto)
+- Edición multilínea con auto-indentación
+- Tab completion para símbolos, namespaces y alias
+- Historial persistente en `~/.glj_history`
+- Pegado de bloques con bracketed paste
+- Ctrl+Z para suspender y `fg` para retomar
+
+No es el típico REPL mínimo de un proyecto experimental. Se nota que Ingy quiere que sea usable de verdad.
+
+## WASM: Clojure en el navegador
+
+Glojure también compila a WASM. Hay un [playground online](https://glojurelang.github.io/glojure/) donde puedes probar el REPL directamente en el navegador. Esto es posible porque Go compila a WASM de forma nativa desde hace años, y Glojure hereda esa capacidad sin esfuerzo adicional.
+
+El soporte para WASI (WebAssembly System Interface) llegó en la v0.6.5, así que también puedes ejecutar Glojure en entornos serverless que soporten WASM.
+
+## Mi opinión
+
+Creo que Glojure resuelve un problema real que mucha gente ha sentido pero pocos han articulado: Go es un lenguaje excelente para construir sistemas, pero su sintaxis para ciertas tareas de manipulación de datos es verbosa. Clojure es expresivo, inmutable por defecto y tiene un modelo de concurrencia sólido, pero depende de la JVM con todo lo que eso implica (arranque lento, consumo de memoria, despliegues pesados).
+
+Glojure te da la expresividad de Clojure con la ligereza de Go. Un binario estático, arranque instantáneo y acceso a todo el ecosistema Go.
+
+Dicho esto, hay que ser realistas: es un intérprete tree-walking. El rendimiento no va a competir con Clojure en JVM ni con Go nativo. Para scripts, configuración programable y lógica de negocio de alto nivel va sobrado. Para bucles intensivos en CPU, mejor escribe Go.
+
+El proyecto está en v0.6.5, así que espera bugs, funciones ausentes y cambios que rompan compatibilidad. Pero la dirección es sólida y el interop funciona ya.
+
+Si escribes Go y sientes curiosidad por Lisp, o escribes Clojure y te pesa la JVM, Glojure merece una tarde de exploración.
+
+## Veredicto
+
+**Para scripting y extensibilidad en proyectos Go: excelente.** La capacidad de embeber un REPL de Clojure en tu aplicación Go y exponer tus propias funciones es el caso de uso más convincente.
+
+**Para aplicaciones Clojure de producción: todavía no.** El rendimiento de un intérprete tree-walking no está a la altura de la JVM, y el ecosistema de librerías Clojure (Ring, Reitit, HoneySQL) no está disponible.
+
+**Como concepto: brillante.** La idea de "lenguajes hosted" — implementar un lenguaje en términos de otro en lugar de compilar a otro — es infrautilizada. Glojure demuestra que funciona y que el resultado es más útil que un transpilador.
