@@ -1,0 +1,145 @@
+---
+title: "MicroUI: 1100 líneas de C que dibujan cualquier interfaz"
+date: "2026-06-18T03:05"
+tags: ["c", "ui", "immediate-mode", "open-source", "graphics"]
+excerpt: "1100 líneas de C ANSI, sin malloc, sin dependencias: así es MicroUI, la librería de interfaces inmediatas que está arrasando en Hacker News."
+---
+
+Hace unas horas me topé con un repo que está petándolo en Hacker News: 198 puntos, 71 comentarios, y no es un framework nuevo de JavaScript ni un modelo de IA. Es una librería de interfaces de usuario escrita en C. ANSI C. Portable. 1100 líneas. Sin dependencias. Sin `malloc`.
+
+Se llama [MicroUI](https://github.com/rxi/microui), la creó [rxi](https://github.com/rxi) hace unos años, y aunque no es nueva (lleva desde 2018), la comunidad la ha redescubierto con fuerza. Y tiene sentido: en un ecosistema donde cualquier cosita UI pesa megas y necesita un bundler, 1100 líneas de C que compilan en cualquier lado son un soplo de aire fresco.
+
+## ¿Qué es el modo inmediato?
+
+Para entender por qué MicroUI mola, hay que entender la diferencia entre modo inmediato (*immediate mode*) y modo retenido (*retained mode*).
+
+En modo retenido —lo que usan Qt, GTK, SwiftUI, React, Flutter— tú declaras una jerarquía de widgets y el framework mantiene un árbol de estado. El botón existe como objeto entre frames. Tú le dices "cuando me clicken, haz esto" y el framework se encarga de detectar el click, redibujar, propagar eventos.
+
+En modo inmediato, no hay árbol. No hay objetos persistentes. Cada frame, tú llamas a funciones que dicen "aquí hay un botón, aquí hay un slider" y la librería te devuelve inmediatamente si el botón fue pulsado o el slider cambió de valor. No hay estado que gestionar entre frames. Tú controlas el flujo.
+
+La diferencia práctica es brutal:
+
+```c
+// Modo inmediato: el UI es tu código, no un árbol separado
+if (mu_button(ctx, "Guardar")) {
+    guardar_archivo();
+}
+```
+
+Eso es todo. No hay callback, no hay binding, no hay observer. Si el botón fue pulsado en este frame, ejecutas tu código. Es programación procedural de toda la vida aplicada a interfaces.
+
+## Cómo funciona MicroUI por dentro
+
+MicroUI ocupa ~1100 líneas de C ANSI. No llama a `malloc`. Toda su memoria vive en un buffer de tamaño fijo que tú le pasas al inicializarlo. Esto significa que funciona en cualquier sitio: MS-DOS, embedded, WebAssembly, lo que sea.
+
+El contexto de MicroUI cabe en un struct:
+
+```c
+mu_Context ctx;
+uint8_t memory[256 * 1024];  // 256 KB fijos, sin heap
+mu_init(&ctx, memory);
+```
+
+A partir de ahí, cada frame sigue este ciclo:
+
+1. Le pasas los eventos de input (ratón, teclado, scroll)
+2. Llamas a `mu_begin(&ctx)`
+3. Defines tus ventanas y controles con las funciones `mu_*`
+4. Llamas a `mu_end(&ctx)`
+5. Iteras sobre la lista de comandos de dibujo generada
+
+El paso 5 es clave: MicroUI no dibuja nada. Te da una lista de comandos —"dibuja un rectángulo aquí", "escribe este texto allá"— y tú los renderizas con lo que tengas: SDL, Raylib, OpenGL, una impresora térmica, lo que sea.
+
+```c
+mu_Command *cmd = NULL;
+while (mu_next_command(ctx, &cmd)) {
+    switch (cmd->type) {
+        case MU_COMMAND_RECT:
+            dibujar_rectangulo(cmd->rect.rect, cmd->rect.color);
+            break;
+        case MU_COMMAND_TEXT:
+            dibujar_texto(cmd->text.pos, cmd->text.str);
+            break;
+        case MU_COMMAND_ICON:
+            dibujar_icono(cmd->icon.rect, cmd->icon.id);
+            break;
+        case MU_COMMAND_CLIP:
+            establecer_clip(cmd->clip.rect);
+            break;
+    }
+}
+```
+
+Esto es lo que hace a MicroUI ridículamente portable. La librería no sabe qué es OpenGL ni qué es una terminal VT100. Solo emite comandos abstractos. Tú decides cómo pintarlos.
+
+## Un panel de debug en 30 líneas
+
+El caso de uso más común para MicroUI es el panel de debug de un motor de videojuegos o una herramienta interna. Aquí va un ejemplo completo que dibuja un panel con sliders, checkboxes y un botón:
+
+```c
+void panel_debug(mu_Context *ctx) {
+    if (mu_begin_window(ctx, "Debug", mu_rect(10, 10, 240, 300))) {
+        // Fila: label + slider
+        mu_layout_row(ctx, 2, (int[]) { 80, -1 }, 0);
+        mu_label(ctx, "Volumen:");
+        static float volumen = 0.5f;
+        if (mu_slider(ctx, &volumen, 0.0f, 1.0f, 0.01f)) {
+            ajustar_volumen(volumen);
+        }
+
+        // Fila: checkbox
+        mu_layout_row(ctx, 1, (int[]) { -1 }, 0);
+        static bool vsync = true;
+        if (mu_checkbox(ctx, "VSync", &vsync)) {
+            activar_vsync(vsync);
+        }
+
+        // Fila: dos botones
+        mu_layout_row(ctx, 2, (int[]) { -1, -1 }, 0);
+        if (mu_button(ctx, "Reset")) {
+            resetear_valores();
+        }
+        if (mu_button(ctx, "Cerrar")) {
+            mu_end_window(ctx);
+            return;
+        }
+
+        mu_end_window(ctx);
+    }
+}
+```
+
+Fíjate en el layout: `mu_layout_row(ctx, 2, (int[]) { 80, -1 }, 0)` le dice a MicroUI "esta fila tiene dos columnas, la primera mide 80 píxeles, la segunda ocupa el resto". El `-1` significa "estira hasta el ancho disponible". Sin CSS, sin flexbox, sin grid. Solo arrays de enteros.
+
+## Por qué está petándolo ahora
+
+MicroUI no es nueva. La versión actual es la 2.02, y el repo tiene más de 6200 estrellas acumuladas desde 2018. ¿Por qué explota ahora en HN?
+
+Creo que hay tres factores:
+
+**1. Fatiga de complejidad.** Cada año el stack UI web suma capas. En 2026, montar un botón en una webapp puede implicar React, un bundler, CSS modules, design tokens y tres capas de state management. Frente a eso, 1100 líneas de C que hacen botones, sliders, checkboxes y ventanas *sin allocaciones* es casi terapéutico.
+
+**2. WebAssembly como puente.** El demo de MicroUI compilado a WASM y corriendo en el navegador —cortesía de [floooh](https://github.com/floooh/sokol-samples/blob/master/sgl/microui-sapp.c) usando los headers sokol— demuestra que puedes tener una GUI nativa en C corriendo en la web sin tocar HTML ni CSS. Eso es potente.
+
+**3. Embedded y nichos olvidados.** MicroUI funciona en MS-DOS, en un ESP32, en una Raspberry Pi Pico con una pantalla SPI. Los desarrolladores de sistemas embebidos y retrocomputing la han adoptado porque no encuentran nada tan ligero en otros ecosistemas.
+
+## Lo que MicroUI no es
+
+Conviene ser honesto. MicroUI no es una librería para hacer la UI de tu app de producción. No tiene:
+- Accesibilidad (lectores de pantalla, navegación por teclado)
+- Soporte para fuentes TTF (solo texto, tú renderizas los glifos)
+- Temas ni estilos (los colores son un array de 15 valores que tú rellenas)
+- Input de texto avanzado (selección, copiar/pegar, IME)
+- Animaciones ni transiciones
+
+El propio rxi lo dice: no acepta PRs que añadan features. La librería está diseñada como base mínima para que tú construyas encima. Si necesitas un color picker o un tree view, te lo programas tú.
+
+## Mi veredicto
+
+MicroUI me parece una joya de diseño minimalista. No es para todos los proyectos, pero cuando encaja, encaja de maravilla.
+
+El concepto de "modo inmediato en 1100 líneas sin malloc" es una lección de cómo reducir un problema a su esencia. En una era donde el software tiende a acumular capas hasta volverse irreconocible, encontrar algo que hace una cosa, la hace bien, y no pretende más, es refrescante.
+
+Si estás haciendo un motor de juego, una herramienta interna, un panel de debug para firmware embebido, o simplemente quieres entender cómo funciona una GUI desde cero, échale un ojo al código fuente. Son 1100 líneas. Te las lees en una tarde.
+
+El repo está en [github.com/rxi/microui](https://github.com/rxi/microui) bajo licencia MIT. El autor también tiene un [write-up detallado](https://rxi.github.io/microui_v2_an_implementation_overview.html) explicando cómo implementó el z-order, el sistema de layout y el manejo de foco sin heap. Muy recomendable.
