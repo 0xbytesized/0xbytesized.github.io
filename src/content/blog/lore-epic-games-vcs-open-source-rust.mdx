@@ -5,13 +5,13 @@ tags: ["version-control", "rust", "epic-games", "open-source", "game-dev"]
 excerpt: "Epic Games abre Lore, su sistema de control de versiones escrito en Rust y diseñado para assets binarios. El VCS que ya usaban en Fortnite ahora es MIT."
 ---
 
-Hoy Epic Games ha hecho algo que no esperaba: abrir el código de su sistema de control de versiones interno. Se llama **Lore**, está escrito en Rust, tiene licencia MIT y llevaba años funcionando bajo el nombre de _Unreal Revision Control_ dentro del editor de Fortnite (UEFN). La noticia ha pegado fuerte en HN: 779 puntos y más de 430 comentarios en pocas horas.
+Hoy Epic Games ha hecho algo que no esperaba: abrir el código de su sistema de control de versiones interno. Se llama **Lore**, está escrito en Rust, tiene licencia MIT y llevaba años funcionando bajo el nombre de _Unreal Revision Control_ dentro del editor de Fortnite (UEFN). La noticia ha pegado fuerte en HN, acumulando cientos de puntos y comentarios en pocas horas.
 
 No es un "Git killer". No pretende serlo. Lore apunta a un nicho muy concreto donde Git siempre ha hecho aguas: proyectos con miles de assets binarios grandes — texturas, modelos 3D, animaciones, audio. El territorio de Perforce.
 
 ## ¿Por qué otro VCS en 2026?
 
-Si trabajas con código, Git te funciona. Pero en game dev la realidad es distinta. Un proyecto AAA puede tener terabytes de assets binarios. Una textura de 4K pesa 30 MB. Un modelo con animaciones, 200 MB. Git con LFS es un parche que funciona a medias: el diff de binarios no existe, el blame es inútil, y el rendimiento se degrada con repos grandes.
+Si trabajas con código, Git te funciona. Pero en game dev la realidad es distinta. Un proyecto AAA puede tener terabytes de assets binarios. Una textura de 4K pesa 30 MB. Un modelo con animaciones, 200 MB. Git con LFS es un parche que funciona a medias: el diff de binarios no existe, el blame es inútil y el rendimiento se degrada con repos grandes.
 
 Perforce (Helix Core) ha sido el estándar de facto en la industria del videojuego durante décadas. Pero es propietario, caro, complejo de administrar y su UX es... digamos que no ha envejecido bien.
 
@@ -76,9 +76,9 @@ Cada fragmento se identifica por su hash BLAKE3, no por su nombre de archivo. Es
 
 ### API-first, no CLI-first
 
-Git fue diseñado como un conjunto de comandos de terminal. Su "API" es llamar a `git` con flags. No existe una biblioteca linkable oficial — y es una decisión deliberada de sus mantenedores.
+Git fue diseñado como un conjunto de comandos de terminal. Su "API" es llamar a `git` con flags. No existe una biblioteca enlazable oficial — y es una decisión deliberada de sus mantenedores.
 
-Lore hace lo contrario: la API es el artefacto principal. Existe `liblore`, una biblioteca compartida con bindings para Rust y JavaScript. El CLI es un cliente más que consume esa API. Esto permite integrar Lore en editores, pipelines de CI/CD y herramientas custom sin hacer parsing de stdout.
+Lore hace lo contrario: la API es el artefacto principal. Existe `liblore`, una biblioteca compartida con bindings para Rust y JavaScript. El CLI es un cliente más que consume esa API. Esto permite integrar Lore en editores, pipelines de CI/CD y herramientas personalizadas sin hacer análisis de stdout.
 
 ```bash
 # Lore se instala con un script que baja los binarios precompilados
@@ -102,7 +102,7 @@ En un proyecto de 500 GB, ¿cuánto necesitas realmente en tu máquina? Lore hac
 
 ### Locks para assets no mergeables
 
-Dos personas no pueden hacer merge de un archivo de Photoshop o de un modelo 3D como si fuera código. Lore incluye un sistema de locks para contenido binario no mergeable, algo que en Git simplemente no existe.
+Dos personas no pueden hacer merge de un archivo de Photoshop o de un modelo 3D como si fuera código. Lore incluye un sistema de locks para contenido binario no fusionable, algo que en Git simplemente no existe.
 
 ## El flujo de trabajo real
 
@@ -113,16 +113,16 @@ El quickstart de Lore te monta un entorno completo en 10 minutos. Así se ve el 
 curl -fsSL https://raw.githubusercontent.com/EpicGames/lore/main/scripts/install.sh | bash -s -- --demo
 
 # 2. Crear repo
-lore init mi-proyecto
+lore repository create lore://localhost:41337/mi-proyecto
 
-# 3. Añadir archivos — un solo comando para adds, edits y deletes
+# 3. Añadir archivos — un solo comando para adiciones, ediciones y eliminaciones
 echo "Hello, Lore" > hello.txt
-lore stage hello.txt        # añade
-lore stage move old.txt new.txt  # renombra
-lore stage remove bye.txt   # elimina
+lore stage hello.txt              # añade
+lore stage move old.txt new.txt   # renombra
+rm bye.txt && lore stage bye.txt  # elimina (Lore detecta el archivo borrado)
 
-# 4. Commit
-lore commit -m "Primer revision"
+# 4. Commit (mensaje posicional, sin -m)
+lore commit "Primera revisión"
 
 # 5. Push al servidor
 lore push
@@ -131,21 +131,21 @@ lore push
 lore clone lore://localhost:41337/mi-proyecto otro-directorio
 
 # 7. Branch y merge
-lore branch feature/x
-lore switch feature/x
+lore branch create feature/x
+lore branch switch feature/x
 # ... cambios ...
-lore commit -m "Feature X"
-lore switch main
-lore merge feature/x
+lore commit "Feature X"
+lore branch switch main
+lore branch merge feature/x
 ```
 
-La diferencia con Git más notable es `lore stage`: un solo comando para adds, edits, deletes, moves y renames. Nada de `git add`, `git rm`, `git mv` por separado. Lore detecta qué ha cambiado y actúa en consecuencia.
+La diferencia con Git más notable es `lore stage`: un solo comando para adiciones, ediciones, eliminaciones, movimientos y renombramientos. Nada de `git add`, `git rm`, `git mv` por separado. Lore detecta qué ha cambiado y actúa en consecuencia.
 
 ## Lo que NO es Lore
 
 Para evitar malentendidos:
 
-- **No es un reemplazo de Git para código.** Si tu proyecto son puros archivos de texto, Git te sigue sirviendo perfectamente.
+- **No es un reemplazo de Git para código.** Si tu proyecto consiste solo en archivos de texto, Git te sigue sirviendo perfectamente.
 - **No es completamente descentralizado.** Necesitas un servidor. Puede ser local, pero la arquitectura es centralizada.
 - **No es un producto maduro.** Es v0.8.3. Acaba de salir. Los propios desarrolladores advierten que está en fase temprana.
 - **El cliente de escritorio no es open source.** Solo los binarios del CLI, servidor y `liblore` lo son. El desktop client se distribuye como binario cerrado.
@@ -154,9 +154,9 @@ Para evitar malentendidos:
 
 Lore me parece una de esas movidas que tienen sentido estratégico aunque el producto aún esté verde. Epic Games no está haciendo caridad: abrir Lore les permite capturar contribuciones externas, crear ecosistema alrededor de su herramienta y, de paso, meter presión a Perforce en un mercado donde el pricing es un dolor constante para los estudios.
 
-Técnicamente las decisiones son sólidas. BLAKE3 para content addressing, FastCDC para chunking, Zstd para compresión, Rust como lenguaje — no están improvisando. El diseño está documentado con un nivel de detalle que muchos proyectos open source consagrados ya quisieran: 17 secciones de system design, 16 ADRs públicos, especificaciones formales.
+Técnicamente las decisiones son sólidas. BLAKE3 para content addressing, FastCDC para chunking, Zstd para compresión, Rust como lenguaje — no están improvisando. El diseño está documentado con un nivel de detalle que muchos proyectos open source consagrados ya quisieran: 27 secciones de system design, 16 ADRs públicos, especificaciones formales.
 
-Lo que me frena de emocionarme demasiado: la dependencia del servidor. En un mundo donde Git te deja trabajar completamente offline y hacer push a cualquier remote, volver a un modelo centralizado sabe a paso atrás. Sí, Lore tiene capacidad offline, pero el modelo mental es "conectado con desconexiones toleradas", no "distribuido por naturaleza".
+Lo que me frena de emocionarme demasiado: la dependencia del servidor. En un mundo donde Git te deja trabajar completamente offline y hacer push a cualquier remote, volver a un modelo centralizado se siente como un paso atrás. Sí, Lore tiene capacidad offline, pero el modelo mental es "conectado con desconexiones toleradas", no "distribuido por naturaleza".
 
 Dicho esto, para el caso de uso al que apunta — estudios de videojuegos, proyectos con assets binarios pesados, pipelines de producción donde necesitas locks y permisos por directorio — Lore resuelve problemas reales que Git simplemente no puede resolver sin una torre de herramientas auxiliares.
 

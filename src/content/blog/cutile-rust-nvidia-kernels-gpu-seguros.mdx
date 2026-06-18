@@ -5,15 +5,15 @@ tags: ["rust", "gpu", "nvidia", "cuda", "open-source"]
 excerpt: "NVlabs publica cuTile Rust, un DSL tile-based que extiende el ownership de Rust a la GPU. Kernels memory-safe, data-race-free y al 92% del peak del hardware."
 ---
 
-NVIDIA Labs acaba de publicar [cuTile Rust](https://github.com/nvlabs/cutile-rs), un DSL tile-based para escribir kernels GPU en Rust idiomático. La promesa es ambiciosa: llevar el sistema de ownership de Rust al otro lado de la frontera GPU, eliminando data races y accesos inválidos a memoria **sin perder rendimiento**. Y los números del paper lo respaldan: 2 PFlop/s en GEMM sobre una B200, el 92% del peak teórico.
+NVIDIA Labs acaba de publicar [cuTile Rust](https://github.com/nvlabs/cutile-rs), un DSL tile-based para escribir kernels de GPU en Rust idiomático. La promesa es ambiciosa: llevar el sistema de ownership de Rust al otro lado de la frontera GPU, eliminando data races y accesos inválidos a memoria **sin perder rendimiento**. Y los números del artículo lo respaldan: 2 PFlop/s en GEMM sobre una B200, el 92% del pico teórico en f16 denso.
 
-No es un wrapper fino sobre CUDA C++. Es un sistema completo que captura el AST de Rust, lo compila JIT a CUDA Tile IR y genera cubins GPU en tiempo de ejecución. Vamos a ver qué significa esto y por qué es importante.
+No es un wrapper fino sobre CUDA C++. Es un sistema completo que captura el AST de Rust, lo compila JIT a CUDA Tile IR y genera cubins de GPU en tiempo de ejecución. Vamos a ver qué significa esto y por qué es importante.
 
 ## El problema: la GPU no entiende de borrow checker
 
-Programar GPUs siempre ha sido territorio hostil. CUDA C++ te da control total, pero también libertad total para dispararte en el pie: accesos concurrentes a la misma región de memoria, carreras entre hilos, buffers que se solapan sin que nadie te avise. Herramientas como `cuda-memcheck` existen, pero son reactivas — encuentras el error después de que ocurra.
+Programar GPUs siempre ha sido territorio hostil. CUDA C++ te da control total, pero también libertad total para dispararte en el pie: accesos concurrentes a la misma región de memoria, carreras entre hilos, búferes que se solapan sin que nadie te avise. Herramientas como `cuda-memcheck` existen, pero son reactivas — encuentras el error después de que ocurra.
 
-Rust resolvió este problema en CPU con el borrow checker: ownership, borrowing y lifetimes que el compilador verifica en tiempo de compilación. Pero la GPU es un animal distinto. Lanzas miles de threads simultáneos, cada uno accediendo a porciones de tensores, y el modelo de ownership de Rust no cruza la frontera del launch kernel.
+Rust resolvió este problema en la CPU con el borrow checker: ownership, borrowing y lifetimes que el compilador verifica en tiempo de compilación. Pero la GPU es un animal distinto. Lanzas miles de hilos simultáneos, cada uno accediendo a porciones de tensores, y el modelo de ownership de Rust no cruza la frontera del launch kernel.
 
 cuTile Rust tiende un puente sobre ese abismo.
 
@@ -42,7 +42,7 @@ mod kernel {
 }
 ```
 
-Fíjate en los tipos: `&mut Tensor<f32, S>` para el output mutable, `&Tensor<f32, {[-1, -1]}>` para el input compartido. El macro `#[cutile::module]` transforma esta función en un kernel GPU y genera un launcher host-side. Las shapes con `-1` indican dimensiones que se infieren en tiempo de compilación JIT.
+Fíjate en los tipos: `&mut Tensor<f32, S>` para la salida mutable, `&Tensor<f32, {[-1, -1]}>` para la entrada compartida. La macro `#[cutile::module]` transforma esta función en un kernel GPU y genera un lanzador del lado del host. Las dimensiones con `-1` indican shapes que se infieren en tiempo de compilación JIT.
 
 Desde el host, el código es igual de limpio:
 
@@ -54,7 +54,7 @@ let z = api::zeros::<f32>(&[1024]).partition([128]);
 let (_z, _x, _y) = kernel::saxpy(z, 2.0, x).sync()?;
 ```
 
-La llamada a `.partition([128])` divide el tensor de salida en 8 trozos de 128 elementos. El launcher infiere automáticamente un grid de `(8, 1, 1)`. El `.sync()` dispara la compilación JIT y la ejecución. Y lo crucial: el compilador **sabe** que cada tile escribe en su trozo exclusivo. No hay solapamientos posibles.
+La llamada a `.partition([128])` divide el tensor de salida en 8 trozos de 128 elementos. El lanzador infiere automáticamente un grid de `(8, 1, 1)`. El `.sync()` dispara la compilación JIT y la ejecución. Y lo crucial: el compilador **sabe** que cada tile escribe en su trozo exclusivo. No hay solapamientos posibles.
 
 ## GEMM en 30 líneas, compitiendo con cuBLAS
 
@@ -80,9 +80,9 @@ fn gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i3
 }
 ```
 
-En ~30 líneas de Rust tienes un GEMM que el paper reporta a **2.07 PFlop/s en B200** para matrices 8192×8192 en f16 — a 0.3% del rendimiento de una implementación equivalente en CUDA Tile IR de bajo nivel. Es decir, la seguridad no cuesta nada medible.
+En ~30 líneas de Rust tienes un GEMM que el artículo reporta a **2.07 PFlop/s en B200** para matrices 8192×8192 en f16 — a 0.3% del rendimiento de una implementación equivalente en CUDA Tile IR de bajo nivel. Es decir, la seguridad no cuesta nada medible.
 
-La clave está en `mma()`, que mapea directamente a las instrucciones de tensor core de NVIDIA. El loop sobre `K/BK` recorre los tiles de las matrices de entrada, acumulando en `tile_z`. Todo verificable en tiempo de compilación: shapes, accesos, particiones.
+La clave está en `mma()`, que se traduce directamente a las instrucciones de tensor core de NVIDIA. El bucle sobre `K/BK` recorre los tiles de las matrices de entrada, acumulando en `tile_z`. Todo verificable en tiempo de compilación: dimensiones, accesos, particiones.
 
 ## Grout: inference de Qwen3 a 171 tok/s en una RTX 5090
 
