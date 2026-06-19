@@ -1,0 +1,134 @@
+---
+title: "Fractal: el kernel del MIT que es un microscopio para chips"
+date: "2026-06-19T15:31"
+tags: ["kernel", "seguridad", "apple-silicon", "mit", "microarquitectura", "c"]
+excerpt: "El MIT creó Fractal, un SO desde cero para analizar cómo funcionan de verdad los chips. Ya ha descubierto comportamientos ocultos en el M1 de Apple."
+---
+
+Un equipo del MIT CSAIL ha construido Fractal, un kernel de sistema operativo escrito desde cero con un propósito muy distinto al de Linux o macOS: no está pensado para ejecutar aplicaciones de usuario, sino para **hacer ingeniería inversa de la microarquitectura de los chips**. Es, en palabras de su creador, "el microscopio electrónico de los sistemas operativos".
+
+El proyecto lo lidera Joseph Ravichandran, estudiante de doctorado en el MIT, bajo la supervisión de la profesora Mengjia Yan. El código —más de 31.000 líneas en C— fue escrito íntegramente a mano entre junio y diciembre de 2024. Cero líneas generadas por IA. Se presentó en el IEEE Symposium on Security and Privacy en San Francisco en mayo de 2026 y el código está disponible en GitHub bajo licencia MIT.
+
+## El problema que Fractal resuelve
+
+Cuando un investigador de seguridad quiere entender qué hace realmente un procesador moderno —con el nivel de detalle necesario para determinar si ataques como Spectre o Meltdown son posibles— normalmente ejecuta sus experimentos sobre macOS o Linux, parchea el kernel a mano y reza para que las modificaciones aguanten.
+
+El problema es que un sistema operativo de propósito general **inyecta ruido por todas partes**: interrupciones, actividad del scheduler, gestión de espacios de direcciones, migración de hilos entre núcleos. Medir el comportamiento de estructuras internas del chip (predictores de salto, cachés, TLB) a través de la frontera entre código de usuario y código de kernel se convierte en un ejercicio de adivinación con interferencias constantes.
+
+Fractal invierte el modelo. Arranca directamente sobre el metal desnudo, sin ningún otro software ejecutándose y expone primitivas que permiten a un mismo experimento **cambiar de nivel de privilegio en tiempo de ejecución** mientras ejecuta las mismas instrucciones en el mismo espacio de direcciones.
+
+## Las tres ideas clave
+
+### 1. Concurrencia multi-privilegio
+
+El concepto central de Fractal es la **concurrencia multi-privilegio** (*multi-privilege concurrency*). En un sistema operativo normal, un proceso de usuario y el kernel viven en mundos separados: distinto espacio de direcciones, distinto nivel de privilegio, distinto todo. En Fractal, partes distintas de un mismo programa pueden ejecutarse con distintos niveles de privilegio simultáneamente.
+
+Esto se consigue con un constructo nuevo que el equipo introdujo: el **outer kernel thread**, un hilo que reside en la memoria de un proceso de usuario pero se ejecuta con privilegios de kernel.
+
+```c
+// Conceptual: un mismo programa con dos partes a distinto privilegio
+// El hilo de usuario y el outer kernel thread comparten espacio de direcciones
+
+void experimento_usuario() {
+    // Código ejecutándose en EL0 (usuario)
+    entrenar_predictor_saltos(patron_A);
+    // El outer kernel thread observa desde EL1 (kernel)
+    // sin que nada más cambie: mismo address space, mismo core
+}
+
+void outer_kernel_thread() {
+    // Ejecutándose con privilegios de kernel
+    // pero dentro del address space del proceso de usuario
+    medir_efecto_en_cache(patron_A);
+}
+```
+
+La gracia está en lo que **no** cambia. En Linux, cuando haces una syscall, el procesador cambia de espacio de direcciones, el scheduler puede mover tu hilo a otro núcleo y el propio kernel ejecuta código que contamina las cachés. En Fractal, la única variable que cambia es el nivel de privilegio. Todo lo demás permanece idéntico.
+
+### 2. Cambios de contexto sin ramas (ultrathreads)
+
+En ARM64, Fractal implementa algo que llaman **branchless context switches** o *ultrathreads*: cambiar de nivel de privilegio sin ejecutar una sola instrucción de salto (*branch*). Esto es relevante porque los propios saltos contaminan el predictor que estás intentando medir. Es como intentar pesar un grano de arroz con una báscula que se recalibra cada vez que la tocas.
+
+### 3. Gmap: regiones virtuales masivas
+
+Muchos experimentos de microarquitectura necesitan crear regiones enormes de instrucciones o datos repetidos. Fractal incluye el **gmap**, una primitiva que permite mapear regiones virtuales masivas sin asignar memoria física real para cada página. Esto acelera la preparación de experimentos que en un SO normal requerirían reservas de memoria gigantescas.
+
+## Lo que Fractal encontró en el M1 de Apple
+
+El primer gran uso de Fractal fue un análisis profundo de los predictores de salto del Apple M1. Los resultados son notables porque **contradicen hallazgos anteriores** obtenidos con métodos tradicionales sobre macOS.
+
+### Phantom en Apple Silicon (por primera vez)
+
+El equipo produjo la **primera evidencia de que Apple Silicon sufre Phantom speculation**, una clase de mala predicción especulativa que hasta ahora solo se había demostrado en procesadores AMD e Intel.
+
+En Phantom, instrucciones normales —incluido un `nop`— pueden ser malinterpretadas por la CPU como saltos, disparando ejecución especulativa que el programa nunca pidió. En el M1, Fractal demostró que los *fetches* de Phantom tienen éxito cruzando tanto niveles de privilegio como espacios de direcciones, aunque la fase de ejecución permanece bloqueada.
+
+```c
+// Conceptual: Phantom speculation - un nop se interpreta como salto
+void demostracion_phantom() {
+    // Instrucciones que el predictor malinterpreta como un branch
+    asm volatile("nop");  // La CPU podría especular como si fuera un jmp
+    // El fetch especulativo ocurre ANTES de que la CPU se dé cuenta
+    // de que era un nop. Ese fetch es observable por canal lateral.
+}
+```
+
+### CSV2: la protección funciona a medias
+
+Apple implementa en el M1 una especificación de ARM llamada CSV2, diseñada para evitar que código ejecutándose en un nivel de privilegio dirija la especulación en otro nivel. Usando Fractal, el equipo del MIT confirmó que la protección **sí funciona para la fase de ejecución** del predictor indirecto de saltos: un programa en modo usuario no puede hacer que el kernel ejecute especulativamente una dirección elegida por el atacante.
+
+Pero encontraron algo que los diseñadores del chip probablemente no pretendían: **la CPU trae igualmente el destino a la caché de instrucciones antes de que la protección se active**. Ese *fetch* es observable por canal lateral. Traducido: el código de usuario aún puede influir en lo que el kernel mete en sus cachés a través de la frontera de privilegio.
+
+### El predictor condicional no aísla nada
+
+Un experimento anterior con métodos tradicionales había reportado que el predictor condicional de salto del M1 permitía entrenamiento cruzado entre privilegios en los núcleos de rendimiento (P-cores), pero no en los de eficiencia (E-cores). El equipo de Fractal demostró que ese resultado era **un artefacto de macOS migrando hilos silenciosamente entre núcleos durante las syscalls**.
+
+Con Fractal, donde el núcleo no se mueve, el resultado es inequívoco: **el predictor condicional de salto del M1 no tiene aislamiento de privilegio alguno, ni en P-cores ni en E-cores**.
+
+## Construir y ejecutar Fractal
+
+Fractal soporta x86_64, ARM64 y RISC-V y puede ejecutarse en QEMU, Raspberry Pi 4B, Apple Silicon (M1 y M4) y PCs x86_64 con GRUB. El build system es un Makefile limpio y bien documentado:
+
+```bash
+# Clonar el repo
+git clone https://github.com/jprx/fractal
+cd fractal
+
+# Construir el toolchain (GCC cross-compiler + newlib con bindings a Fractal)
+cd toolchain && ./mk_toolchain.sh all
+
+# Construir el sistema de ficheros (initrd ext2 con programas de usuario)
+cd filesys && make
+
+# Compilar el kernel para QEMU (todas las arquitecturas)
+make -j BOARD=QEMU
+
+# O para una Raspberry Pi 4B
+make -j BOARD=RASPI
+
+# O para un Apple M1
+make -j BOARD=APPLE SOC=M1
+```
+
+El toolchain incluye `newlib` con bindings a las syscalls de Fractal, compilado dentro de `libc.a` y `crt0.o` para cada arquitectura. Esto significa que cualquier programa en C normal puede compilarse y enlazarse estáticamente con una libc compatible con Fractal sin modificaciones.
+
+Para Apple Silicon, la interacción se hace por USB SuperSpeed con `macvdmtool` (del proyecto Asahi Linux) y `picocom`. Para PCs x86_64, se genera una ISO arrancable con GRUB que se puede flashear a un USB con `dd`.
+
+## Mi opinión
+
+Fractal me parece uno de esos proyectos que cambian las reglas del juego sin hacer ruido. No es un producto, no va a salir en TechCrunch y probablemente nunca lo ejecutarás en tu portátil. Pero para la investigación en seguridad de hardware, es un salto cualitativo.
+
+Lo que más me impresiona es la pureza del enfoque. En vez de parchear Linux una vez más, el equipo dijo "vale, vamos a construir el sistema operativo que realmente necesitamos para este trabajo". Y lo hicieron. 31.000 líneas de C escrito a mano, sin IA, en seis meses. Eso es disciplina.
+
+El hallazgo sobre el predictor condicional del M1 es particularmente revelador. Durante años, investigadores confiaron en resultados obtenidos sobre macOS sin saber que el propio SO estaba contaminando las mediciones migrando hilos entre núcleos. Fractal expuso ese artefacto experimental de un plumazo. Es un recordatorio de que en ciencia, la calidad de tus instrumentos determina la calidad de tus conclusiones.
+
+La ambición a largo plazo que plantea Ravichandran —convertir Fractal en infraestructura compartida para toda la comunidad, como QEMU o FFmpeg lo son en sus campos— es exactamente la dirección correcta. La seguridad de hardware necesita herramientas de código abierto que no dependan de los parches precarios que cada investigador aplica a su kernel de Linux.
+
+Si trabajas en seguridad de hardware, microarquitectura, o simplemente te gusta entender cómo funcionan las tripas de un procesador moderno, el repo de Fractal merece una tarde de tu tiempo.
+
+---
+
+**Referencias:**
+- [Fractal en GitHub](https://github.com/jprx/fractal)
+- [Artículo del MIT News](https://news.mit.edu/2026/to-study-how-chips-really-work-mit-researchers-built-their-own-operating-system-0610)
+- Paper: "Fractal: An Operating System Designed for Microarchitecture Reverse Engineering" — IEEE S&P 2026
