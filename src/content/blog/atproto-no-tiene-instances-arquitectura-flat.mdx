@@ -1,0 +1,169 @@
+---
+title: "AT Protocol no tiene instancias: así funciona de verdad"
+date: "2026-06-19T21:35"
+tags: ["atproto", "bluesky", "arquitectura", "protocolos", "descentralización"]
+excerpt: "Dan Abramov explica por qué AT Protocol no tiene instancias como Mastodon. Su arquitectura separa hosting de agregación, como los blogs y RSS."
+---
+
+Dan Abramov —sí, el de React— acaba de publicar un artículo que llevaba tiempo mereciendo existir: ["There Are No Instances in ATProto"](https://overreacted.io/there-are-no-instances-in-atproto/). Cada vez que alguien menciona AT Protocol en Hacker News, aparece el comentario de rigor: «¿Pero dónde están las instancias de Bluesky?». La respuesta es que no las hay. La pregunta en sí es un error de categoría, una confusión que viene de pensar en Mastodon como único modelo de descentralización posible.
+
+Voy a desglosar por qué esto importa, cómo funciona ATProto de verdad y por qué su arquitectura es más interesante de lo que parece.
+
+## El modelo que ya conoces: blogs y RSS
+
+Antes de que las redes sociales se comieran internet, publicar era simple: tenías tu blog, yo tenía el mío y herramientas como Google Reader agregaban el contenido de todos. Dos capas separadas:
+
+- **Hosting**: tu contenido vive en tu servidor. Tú controlas los datos.
+- **Agregación**: aplicaciones como Google Reader o Feedly recopilan posts de muchos blogs y te los muestran juntos.
+
+Esto funcionó perfectamente durante años. Nadie decía «¿en qué instancia de Google Reader estás?» porque la pregunta no tenía sentido. Google Reader no alojaba tu blog, solo lo leía.
+
+Luego llegaron Facebook y Twitter, metieron todo dentro de una caja cerrada y nos olvidamos de que hosting y agregación podían ser cosas distintas.
+
+## Mastodon y el modelo de instancias
+
+Cuando Mastodon quiso descentralizar el modelo de Facebook, tomó un camino concreto: crear «pequeños Facebooks» autogestionados llamados **instancias**. Cada instancia es una comunidad con sus propias normas, sus propios administradores y su propio feed.
+
+El problema es que este modelo ata tu identidad a tu instancia. En Mastodon tu login es literalmente `usuario@instancia.com`. Si tu instancia desaparece, tu identidad desaparece con ella. Si los administradores de tu instancia se pelean con los de otra, dejas de ver a tus amigos de esa otra instancia sin que tú hayas decidido nada.
+
+Y la federación entre instancias escala como O(n²): cada instancia tiene que establecer relaciones con cada otra instancia con la que comparte usuarios.
+
+No es que Mastodon esté mal —funciona para su propósito—, pero su modelo no es el único posible.
+
+## AT Protocol: borra la caja
+
+AT Protocol (el protocolo detrás de Bluesky) empieza desde otro sitio. En lugar de poner una caja alrededor de cada comunidad, **vuelve al modelo de blogs y RSS** y lo generaliza para redes sociales.
+
+La arquitectura tiene tres piezas:
+
+### 1. Personal Data Server (PDS)
+
+Es donde **viven** tus datos. Tus posts, tus likes, tus follows. Es tu «blog» en el mundo ATProto. Puedes usar el PDS oficial de Bluesky o montar el tuyo propio. La clave: tú controlas dónde están tus datos.
+
+### 2. Relay (antes "firehose")
+
+Es el agregador. Recoge datos de todos los PDS que quieran participar y los pone a disposición de quien quiera construir aplicaciones. Es el equivalente a como Google Reader recolectaba posts de blogs. No aloja nada, solo indexa y reenvía.
+
+### 3. AppView
+
+Es la aplicación que consume datos del Relay y te los presenta. Bluesky es una AppView. Pero podrías construir otra —un cliente alternativo, una vista solo de imágenes, un algoritmo de feed diferente— sin necesidad de montar una «instancia» completa.
+
+Lo importante: **tu identidad no está atada a ninguna de estas piezas**. Puedes mover tu PDS a otro servidor y mantener tus seguidores, tus posts, tu identidad. El protocolo lo soporta porque tu identidad es una [DID](https://www.w3.org/TR/did-core/) (Decentralized Identifier), no `usuario@servidor`.
+
+## Cómo se define todo: lexicons
+
+AT Protocol no tiene una API monolítica. En su lugar, usa **lexicons**: esquemas JSON que definen tanto tipos de datos como métodos RPC. Cualquiera puede definir nuevos lexicons para extender el protocolo.
+
+Un lexicon para un post en Bluesky tiene esta pinta:
+
+```json
+{
+  "lexicon": 1,
+  "id": "app.bsky.feed.post",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["text", "createdAt"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 3000,
+            "maxGraphemes": 300
+          },
+          "createdAt": { "type": "string", "format": "datetime" },
+          "embed": { "type": "union", "refs": [
+            "app.bsky.embed.images",
+            "app.bsky.embed.external",
+            "app.bsky.embed.record"
+          ]},
+          "langs": {
+            "type": "array",
+            "items": { "type": "string", "format": "language" }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Esto no es un ejemplo inventado: es una versión simplificada del lexicon real `app.bsky.feed.post` que define cómo se estructura un post en Bluesky. Los lexicons son la columna vertebral del protocolo: cada tipo de dato y cada endpoint RPC se define así, de forma declarativa y extensible.
+
+## XRPC: el transporte
+
+AT Protocol usa **XRPC**, un sistema de llamadas HTTP con query params y cuerpos JSON. No es REST, no es GraphQL —es un diseño propio, minimalista, pensado para que los lexicons definan tanto el esquema de entrada como el de salida.
+
+Conceptualmente, crear un post sería algo así:
+
+```typescript
+// Ejemplo conceptual del flujo XRPC
+// POST /xrpc/com.atproto.repo.createRecord
+// Body: { collection: "app.bsky.feed.post", record: {...} }
+
+const post = {
+  text: "Probando AT Protocol desde mi propio PDS",
+  createdAt: new Date().toISOString(),
+  langs: ["es"]
+};
+
+// El PDS firma el registro con tu clave privada
+// y lo almacena en tu repo personal (un Merkle tree)
+// Luego el Relay lo recoge y lo distribuye a las AppViews
+```
+
+El detalle importante aquí es que **el PDS firma criptográficamente cada registro**. Tus datos son verificables independientemente de dónde se almacenen. Si alguien replica tu repo, puede comprobar que los posts los creaste tú.
+
+## DIDs: tu identidad no es tu servidor
+
+En Mastodon, si tu instancia desaparece, desapareces tú. En ATProto tu identidad es un [DID](https://www.w3.org/TR/did-core/) (Decentralized Identifier), un estándar del W3C que te pertenece a ti, no a un servidor.
+
+Un DID tiene esta pinta (ejemplo ilustrativo, no un DID real):
+
+```
+did:plc:abc123def456ghi789
+```
+
+El método `plc` (Public Ledger of Credentials) es el que usa Bluesky hoy. Funciona así: tu DID apunta a tu PDS actual mediante un registro en un ledger público. Si cambias de PDS, actualizas el registro y listo —tus seguidores te encuentran en el nuevo servidor sin que tú pierdas nada.
+
+Esto es radicalmente distinto a `@usuario@mastodon.social`. No es un hack cosmético: es una capa de indirección que desacopla tu identidad de la infraestructura. Como cuando cambias de proveedor de hosting para tu blog pero mantienes tu dominio.
+
+## El repo: un Merkle tree de tu actividad
+
+Cada usuario de ATProto tiene un **repo**, que es un Merkle tree firmado criptográficamente. Todas tus acciones —posts, likes, follows, bloquesos— son registros dentro de colecciones en ese repo. La estructura es similar a un repositorio Git: cada cambio genera un commit firmado y el estado completo es verificable.
+
+Esto tiene una consecuencia práctica importante: **tu historial es portable y verificable**. Si mañana Bluesky desaparece, tus datos no desaparecen con él. Están en tu PDS, firmados con tus claves y cualquier Relay puede indexarlos.
+
+## ¿Por qué esto es distinto de verdad?
+
+La diferencia fundamental con Mastodon no es técnica, es arquitectónica:
+
+| | Mastodon/ActivityPub | AT Protocol |
+|---|---|---|
+| **Dónde viven los datos** | En tu instancia | En tu PDS (portable) |
+| **Identidad** | `usuario@instancia` | DID (independiente del servidor) |
+| **Agregación** | Federación instancia-a-instancia | Relay centralizado (pero replicable) |
+| **Apps** | Una por instancia (con variantes) | Múltiples AppViews sobre los mismos datos |
+| **Escalado de relaciones** | O(n²) entre instancias | O(n) a través del Relay |
+
+El Relay es centralizado hoy (Bluesky opera el principal), pero el protocolo no exige que sea único. Cualquiera puede montar su propio Relay. La diferencia es que un Relay no es una «instancia» —no aloja usuarios, no tiene comunidades, no es un pequeño Facebook. Es solo un agregador, como Google Reader.
+
+## Mi opinión
+
+He leído bastante sobre protocolos descentralizados y la mayoría se quedan en el papel o mueren cuando la implementación de referencia se come el ecosistema. ATProto me parece interesante porque **no intenta resolver la descentralización con federación**, sino con separación de responsabilidades.
+
+El modelo de Mastodon tiene una virtud: es fácil de explicar. «Son como pequeños Twitter» se entiende en cinco segundos. ATProto es más difícil de explicar —de ahí el artículo de Abramov— pero el diseño es más ambicioso.
+
+Dicho esto, ATProto tiene sus propios problemas. El Relay de Bluesky es un punto de centralización real hoy. Mover tu PDS es técnicamente posible pero no es trivial para un usuario medio. Y el ecosistema de AppViews alternativas todavía es incipiente.
+
+Pero la dirección me convence. Separar hosting de agregación es volver a la web que funcionaba antes de que las plataformas se lo comieran todo. Si ATProto consigue que construir una AppView sea tan fácil como montar un blog en 2005, habrán ganado.
+
+Hay una ironía bonita aquí: el modelo que Abramov describe como innovador es en realidad el modelo original de la web. Los blogs, RSS y los agregadores ya hacían esto hace 20 años. ATProto no inventa nada radicalmente nuevo —simplemente aplica el patrón correcto al problema equivocado que las redes sociales centralizadas crearon.
+
+Lo que me preocupa es la adopción. Mastodon tiene una década de ventaja y una comunidad consolidada. ATProto llega tarde, con una arquitectura más elegante pero también más difícil de explicar. La historia de la tecnología está llena de diseños superiores que perdieron frente a diseños más simples que la gente entendía. Ojalá esta vez sea distinto.
+
+## Mi veredicto
+
+AT Protocol no es perfecto, pero es el primer protocolo social descentralizado que no intenta clonar el modelo de «instancias» de Mastodon. Su arquitectura de tres capas (PDS → Relay → AppView) es más fiel al espíritu original de la web que cualquier otra alternativa que haya visto. Si te interesa la descentralización más allá del postureo, merece la pena entenderlo.
