@@ -11,7 +11,7 @@ La idea es tan obvia en retrospectiva que sorprende que no se haya popularizado 
 
 ## Qué es Glojure exactamente
 
-Glojure es un intérprete de Clojure escrito en Go. No es un port, no es un compilador cruzado, no es un transpilador. Es un intérprete tree-walking que analiza s-expressions, las evalúa, y cuando encuentra una llamada a una función de Go, la ejecuta directamente.
+Glojure es un intérprete de Clojure escrito en Go. No es un port, no es un compilador cruzado, no es un transpilador. Es un intérprete tree-walking que analiza s-expressions, las evalúa y cuando encuentra una llamada a una función de Go, la ejecuta directamente.
 
 El proyecto lo mantiene [Ingy döt Net](https://github.com/ingydotnet) y acaba de publicar la versión v0.6.5 el 16 de junio de 2026. Tiene más de 620 estrellas en GitHub y una comunidad pequeña pero activa.
 
@@ -38,7 +38,7 @@ package main
 
 import (
     "fmt"
-    "github.com/glojurelang/glojure/pkg/glj"
+    "github.com/glojurelang/glojure/pkg/lang"
     "github.com/glojurelang/glojure/pkg/runtime"
 )
 
@@ -48,8 +48,8 @@ func greet(name string) string {
 
 func main() {
     // Exponer una función Go a Clojure
-    greetVar := glj.Var("user", "greet-from-go")
-    greetVar.SetRoot(greet)
+    ns := lang.FindOrCreateNamespace(lang.NewSymbol("user"))
+    greetVar := lang.InternVar(ns, lang.NewSymbol("greet-from-go"), greet, true)
 
     // Usarla desde Clojure
     result := runtime.ReadEval(`(greet-from-go "Clojure")`)
@@ -57,8 +57,8 @@ func main() {
 
     // Definir una función en Clojure y llamarla desde Go
     runtime.ReadEval(`(defn add [x y] (+ x y))`)
-    addFn := glj.Var("user", "add")
-    sum := addFn.Invoke(10, 32)
+    addVar := ns.Intern(lang.NewSymbol("add"))
+    sum := addVar.Invoke(10, 32)
     fmt.Printf("Suma: %v\n", sum) // Suma: 42
 }
 ```
@@ -101,7 +101,7 @@ No es el típico REPL mínimo de un proyecto experimental. Se nota que Ingy quie
 
 ## WASM: Clojure en el navegador
 
-Glojure también compila a WASM. Hay un [playground online](https://glojurelang.github.io/glojure/) donde puedes probar el REPL directamente en el navegador. Esto es posible porque Go compila a WASM de forma nativa desde hace años, y Glojure hereda esa capacidad sin esfuerzo adicional.
+Glojure también compila a WASM. Hay un [playground online](https://glojurelang.github.io/glojure/) donde puedes probar el REPL directamente en el navegador. Esto es posible porque Go compila a WASM de forma nativa desde hace años y Glojure hereda esa capacidad sin esfuerzo adicional.
 
 El soporte para WASI (WebAssembly System Interface) llegó en la v0.6.5, así que también puedes ejecutar Glojure en entornos serverless que soporten WASM.
 
@@ -121,6 +121,6 @@ Si escribes Go y sientes curiosidad por Lisp, o escribes Clojure y te pesa la JV
 
 **Para scripting y extensibilidad en proyectos Go: excelente.** La capacidad de embeber un REPL de Clojure en tu aplicación Go y exponer tus propias funciones es el caso de uso más convincente.
 
-**Para aplicaciones Clojure de producción: todavía no.** El rendimiento de un intérprete tree-walking no está a la altura de la JVM, y el ecosistema de librerías Clojure (Ring, Reitit, HoneySQL) no está disponible.
+**Para aplicaciones Clojure de producción: todavía no.** El rendimiento de un intérprete tree-walking no está a la altura de la JVM y el ecosistema de librerías Clojure (Ring, Reitit, HoneySQL) no está disponible.
 
 **Como concepto: brillante.** La idea de "lenguajes hosted" — implementar un lenguaje en términos de otro en lugar de compilar a otro — es infrautilizada. Glojure demuestra que funciona y que el resultado es más útil que un transpilador.

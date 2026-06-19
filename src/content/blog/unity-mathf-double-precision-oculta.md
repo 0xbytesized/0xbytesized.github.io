@@ -7,7 +7,7 @@ excerpt: "UnityEngine.Mathf convierte tus floats a double, opera y vuelve a floa
 
 Hace unos días [Aras Pranckevičius](https://aras-p.info/) —sí, el que fue graphics lead en Unity y ahora está en Godot— publicó un análisis que debería ser lectura obligatoria para cualquiera que escriba C# en Unity. El título es modesto: "Unity vs floating point". El contenido es una autopsia de todo lo que Unity hace mal con los números decimales.
 
-El detonante fue un tweet de [@VehiclePhysics](https://x.com/VehiclePhysics) con un consejo aparentemente simple: usa `System.MathF` en vez de `UnityEngine.Mathf` para funciones como `Sqrt`, `Sin`, `Cos` o `Pow`. La razón: `Mathf` convierte tu `float` a `double`, llama a la versión double de la función, y luego vuelve a convertir a `float`. `MathF` opera directamente en `float`. Menos trabajo, mismo resultado.
+El detonante fue un tweet de [@VehiclePhysics](https://x.com/VehiclePhysics) con un consejo aparentemente simple: usa `System.MathF` en vez de `UnityEngine.Mathf` para funciones como `Sqrt`, `Sin`, `Cos` o `Pow`. La razón: `Mathf` convierte tu `float` a `double`, llama a la versión double de la función y luego vuelve a convertir a `float`. `MathF` opera directamente en `float`. Menos trabajo, mismo resultado.
 
 El consejo es correcto. Pero lo que Aras descubrió al rascar la superficie es bastante más salvaje.
 
@@ -101,7 +101,7 @@ loop:
   jl      loop
 ```
 
-Son **26 instrucciones** para `v += Mathf.Sqrt(v)`. Hay **ocho** conversiones float↔double, cuatro stores/loads a memoria temporales, y encima usa la vieja FPU x87 (`fsqrt`) en vez de las instrucciones SSE escalares (`sqrtss`).
+Son **26 instrucciones** para `v += Mathf.Sqrt(v)`. Hay **ocho** conversiones float↔double, cuatro stores/loads a memoria temporales y encima usa la vieja FPU x87 (`fsqrt`) en vez de las instrucciones SSE escalares (`sqrtss`).
 
 Con `System.MathF.Sqrt`, el mismo loop genera esto:
 
@@ -124,13 +124,13 @@ loop:
   jl      loop
 ```
 
-Siguen habiendo conversiones float↔double (porque Mono insiste en hacer la suma en double), pero son muchas menos y la raíz cuadrada usa `sqrtss` —instrucción SSE escalar de precisión simple— en vez de la FPU x87.
+Sigue habiendo conversiones float↔double (porque Mono insiste en hacer la suma en double), pero son muchas menos y la raíz cuadrada usa `sqrtss` —instrucción SSE escalar de precisión simple— en vez de la FPU x87.
 
 ## IL2CPP y Burst: cada uno a su bola
 
 Aquí es donde el análisis de Aras se vuelve fascinante. Los tres backends **no se ponen de acuerdo** sobre qué funciones reciben "tratamiento especial".
 
-**IL2CPP** con `Mathf.Sqrt` genera `sqrtf()` de C directamente —ignora que a nivel C# la implementación pasa por double. Es un caso de "shipeas tu organigrama": el equipo de IL2CPP añadió un reconocimiento especial para `Mathf.Sqrt` que el equipo de Burst no hizo.
+**IL2CPP** con `Mathf.Sqrt` genera `sqrtf()` de C directamente —ignora que a nivel C# la implementación pasa por double. Es un caso de "entregas tu organigrama": el equipo de IL2CPP añadió un reconocimiento especial para `Mathf.Sqrt` que el equipo de Burst no hizo.
 
 **Burst** hace justo lo contrario: trata `Mathematics.math.sqrt` como `vsqrtss` (precisión simple nativa) pero deja `Mathf.Sqrt` como `vcvtss2sd + vsqrtsd + vcvtsd2ss` (doble precisión).
 
@@ -155,19 +155,19 @@ public static float sqrt(float x)
 }
 ```
 
-Es decir, convierten a float (por si acaso), llaman a `Math.Sqrt` que opera en double, y convierten el resultado a float. Otra vez double por debajo.
+Es decir, convierten a float (por si acaso), llaman a `Math.Sqrt` que opera en double y convierten el resultado a float. Otra vez double por debajo.
 
 La excepción es Burst, que sí reconoce `Mathematics.math.sqrt` y lo compila a `vsqrtss` nativo. Pero solo Burst.
 
 ## ¿Tiene arreglo esto?
 
-Unity está migrando a **CoreCLR** (el runtime de .NET moderno) para reemplazar a Mono. Lo anunciaron en la GDC 2026 con la charla ["Path to CoreCLR"](https://www.youtube.com/watch?v=YzpHGWspl28). CoreCLR no tiene el problema de "todo es double" y su codegen es radicalmente mejor.
+Unity está migrando a **CoreCLR** (el runtime de .NET moderno) para reemplazar a Mono. Lo anunciaron en la GDC 2026 con la charla ["Path to CoreCLR"](https://www.youtube.com/watch?v=_t6xVfrmEWU). CoreCLR no tiene el problema de "todo es double" y su codegen es radicalmente mejor.
 
-Mientras tanto, Sebastian Schöner está trabajando en [cpp2better](https://github.com/sschoner/cpp2better), una herramienta que mejora el codegen de IL2CPP. Y si necesitas rendimiento ya, la recomendación de Aras es clara: **Burst + Unity.Mathematics** para código caliente.
+Mientras tanto, Sebastian Schöner está trabajando en [cpp2better](https://kerntief.net/cpp2better.html), una herramienta que mejora el codegen de IL2CPP. Y si necesitas rendimiento ya, la recomendación de Aras es clara: **Burst + Unity.Mathematics** para código caliente.
 
 ## Mi opinión
 
-Este artículo me parece una joya por varias razones. Primero, porque ejemplifica algo que pasa en todo el software: las decisiones técnicas de hace décadas se convierten en deuda que nadie se atreve a pagar por miedo al "backwards compatibility". Mono decidió hacer todo en double en los 2000, Unity heredó ese comportamiento, y aquí estamos en 2026 con `Mathf.Sqrt` generando 26 instrucciones para una operación que deberían ser 2.
+Este artículo me parece una joya por varias razones. Primero, porque ejemplifica algo que pasa en todo el software: las decisiones técnicas de hace décadas se convierten en deuda que nadie se atreve a pagar por miedo a la retrocompatibilidad. Mono decidió hacer todo en double en los 2000, Unity heredó ese comportamiento y aquí estamos en 2026 con `Mathf.Sqrt` generando 26 instrucciones para una operación que deberían ser 2.
 
 Segundo, porque demuestra el valor de mirar el código máquina. Sin el Asm Explorer de Schöner, nadie vería las 8 conversiones float↔double que Mono escupe para una simple raíz cuadrada. El perfilador te dice "esto va lento", el desensamblador te dice **por qué**.
 
@@ -177,4 +177,4 @@ Si escribes C# en Unity, hazte un favor: lee el artículo completo de Aras y lue
 
 ---
 
-**Fuente:** [Unity vs floating point — Aras Pranckevičius](https://aras-p.info/blog/2026/06/11/Unity-vs-floating-point/) (11 junio 2026), 43 puntos en Hacker News.
+**Fuente:** [Unity vs floating point — Aras Pranckevičius](https://aras-p.info/blog/2026/06/11/Unity-vs-floating-point/) (11 junio 2026), 54 puntos en Hacker News.

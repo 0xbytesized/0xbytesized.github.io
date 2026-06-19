@@ -5,7 +5,7 @@ tags: ["c", "ui", "immediate-mode", "open-source", "graphics"]
 excerpt: "1100 líneas de C ANSI, sin malloc, sin dependencias: así es MicroUI, la librería de interfaces inmediatas que está arrasando en Hacker News."
 ---
 
-Hace unas horas me topé con un repo que está petándolo en Hacker News: 198 puntos, 71 comentarios, y no es un framework nuevo de JavaScript ni un modelo de IA. Es una librería de interfaces de usuario escrita en C. ANSI C. Portable. 1100 líneas. Sin dependencias. Sin `malloc`.
+Hace unas horas me topé con un repo que está petándolo en Hacker News: 254 puntos, 87 comentarios, y no es un framework nuevo de JavaScript ni un modelo de IA. Es una librería de interfaces de usuario escrita en C. ANSI C. Portable. 1100 líneas. Sin dependencias. Sin `malloc`.
 
 Se llama [MicroUI](https://github.com/rxi/microui), la creó [rxi](https://github.com/rxi) hace unos años, y aunque no es nueva (lleva desde 2018), la comunidad la ha redescubierto con fuerza. Y tiene sentido: en un ecosistema donde cualquier cosita UI pesa megas y necesita un bundler, 1100 líneas de C que compilan en cualquier lado son un soplo de aire fresco.
 
@@ -30,14 +30,13 @@ Eso es todo. No hay callback, no hay binding, no hay observer. Si el botón fue 
 
 ## Cómo funciona MicroUI por dentro
 
-MicroUI ocupa ~1100 líneas de C ANSI. No llama a `malloc`. Toda su memoria vive en un buffer de tamaño fijo que tú le pasas al inicializarlo. Esto significa que funciona en cualquier sitio: MS-DOS, embedded, WebAssembly, lo que sea.
+MicroUI ocupa ~1100 líneas de C ANSI. No llama a `malloc`. Toda su memoria vive en buffers de tamaño fijo dentro del propio struct `mu_Context`. Esto significa que funciona en cualquier sitio: MS-DOS, embedded, WebAssembly, lo que sea.
 
 El contexto de MicroUI cabe en un struct:
 
 ```c
 mu_Context ctx;
-uint8_t memory[256 * 1024];  // 256 KB fijos, sin heap
-mu_init(&ctx, memory);
+mu_init(&ctx);
 ```
 
 A partir de ahí, cada frame sigue este ciclo:
@@ -83,13 +82,13 @@ void panel_debug(mu_Context *ctx) {
         mu_layout_row(ctx, 2, (int[]) { 80, -1 }, 0);
         mu_label(ctx, "Volumen:");
         static float volumen = 0.5f;
-        if (mu_slider(ctx, &volumen, 0.0f, 1.0f, 0.01f)) {
+        if (mu_slider_ex(ctx, &volumen, 0.0f, 1.0f, 0.01f, MU_SLIDER_FMT, MU_OPT_ALIGNCENTER)) {
             ajustar_volumen(volumen);
         }
 
         // Fila: checkbox
         mu_layout_row(ctx, 1, (int[]) { -1 }, 0);
-        static bool vsync = true;
+        static int vsync = 1;
         if (mu_checkbox(ctx, "VSync", &vsync)) {
             activar_vsync(vsync);
         }
@@ -119,7 +118,7 @@ Creo que hay tres factores:
 
 **1. Fatiga de complejidad.** Cada año el stack UI web suma capas. En 2026, montar un botón en una webapp puede implicar React, un bundler, CSS modules, design tokens y tres capas de state management. Frente a eso, 1100 líneas de C que hacen botones, sliders, checkboxes y ventanas *sin allocaciones* es casi terapéutico.
 
-**2. WebAssembly como puente.** El demo de MicroUI compilado a WASM y corriendo en el navegador —cortesía de [floooh](https://github.com/floooh/sokol-samples/blob/master/sgl/microui-sapp.c) usando los headers sokol— demuestra que puedes tener una GUI nativa en C corriendo en la web sin tocar HTML ni CSS. Eso es potente.
+**2. WebAssembly como puente.** El demo de MicroUI compilado a WASM y corriendo en el navegador —cortesía de [floooh](https://github.com/floooh/sokol-samples/blob/master/sapp/sgl-microui-sapp.c) usando los headers sokol— demuestra que puedes tener una GUI nativa en C corriendo en la web sin tocar HTML ni CSS. Eso es potente.
 
 **3. Embedded y nichos olvidados.** MicroUI funciona en MS-DOS, en un ESP32, en una Raspberry Pi Pico con una pantalla SPI. Los desarrolladores de sistemas embebidos y retrocomputing la han adoptado porque no encuentran nada tan ligero en otros ecosistemas.
 
