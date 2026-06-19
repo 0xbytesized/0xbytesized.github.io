@@ -1,0 +1,144 @@
+---
+title: "Project Valhalla llega a JDK 28 tras 12 años de desarrollo"
+date: "2026-06-19T09:28"
+tags: ["java", "jdk", "valhalla", "rendimiento", "jvm"]
+excerpt: "Oracle integra JEP 401 en JDK 28. Value classes, scalarization y flattening llegan tras una década de desarrollo. Te cuento qué significa y cómo usarlo."
+---
+
+El 15 de junio de 2026, Lois Foltan —ingeniera de Oracle— confirmó algo que media comunidad Java había dejado de creer: **JEP 401: Value Classes and Objects** se integra en el repositorio principal de OpenJDK y apunta a JDK 28. El pull request añade más de 197.000 líneas de código en 1.816 archivos. Brian Goetz, arquitecto del lenguaje, se apresuró a templar el entusiasmo: es solo la primera parte de Valhalla, está en preview, y viene desactivado por defecto.
+
+Pero que nadie te quite el momento. Doce años de prototipos, nombres cambiantes, modelos descartados y bromas sobre llegar antes al Valhalla mitológico que al del JDK. Y aquí está.
+
+## El problema que Valhalla resuelve
+
+En Java todo es un tipo referencia, salvo los ocho primitivos (`int`, `long`, `double`, `boolean` y compañía). Cuando escribes:
+
+```java
+Point p = new Point(1, 2);
+```
+
+`p` no es un punto. `p` es un puntero. Un número de ticket de guardarropa. En algún lugar del heap hay un objeto, y tú tienes un papelito con su dirección. Cada vez que lees un campo, la JVM hace un salto indirecto —pointer indirection— para llegar al objeto real.
+
+Para un solo objeto no es nada. El problema aparece a escala.
+
+Imagina un array de un millón de puntos:
+
+```java
+// Situación actual: cada Point es un objeto independiente en el heap
+class Point {
+    final int x;
+    final int y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+}
+
+Point[] points = new Point[1_000_000];
+for (int i = 0; i < points.length; i++) {
+    points[i] = new Point(i, i * 2);
+}
+```
+
+En memoria, esto es un desastre. Tienes un array de un millón de punteros, cada uno apuntando a un objeto disperso por el heap con su header de 12-16 bytes. Para leer las coordenadas de todos los puntos, la JVM persigue un millón de punteros, machacando la caché de CPU en el proceso. Esto se llama **pointer chasing** y es uno de los mayores enemigos del rendimiento en Java.
+
+## Cómo funciona Valhalla hoy
+
+La sintaxis es mínima. Añades una palabra: `value`.
+
+```java
+value class Point {
+    final int x;
+    final int y;
+
+    Point(int x, int y) { this.x = x; this.y = y; }
+
+    public Point translate(int dx, int dy) {
+        return new Point(this.x + dx, this.y + dy);
+    }
+}
+
+Point[] points = new Point[1_000_000];
+for (int i = 0; i < points.length; i++) {
+    points[i] = new Point(i, i * 2);
+}
+```
+
+La diferencia en el código es exactamente una palabra: `value`. La diferencia en memoria es fundamental.
+
+Con `value class`, la JVM puede aplicar dos mecanismos:
+
+**Scalarization**: cuando una variable local de tipo `Point` nunca se comparte ni se escapa del método, la JVM descompone el objeto en sus campos individuales y los trata como variables independientes en registros o en la pila. Cero heap, cero punteros.
+
+**Heap flattening**: cuando el objeto vive dentro de un array o de otro objeto, sus campos se codifican como un vector compacto de bits y se escriben directamente en la celda del array o en el campo contenedor, sin puntero intermedio. El array de `Point[]` pasa de ser "un millón de flechas a objetos dispersos" a ser "un millón de pares (x, y) contiguos en memoria".
+
+El resultado: recorrer ese millón de puntos ya no implica perseguir punteros. Es un barrido lineal sobre memoria compacta, como si fueran dos arrays de `int`. La caché de CPU te lo agradece.
+
+## Qué puedes hacer con value classes
+
+### Value records
+
+La combinación más limpia: `value record`. Un record ya renuncia a separar estado interno de API pública; añadir `value` renuncia además a la identidad:
+
+```java
+value record Color(int r, int g, int b) {
+    public Color brighter(double factor) {
+        return new Color(
+            (int) Math.min(255, r * factor),
+            (int) Math.min(255, g * factor),
+            (int) Math.min(255, b * factor)
+        );
+    }
+}
+```
+
+Esto es ideal para tipos que representan datos puros: coordenadas, colores, rangos, cantidades con unidad, valores monetarios.
+
+### Wrappers de primitivos que dejan de ser un desastre
+
+Bajo preview, `Integer`, `Long`, `Double` y el resto de wrappers se convierten en value classes. Esto significa que `Integer[]` se acerca a la eficiencia de `int[]`. El boxing, que siempre ha sido un peaje invisible en Java, se abarata drásticamente. La JVM puede scalarizar y aplanar estos wrappers porque ya no tienen identidad.
+
+### Comparación con `==`
+
+Con value classes, `==` cambia de significado: ya no compara direcciones de memoria, compara **substitutabilidad** —todos los campos, recursivamente. Dos `Point` creados por separado con las mismas coordenadas son `==` entre sí:
+
+```java
+var a = new Point(3, 5);
+var b = new Point(3, 5);
+System.out.println(a == b); // true con value class, false con clase normal
+```
+
+Para la pregunta "¿representan los mismos datos?" se sigue recomendando `equals()`, porque `==` mira el estado interno y eso no siempre equivale al estado representado. Pero la diferencia conceptual es enorme.
+
+## Lo que NO está en JDK 28
+
+Tan importante como lo que llega es lo que no llega. Valhalla se entrega por fases:
+
+- **Null-restricted types** (tipos no nulables): no están en JDK 28. Un `value class` sigue siendo un tipo referencia, así que `Point p = null;` es perfectamente legal. Los tipos con restricción de nulidad (`Point!`) son un JEP futuro y serán los que desbloqueen el flattening de objetos más grandes.
+
+- **Specialized generics**: los genéricos especializados —que permitirían `ArrayList<Point>` sin boxing y con flattening real— tampoco están. Es la segunda gran fase de Valhalla y probablemente no se estabilice hasta el próximo LTS.
+
+- **Encodings de 128 bits**: hoy el flattening funciona para objetos de hasta 64 bits (incluyendo el flag de null). Una clase con dos `int` o un `double` no cabe en una escritura atómica y puede acabar como objeto normal en el heap. Los encodings de 128 bits llegarán más adelante.
+
+## Las reglas del juego
+
+Declarar una `value class` impone restricciones:
+
+- Todos los campos de instancia son **implícitamente `final`**.
+- No puedes usar métodos **`synchronized`**.
+- La clase es **final por defecto** (o puede formar jerarquías solo entre value classes y abstract value classes).
+- No puede heredar de una clase con identidad, pero **implementa interfaces sin problema**.
+- Se activa con `--enable-preview` en JDK 28.
+
+Fuera de estas restricciones, es una clase normal. Métodos, constructores, validación, encapsulación: todo sigue funcionando como esperas.
+
+## Mi veredicto
+
+Sigo el desarrollo de Valhalla desde 2019 y siempre me ha parecido el proyecto más ambicioso del ecosistema Java —más que Loom, más que Panama, más que Amber. No porque la sintaxis sea revolucionaria (una palabra, `value`), sino porque cambia el contrato fundamental del lenguaje: "todo objeto tiene identidad" deja de ser cierto.
+
+Lo que más me convence del diseño final es lo que **no** incluye. El modelo de dos proyecciones (`.val`/`.ref` o `Point!`/`Point?`) que se barajó durante años era potente pero mentalmente pesado. Que el equipo liderado por Dan Smith y Brian Goetz decidiera tirarlo y quedarse con un modelo más simple —"value class es un tipo referencia, la no-nulabilidad es otro JEP aparte"— dice mucho de su criterio. Es fácil añadir complejidad; es difícil quitarla.
+
+Dicho esto, JDK 28 es solo el primer preview. Si esperabas poder escribir `ArrayList<Point>` con flattening nativo y cero boxing, te toca esperar. Lo que llega ahora es la base: value classes, scalarization, flattening para objetos pequeños y los wrappers convertidos. No es el Valhalla completo, pero es el que desbloquea todo lo demás.
+
+Mi consejo: baja los early-access builds de [jdk.java.net/valhalla](https://jdk.java.net/valhalla), escribe tus propios `value record` para tipos de datos puros y mide la diferencia de memoria con JMH. No hay mejor forma de entender lo que se viene que ensuciarse las manos.
+
+---
+
+Doce años. 197.000 líneas. Una palabra. Así se mueve Java.
