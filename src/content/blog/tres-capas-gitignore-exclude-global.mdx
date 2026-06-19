@@ -1,0 +1,123 @@
+---
+title: "Las tres capas de .gitignore que no conocías"
+date: "2026-06-19T03:25"
+tags: ["git", "tutorial", "productividad", "herramientas"]
+excerpt: "Git tiene tres niveles distintos para ignorar archivos, no solo .gitignore. Así funcionan .git/info/exclude y el ignore global."
+---
+
+El 18 de junio de 2026, Nelson Figueroa publicó un artículo en su blog que en pocas horas escaló al top 5 de Hacker News con más de 300 puntos. El título: ".gitignore Isn't the Only Way to Ignore Files in Git". La premisa es tan simple que casi da vergüenza admitir que no lo sabías: Git tiene **tres niveles** para ignorar archivos, y la mayoría de desarrolladores solo conoce uno.
+
+Llevo años usando Git a diario y yo también pensaba que `.gitignore` era el principio y el final de la historia. Resulta que no. Hay dos mecanismos más que resuelven problemas cotidianos que todos nos hemos encontrado: ese archivo de notas que no quieres commitear pero tampoco quieres ver en `git status`, o esos `.DS_Store` de macOS que aparecen en cada repo como un fantasma recurrente.
+
+## Los tres niveles, explicados
+
+Git resuelve la ignorancia de archivos en tres capas, cada una con su propio ámbito y persistencia:
+
+| Nivel | Archivo | Ámbito | Se commitea |
+|-------|---------|--------|-------------|
+| Repositorio compartido | `.gitignore` | Un solo repo | Sí |
+| Repositorio personal | `.git/info/exclude` | Un solo repo | No |
+| Global de máquina | `~/.config/git/ignore` | Todos los repos | No |
+
+La genialidad del diseño está en la separación de responsabilidades: lo que es política del proyecto va en `.gitignore`, lo que es preferencia personal va en `exclude` y lo que es característica de tu sistema operativo va en el ignore global.
+
+## `.gitignore`: el que todos conocen
+
+Es el archivo que se crea en la raíz del repositorio, se commitea junto con el código y establece qué archivos deben ignorarse para **todos** los colaboradores del proyecto. Cosas como `node_modules/`, `.env` o `dist/` pertenecen aquí.
+
+```bash
+# .gitignore típico de un proyecto Node
+node_modules/
+dist/
+.env
+*.log
+```
+
+Nada nuevo bajo el sol. Pero el problema aparece cuando necesitas ignorar algo que solo afecta a tu flujo de trabajo personal.
+
+## `.git/info/exclude`: el ignorador silencioso
+
+Dentro de cada repositorio Git, en la carpeta `.git`, existe un archivo llamado `exclude` que funciona exactamente igual que `.gitignore` pero con una diferencia crucial: **no se commitea**. Nunca sale de tu máquina.
+
+Cuando inicializas un repo con `git init`, Git crea este archivo automáticamente con unas líneas de comentario:
+
+```bash
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+```
+
+Puedes editar este archivo directamente con cualquier editor. Por ejemplo, si en un repo compartido mantienes un archivo `notas.md` con apuntes personales que no quieres que aparezcan en `git status`:
+
+```bash
+# Añadir exclusión personal al repo actual
+echo "notas.md" >> .git/info/exclude
+```
+
+A partir de ese momento, `notas.md` desaparece del radar de Git para ti, pero el resto del equipo ni se entera. Nadie ve el cambio, nadie tiene que revisar un PR por tus notas y el `.gitignore` del proyecto se mantiene limpio con solo las reglas que importan a todos.
+
+Otro caso de uso clásico: estás probando una herramienta nueva que genera archivos temporales en el repo. No quieres ensuciar el `.gitignore` del equipo con algo que igual dentro de dos semanas dejas de usar. Lo metes en `exclude` y punto.
+
+## `~/.config/git/ignore`: el guardián global
+
+El tercer nivel es un archivo que vive en tu directorio home y aplica a **todos** los repositorios de tu máquina. En sistemas modernos la ruta por defecto es `~/.config/git/ignore`, siguiendo el estándar XDG.
+
+Este es el sitio correcto para ignorar archivos que genera tu sistema operativo y que no tienen nada que ver con ningún proyecto en concreto:
+
+```bash
+# ~/.config/git/ignore — global, para toda la máquina
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+.directory
+```
+
+Si el archivo no existe, lo creas y Git lo usará automáticamente. No hace falta registrar nada.
+
+Si prefieres usar otra ruta — por ejemplo, un `.gitignore_global` en tu home como se hacía antes del estándar XDG — puedes configurarlo:
+
+```bash
+git config --global core.excludesFile ~/.gitignore_global
+```
+
+Y para volver al comportamiento por defecto:
+
+```bash
+git config --global --unset core.excludesFile
+```
+
+## Cómo saber qué regla está ignorando un archivo
+
+El comando `git check-ignore -v` es la herramienta de diagnóstico que cierra el círculo. Le pasas un archivo y te dice exactamente qué regla, en qué fichero y en qué línea lo está ignorando:
+
+```bash
+# ¿Quién está ignorando .DS_Store?
+$ git check-ignore -v .DS_Store
+.gitignore:1:.DS_Store  .DS_Store
+```
+
+La salida te da tres datos: `archivo:línea:patrón` seguido del nombre del archivo ignorado. Si el archivo no está siendo ignorado por ninguna regla, el comando no produce salida — silencio absoluto.
+
+Esto es increíblemente útil cuando heredas un proyecto con un `.gitignore` de 200 líneas y no entiendes por qué cierto archivo no aparece en `git status`. También para depurar conflictos entre reglas de distintos niveles: Git aplica las reglas en orden de especificidad, y `check-ignore` te muestra cuál ha ganado.
+
+## Mi veredicto
+
+Lo que me gusta de este descubrimiento no es la funcionalidad en sí — que es útil pero modesta — sino lo que dice sobre Git como herramienta. Después de casi dos décadas usando Git, sigo encontrando mecanismos que estaban ahí desde el principio, esperando a que alguien los necesitara.
+
+El diseño en tres capas es elegantísimo: separa lo compartido de lo personal y lo personal de lo sistémico sin añadir complejidad innecesaria. No hay nuevos comandos que aprender, no hay plugins que instalar. Solo tres archivos de texto con la misma sintaxis de siempre.
+
+Mi recomendación: hoy mismo crea tu `~/.config/git/ignore` y mete ahí `.DS_Store` si estás en macOS, o `Thumbs.db` si estás en Windows. Luego revisa tus repos activos y mueve a `.git/info/exclude` cualquier regla personal que hayas colado en `.gitignore` por no conocer esta opción. Tu equipo te lo agradecerá — aunque nunca se enteren.
