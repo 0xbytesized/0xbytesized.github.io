@@ -1,0 +1,120 @@
+---
+title: "Hilos de verdad en JavaScript: Bun lo ha conseguido"
+date: "2026-06-20T21:56"
+tags: ["bun", "javascript", "concurrencia", "javascriptcore", "webdev"]
+excerpt: "Bun ha abierto un PR que añade hilos con memoria compartida a JavaScriptCore. Adiós a postMessage y structured clone: ahora compartes el objeto y punto."
+---
+
+Hace nueve años, Filip Pizlo —el arquitecto de JavaScriptCore— escribió un artículo en el blog de WebKit titulado ["Concurrent JavaScript: It can work!"](https://webkit.org/blog/7846/concurrent-javascript-it-can-work/). Planteaba una pregunta que llevaba años flotando en el ecosistema: ¿y si los hilos de JavaScript pudieran compartir el heap entero, sin restricciones, sin copias, sin protocolos de mensajes?
+
+La respuesta ha llegado esta semana. Jarred Sumner, el creador de Bun, ha abierto el [PR #249 en el fork de WebKit de Bun](https://github.com/oven-sh/WebKit/pull/249) con una implementación funcional de hilos con memoria compartida para JavaScriptCore. Trescientas diecinueve mil líneas de diff, más de 1800 archivos modificados y una API que cabe en tres líneas.
+
+## El problema que nadie había resuelto
+
+Los Web Workers llevan con nosotros desde 2010. Han sido la única forma de ejecutar JavaScript en paralelo en el navegador y en Node, y su modelo es conocido: cada worker es un universo aislado. Para comunicarte con él, serializas datos, los envías por `postMessage` y rezas para que el structured clone no se deje nada por el camino.
+
+Esto funciona. Pero tiene un coste invisible: cada comunicación entre el hilo principal y un worker implica copiar datos. Si tu worker necesita acceder a un objeto grande, lo clonas. Si necesitas compartir un `Map` como caché entre varios workers, o creas un "worker servidor de caché" con el que te comunicas por mensajes, o implementas tu propia tabla hash sobre un `SharedArrayBuffer` a mano. La gente ha hecho las tres cosas. Ninguna es un `Map`.
+
+El problema de fondo es que una función no puede cruzar la frontera de un worker. No puedes pasarle un closure a un worker y decirle "ejecuta esto". Tienes que serializar el código fuente de la función, inyectarlo en un blob, crear el worker desde ese blob y esperar que la función no cierre sobre nada que no hayas serializado también. Es un desastre.
+
+## La API: tres líneas y un closure
+
+El PR de Bun propone algo radicalmente más simple:
+
+```js
+const t = new Thread((a, b) => {
+  return expensive(a, b);
+}, x, y);
+
+t.join();           // bloquea, devuelve el valor o relanza la excepción
+await t.asyncJoin(); // igual, como promesa; nunca bloquea
+```
+
+Eso es todo. No hay archivo separado, no hay blob URL, no hay configuraciones de bundler para un entry point del worker, no hay protocolo `onmessage`. La función es un closure: ve las variables que captura, en el otro hilo, porque hay un solo heap.
+
+Si la función lanza una excepción, `join()` la relanza con el objeto de error original y su stack trace completo. No recibes un `ErrorEvent` genérico. Recibes tu error.
+
+## Lo que esto desbloquea
+
+Veamos algunos patrones que con workers son un proyecto y con esto son un párrafo.
+
+### Map paralelo sin copias
+
+```js
+const items = loadItems();           // 100k objetos
+const results = new Array(items.length);
+const next = { i: 0 };
+
+const workers = Array.from({ length: 8 }, () => new Thread(() => {
+  for (;;) {
+    const i = Atomics.add(next, "i", 1);
+    if (i >= items.length) return;
+    results[i] = transform(items[i]);
+  }
+}));
+
+workers.forEach(t => t.join());
+// results está completamente poblado. No se ha copiado nada.
+```
+
+Once líneas. Los workers leen y escriben directamente sobre los arrays originales. No hay que trocear la entrada en mensajes por worker, no hay que reensamblar N arrays de resultados en uno, no hay ping-pong de transferibles. La versión con workers de esto es un proyecto de ingeniería.
+
+### Una caché compartida que de verdad es compartida
+
+```js
+const cache = new Map();
+const lock = new Lock();
+
+function memoized(key) {
+  let hit;
+  lock.hold(() => { hit = cache.get(key); });
+  if (hit) return hit;
+
+  const value = compute(key);
+  lock.hold(() => { cache.set(key, value); });
+  return value;
+}
+```
+
+Llama a `memoized` desde cualquier hilo. Un `Map`, un fallo de caché por clave, para siempre. Con workers tus opciones son: N workers con N cachés privadas recalculando el trabajo de los demás, un worker "servidor de caché" al que hablas por `postMessage`, o implementar tu propia tabla hash con asignador de memoria sobre un `SharedArrayBuffer`.
+
+### Cancelación cooperativa con una variable
+
+```js
+const ctl = { stop: false };
+
+const workers = Array.from({ length: 8 }, () => new Thread(() => {
+  for (const candidate of space) {
+    if (ctl.stop) return null;
+    if (good(candidate)) {
+      ctl.stop = true;
+      return candidate;
+    }
+  }
+}));
+
+// Desde el hilo principal, en cualquier momento:
+ctl.stop = true;
+```
+
+Ocho hilos compitiendo. El que encuentra el resultado pone la bandera a `true` y el resto se detiene en la siguiente iteración. Con workers necesitas un protocolo de terminación o `worker.terminate()`, que no puede devolver el resultado parcial y pierde lo que el worker tuviera reservado.
+
+## Lo que hay debajo
+
+La implementación no es cosmética. El PR hace que JavaScript paralelo se ejecute a través de los cuatro tiers del JIT de JavaScriptCore —LLInt, Baseline, DFG y FTL— sin un lock global. El conjunto de tests de hilos pasa en ese modo.
+
+No está terminado. El propio Jarred lo deja claro: faltan limpieza de ThreadSanitizer, fuzzing, un benchmark que se pasa de presupuesto y un "long soak" —un periodo largo de pruebas de estrés— antes de que esto pase de "los tests pasan" a algo más. El PR existe, dice, "para que el diseño y el código puedan ser leídos y discutidos. Puede que nunca se fusione".
+
+El modo con lock y la configuración con hilos desactivados permanecen intactos y verificados. No es un "todo o nada": si esto algún día llega, será opcional.
+
+## Mi opinión
+
+Hay algo profundamente satisfactorio en ver una idea que llevaba casi una década en el aire materializarse en código que funciona. El artículo de Filip Pizlo de 2017 era un "what if" —un experimento mental sobre si era técnicamente viable. Que alguien haya cogido ese testigo y haya escrito 319.000 líneas de diff para demostrar que sí, que se puede, es el tipo de cosas que hacen que este oficio merezca la pena.
+
+Dicho esto, hay que ser justos con el escepticismo que ha aparecido en los comentarios de Hacker News. Un PR de este tamaño, generado con ayuda sustancial de LLMs (los workflows de Claude están en el propio diff), supervisado por una sola persona, plantea preguntas legítimas sobre mantenibilidad. No es lo mismo "no tiene bugs obvios" que "obviamente no tiene bugs", y un runtime de JavaScript no es el sitio donde quieres descubrir condiciones de carrera dentro de tres años.
+
+Pero creo que ese escepticismo se equivoca de marco. Esto no es un PR para mergear mañana. Es un prototipo de investigación, una prueba de existencia. Demuestra que el diseño es viable, que el rendimiento con lock cero es alcanzable y que la API puede ser tan simple como `new Thread(fn)`. Si alguien quiere llevarlo a producción, ya tiene un punto de partida.
+
+Y sobre todo, me parece revelador que esto venga de Bun y no de Node, ni de Deno, ni del propio WebKit. Bun lleva años tomando decisiones de arquitectura que los demás no se atreven a tomar —reescribir todo en Zig, migrar a Rust y ahora meterle hilos de verdad a JavaScriptCore. No siempre aciertan, pero cuando aciertan, mueven el ecosistema entero.
+
+La pregunta ya no es si JavaScript puede tener hilos de verdad. La pregunta es cuánto tardarán los demás en copiarlo.
