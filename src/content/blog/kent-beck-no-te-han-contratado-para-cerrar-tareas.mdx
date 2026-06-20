@@ -1,0 +1,189 @@
+---
+title: "No te han contratado para cerrar tareas"
+date: "2026-06-20T03:38"
+tags: ["ingeniería de software", "carrera", "mentoría", "refactorización", "testing"]
+excerpt: "Kent Beck publica la guía definitiva para juniors: a nadie le importa cuántos tickets cierras. Lo que importa es la derivada de tu productividad."
+---
+
+Hace unas horas Kent Beck —sí, el creador de Extreme Programming, TDD y uno de los firmantes del Agile Manifesto— publicó un artículo en su newsletter que debería ser lectura obligatoria en todas las empresas de software. El título lo dice todo: ["Hey, n00b, we didn't hire you to complete tasks"](https://newsletter.kentbeck.com/p/hey-n00b-we-didnt-hire-you-to-complete).
+
+El artículo está en el top 10 de Hacker News mientras escribo esto y no es para menos. Beck articula algo que todo ingeniero senior intuye pero pocos saben explicar: **la métrica que de verdad importa no es cuántas tareas completas, sino cuánto aprendes con cada una**.
+
+## La perspectiva del senior
+
+Beck plantea un escenario que cualquier desarrollador con unos años de experiencia reconocerá al instante. Cuando una empresa contrata juniors, los seniors ya tienen su propio trabajo. Pero además tienen que dedicar tiempo a descubrir en qué categoría encaja cada nueva incorporación:
+
+- **Tipo A**: game-changers. Gente que hace a todo el equipo más productivo.
+- **Tipo B**: sólidos, cumplidores, creciendo.
+- **Tipo C**: los que no estarán ahí dentro de un año.
+
+Y aquí viene la frase que más ha resonado: "Tu manager o tu tech lead podrían terminar esas tareas en mucho menos tiempo y con muchas menos molestias que las que invierten en ayudarte a ti. Si solo nos importara la productividad de hoy, no te habríamos contratado."
+
+Tu salario actual es, en palabras de Beck, **la prima de una opción financiera sobre el ingeniero en el que te vas a convertir**. Están apostando a que dentro de unos años serás imparable. Lo que miran no es tu output actual —que por definición es malo comparado con el de un senior— sino **la primera derivada**: tu velocidad de aprendizaje.
+
+## Señales de que vas por buen camino (tipo B)
+
+Antes de aspirar a ser un A, tienes que demostrar que eres un B sólido. Las señales que Beck enumera son sorprendentemente básicas y sin embargo he visto a montones de juniors tropezar exactamente con esto:
+
+1. Tu código funciona.
+2. Comunicaste lo que estabas haciendo.
+3. Lo terminaste en un tiempo razonable (dentro de un factor 3x de la estimación inicial).
+4. No causaste trabajo extra irrazonable a otros.
+
+Ese último punto es clave y a menudo ignorado. Beck lo desglosa con precisión quirúrgica: pedir ayuda está bien, hacer que los revisores pierdan tiempo extra está mal, que on-call tenga que responder a errores tuyos está muy mal y que devops gestione incidentes que tú provocaste es "double plus bad".
+
+Hay una señal que te marca como C de forma inmediata e irreversible: **intentar engañar al sistema diciendo que has hecho trabajo que no has hecho**. Beck es tajante: "Assume you can't game this system."
+
+## Señales de tipo A: la derivada de tu productividad
+
+Aquí es donde el artículo se vuelve realmente valioso. Beck enumera once comportamientos que distinguen a un ingeniero excepcional. Ninguno tiene que ver con cerrar tickets rápido:
+
+- Demostrar que la tarea **no necesita hacerse**.
+- Analizar datos y descubrir que el 10% de la tarea produce el 90% del beneficio.
+- Implementar la tarea **de varias formas distintas**.
+- Descubrir un diseño mejor y enviar una cadena de diffs que no solo implementan la tarea sino que **simplifican otras partes del código**.
+- Enviar una **cadena de diffs pequeños** en lugar de un PR gigante.
+- Escribir una **herramienta interna** que simplifica tareas similares.
+- Enviar diffs útiles en áreas que **no tienen nada que ver con tu equipo**.
+- Escribir lo que has aprendido de forma interesante y persuasiva.
+- Ser un revisor **perspicaz y rápido**.
+- Incluir tests sólidos.
+
+Fíjate en el patrón: todas estas señales comparten un rasgo — **llevan más tiempo que simplemente cerrar la tarea**. No es permiso para perseguir side-projects infinitos, pero sí para invertir el tiempo que ahorras en ti mismo de formas que beneficien a otros.
+
+## Cómo se ve esto en código
+
+Voy a ponerte un ejemplo concreto. Imagina que te asignan esta tarea: "Añadir filtro por fecha al endpoint de búsqueda de usuarios."
+
+### Lo que haría un junior que solo quiere cerrar la tarea
+
+```typescript
+// Añade el parámetro y filtra en la query
+app.get('/api/users/search', async (req, res) => {
+  const { q, fromDate } = req.query;
+
+  let query = db.select().from(users).where(eq(users.name, q));
+
+  if (fromDate) {
+    query = query.where(gte(users.createdAt, new Date(fromDate as string)));
+  }
+
+  const results = await query;
+  res.json(results);
+});
+```
+
+Tarea cerrada. PR enviado. Siguiente ticket.
+
+### Lo que haría un ingeniero tipo A
+
+```typescript
+// 1. Primero pregunta: ¿esto realmente necesita ser un endpoint nuevo?
+//    Descubre que el 90% del uso viene del dashboard de admin.
+//    Propuesta: añadir el filtro al endpoint de búsqueda existente
+//    con un query param opcional. La tarea original se cancela.
+
+// 2. Escribe tests antes de tocar el código
+describe('GET /api/users/search with date filter', () => {
+  it('returns users created after fromDate', async () => {
+    await seedUsers([
+      { name: 'Alice', createdAt: '2026-01-01' },
+      { name: 'Bob', createdAt: '2026-06-01' },
+    ]);
+
+    const res = await request(app)
+      .get('/api/users/search')
+      .query({ q: 'A', fromDate: '2026-03-01' });
+
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].name).toBe('Bob');
+  });
+
+  it('ignores invalid date formats gracefully', async () => {
+    const res = await request(app)
+      .get('/api/users/search')
+      .query({ q: 'A', fromDate: 'not-a-date' });
+
+    expect(res.status).toBe(200);
+    // No debería romper la query entera
+  });
+});
+
+// 3. Al implementar, se da cuenta de que tres endpoints más
+//    también filtran por fecha pero cada uno parsea las fechas a mano.
+//    Extrae una utilidad compartida:
+
+// src/lib/date-params.ts
+export function parseDateParam(
+  value: unknown,
+  fallback?: Date
+): Date | undefined {
+  if (typeof value !== 'string') return fallback;
+  const parsed = new Date(value);
+  return isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+// 4. Refactoriza los otros endpoints para usar la utilidad
+//    (en diffs separados, uno por endpoint)
+
+// 5. El PR final son 4 diffs pequeños:
+//    Diff 1: utilidad parseDateParam + tests
+//    Diff 2: endpoint users/search con filtro + tests
+//    Diff 3: refactor endpoint orders/search
+//    Diff 4: refactor endpoint products/search
+```
+
+La diferencia no es solo técnica. El ingeniero A ha reducido deuda técnica en tres endpoints, ha creado una utilidad reutilizable, ha escrito tests que documentan el comportamiento esperado y ha cuestionado si la tarea original tenía sentido. Todo esto lleva más tiempo que el primer enfoque, pero el valor generado es un orden de magnitud mayor.
+
+## Otro ejemplo: la herramienta interna
+
+Beck menciona que escribir herramientas internas que simplifican tareas similares es una señal de tipo A. Imagina que tu equipo pasa horas cada semana revisando logs de errores en producción copiando y pegando trace IDs en tres dashboards distintos.
+
+```bash
+#!/usr/bin/env bash
+# trace-investigator — herramienta que un junior tipo A construyó
+# en una tarde y ahorra 3 horas/semana a todo el equipo
+
+TRACE_ID="$1"
+if [[ -z "$TRACE_ID" ]]; then
+  echo "Uso: trace-investigator <trace-id>"
+  echo "Busca el trace en Datadog, Sentry y Kibana a la vez."
+  exit 1
+fi
+
+echo "🔍 Buscando $TRACE_ID en paralelo..."
+
+# Datadog: abre el trace en el navegador
+open "https://app.datadoghq.com/apm/trace/$TRACE_ID"
+
+# Sentry: busca eventos con ese trace ID via API
+sentry_response=$(curl -s -H "Authorization: Bearer $SENTRY_TOKEN" \
+  "https://sentry.io/api/0/projects/$SENTRY_ORG/$SENTRY_PROJECT/events/?query=trace:$TRACE_ID")
+
+event_count=$(echo "$sentry_response" | jq '. | length')
+echo "Sentry: $event_count eventos encontrados"
+
+# Kibana: genera el link de búsqueda
+kibana_url="https://kibana.internal.io/app/discover#/?_g=(time:(from:now-7d,to:now))&_a=(query:(language:kuery,query:'trace.id:%22$TRACE_ID%22'))"
+echo "Kibana: $kibana_url"
+```
+
+No es un proyecto de un mes. Es un script de 30 líneas que un junior escribió un viernes por la tarde. Pero cada vez que alguien del equipo lo usa, ese junior ha generado valor. Y lo importante es que **vio el problema**, no que alguien se lo asignara como tarea.
+
+## Mi opinión
+
+El artículo de Beck me parece uno de esos textos que todo ingeniero debería leer al menos dos veces: una al empezar su carrera y otra cuando ya tiene gente a su cargo.
+
+Hay tres ideas que me parecen especialmente potentes:
+
+**Primero**, lo de "tu salario es la prima de una opción financiera". Es la descripción más honesta que he leído sobre por qué las empresas contratan juniors. No es caridad, no es "construir pipeline de talento" en abstracto. Es una apuesta financiera concreta. Y como junior, entender eso cambia completamente cómo enfocas tu día a día: no estás ahí para producir, estás ahí para **convertirte** en alguien que produce.
+
+**Segundo**, la distinción entre señales B y señales A es brillante porque es accionable. No te dice "sé mejor", te dice exactamente qué comportamientos emiten la señal correcta. Puedes imprimir esa lista y repasarla cada viernes.
+
+**Tercero**, esto es quizá lo más incómodo: el sistema de señales que describe Beck ya existe en todas las empresas, lo admitan o no. Los seniors siempre están evaluando a los juniors, siempre están decidiendo en quién invierten tiempo y en quién no. La diferencia es que Beck lo dice en voz alta y te da el manual para jugar bien ese juego.
+
+Si eres junior, mi consejo es: deja de medirte por tickets cerrados. Mídete por diffs que simplifican código ajeno, por herramientas que tus compañeros adoptan, por tests que evitan incidentes, por preguntas que cancelan tareas innecesarias. Eso es lo que te convierte en el ingeniero por el que apostaron.
+
+---
+
+**Fuente**: [Hey, n00b, we didn't hire you to complete tasks](https://newsletter.kentbeck.com/p/hey-n00b-we-didnt-hire-you-to-complete) — Kent Beck, junio 2026. El artículo está actualmente en la portada de Hacker News con más de 100 puntos.
