@@ -1,0 +1,101 @@
+---
+title: "cssQuake: Quake renderizado con HTML y CSS, sin WebGL"
+date: "2026-06-20T15:53"
+tags: ["css", "3d", "browser", "gamedev", "typescript"]
+excerpt: "cssQuake ejecuta Quake en el navegador renderizando cada polígono como HTML con matrix3d. Sin canvas ni WebGL. Puedes inspeccionar las paredes con las DevTools."
+---
+
+Han pasado casi 30 años desde que id Software lanzó Quake y cambió para siempre los gráficos 3D en tiempo real. Desde entonces hemos visto ports a todas las plataformas imaginables: consolas, móviles, WebAssembly, incluso en un test de embarazo. Pero lo que acaba de aparecer en Hacker News esta semana es distinto. cssQuake no usa WebGL, no usa canvas, no usa WebGPU. Renderiza Quake entero con HTML y CSS.
+
+Sí, lo has leído bien. Cada polígono del mundo 3D es un elemento del DOM. Puedes abrir las DevTools, seleccionar una pared y ver su `matrix3d()` en el panel de estilos. Es una locura técnica que además funciona a 60 FPS en un MacBook Air M1.
+
+## PolyCSS: el motor 3D que lo hace posible
+
+cssQuake no es un proyecto aislado. Se apoya en [PolyCSS](https://github.com/LayoutitStudio/polycss), un motor 3D para el DOM creado por el mismo equipo (Layoutit Studio). PolyCSS toma mallas poligonales —OBJ, STL, glTF, incluso MagicaVoxel— y las convierte en elementos HTML posicionados con transforms CSS.
+
+La idea central es brillante por lo contraintuitiva que resulta. Llevamos dos décadas asumiendo que el DOM es para documentos y el canvas para gráficos. PolyCSS demuestra que la frontera nunca fue técnica, sino de imaginación.
+
+Así se monta una escena 3D con PolyCSS usando custom elements:
+
+```html
+<script type="module" src="https://esm.sh/@layoutit/polycss/elements"></script>
+
+<poly-camera rot-x="65" rot-y="45">
+  <poly-scene>
+    <poly-orbit-controls drag wheel></poly-orbit-controls>
+    <poly-box size="100" color="#ffd166"></poly-box>
+  </poly-scene>
+</poly-camera>
+```
+
+No hay un `<canvas>`. No hay contexto WebGL. Hay un `<poly-box>` que es un elemento HTML real con un `matrix3d()` aplicado. Puedes ponerle un `onClick`, un `className`, inspeccionarlo, modificarlo desde la consola. Es un ciudadano de primera clase del DOM.
+
+## Cómo funciona por dentro
+
+El modelo de datos de PolyCSS es sorprendentemente directo. Cada polígono es un objeto con vértices 3D y, opcionalmente, color o textura:
+
+```ts
+const polygons = [
+  {
+    vertices: [[0, 0, 0], [60, 0, 0], [0, 60, 0]],
+    color: "#f97316",
+  },
+  {
+    vertices: [[0, 0, 0], [60, 0, 0], [60, 60, 0], [0, 60, 0]],
+    texture: "/texture.png",
+    uvs: [[0, 0], [1, 0], [1, 1], [0, 1]],
+  },
+];
+```
+
+PolyCSS toma esos vértices, calcula la matriz de transformación 3D necesaria para posicionar cada cara en el espacio de la cámara y genera un `div` (o el elemento que prefieras) con un `transform: matrix3d(...)` que lo coloca exactamente donde debe estar. La textura se aplica como `background-image` con las coordenadas UV mapeadas a `background-position` y `background-size`.
+
+El resultado es que cada cara del mundo 3D es un rectángulo DOM con una textura pixelada de fondo, agrupado en mallas, iluminado con sombras CSS. No es un truco de renderizado por software volcado a una imagen. Es geometría real del DOM.
+
+Para cargar modelos complejos, PolyCSS expone una API de carga directa:
+
+```ts
+import { createPolyCamera, createPolyScene, loadMesh } from "@layoutit/polycss";
+
+const host = document.getElementById("app")!;
+const camera = createPolyCamera({ rotX: 65, rotY: 45 });
+const scene = createPolyScene(host, { camera });
+
+const mesh = await loadMesh("https://polycss.com/gallery/obj/cottage.obj", {
+  mtlUrl: "https://polycss.com/gallery/obj/cottage.mtl",
+});
+
+scene.add(mesh);
+```
+
+Y si quieres exportar la escena como HTML estático —sin runtime, sin JS, solo DOM y CSS inline— PolyCSS incluye `exportPolySceneSnapshot()`, que clona el árbol renderizado, inyecta el CSS necesario, convierte las texturas a `data:image` base64 y te devuelve un documento HTML autónomo.
+
+## El puente entre Quake y el DOM
+
+cssQuake no parsea los archivos originales de Quake en el navegador. Tiene un paso de preprocesado (en Node.js, durante el build) que toma los datos originales —BSP, WAD, MDL, LMP, datos de entidades, colisiones, visibilidad, HUD, menús, armas— y los convierte en assets listos para el navegador: JSON, imágenes PNG y bundles de renderizado PolyCSS.
+
+El runtime del juego está escrito en TypeScript. No es una VM de QuakeC. TypeScript controla el game loop, el movimiento del jugador, la respuesta de colisiones, los estados de enemigos, los pickups, las armas, la UI, el audio y las actualizaciones del DOM a través de PolyCSS.
+
+El resultado es que juegas a Quake y las DevTools te muestran esto:
+
+```
+▼ <div class="polycss-scene">
+  ▼ <div class="polycss-mesh" style="transform: matrix3d(...)">
+    <div style="transform: matrix3d(...); background-image: url(/q/textures/wall.png)"></div>
+    <div style="transform: matrix3d(...); background-image: url(/q/textures/floor.png)"></div>
+    ...
+  </div>
+</div>
+```
+
+Cada cara del mundo es un elemento que puedes seleccionar, inspeccionar, modificar. Es Quake convertido en documento web.
+
+## Mi opinión
+
+cssQuake me parece uno de esos proyectos que aparecen de vez en cuando y te obligan a replantearte lo que das por sentado. Llevo años escribiendo código para la web y jamás se me habría ocurrido renderizar Quake con `matrix3d`. Es la clase de idea que suena a broma hasta que la ves funcionando a 60 FPS.
+
+Hay algo profundamente satisfactorio en poder inspeccionar el mundo del juego con las herramientas que usas a diario para depurar un formulario o un layout responsive. De repente el salto entre "aplicación web" y "motor 3D" desaparece. Es todo DOM.
+
+Dicho esto, no nos engañemos: esto no va a sustituir a WebGL ni a WebGPU para aplicaciones gráficas serias. El rendimiento depende de cuántos elementos DOM pueda manejar el navegador sin ahogarse y hay límites duros en cuanto a complejidad de escena. Pero como demostración de concepto y como herramienta para visualizaciones 3D moderadas —visores de modelos, configuradores de producto, escenas arquitectónicas simples— PolyCSS es una alternativa genuinamente útil.
+
+El código está en [GitHub](https://github.com/LayoutitStudio/cssQuake) con licencia abierta. El equipo de Layoutit Studio ha documentado todo el proceso de build, así que si tienes un `pak0.pak` original puedes generar los assets y trastear con el motor. Yo ya tengo planes para este fin de semana.
