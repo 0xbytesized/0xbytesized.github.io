@@ -1,0 +1,140 @@
+---
+title: "Cómo meter una web entera dentro de un favicon"
+date: "2026-06-20T09:41"
+tags: ["favicon", "canvas", "javascript", "png", "web"]
+excerpt: "Tim Wehrle ha conseguido almacenar un sitio web completo dentro de un favicon de 9×9 píxeles. Así funciona la técnica píxel a píxel."
+---
+
+Tim Wehrle, un desarrollador alemán, ha hecho algo que suena a broma pero funciona de verdad: ha metido una página web entera dentro de un favicon. No es un titular exagerado. El favicon de su sitio demo contiene 208 bytes de HTML, CSS y texto, codificados píxel a píxel en una imagen PNG de 9×9. El navegador lee su propio icono de pestaña, extrae los bytes y reconstruye la página.
+
+La historia apareció en Hacker News esta semana con 126 puntos y provocó una mezcla de fascinación y "¿para qué sirve esto realmente?". Vamos a desmontar cómo funciona.
+
+## La idea: un favicon no es un icono, es un PNG
+
+Un favicon es ese cuadradito que ves en la pestaña del navegador. Lo subes una vez, lo enlazas con `<link rel="icon">` y te olvidas. Pero técnicamente un favicon no es más que un archivo PNG (o ICO) que el navegador carga como cualquier otra imagen.
+
+Y una imagen no es más que píxeles. Y un píxel no es más que bytes.
+
+Cada píxel de una imagen RGBA tiene cuatro canales: rojo, verde, azul y alpha. Cada canal es un byte (0-255). Si ignoras el alpha y usas solo RGB, cada píxel te da tres bytes de almacenamiento. Lo que Wehrle hizo fue tomar los bytes UTF-8 de un documento HTML y escribirlos directamente como valores de color. El navegador ve colores. Tú ves una web.
+
+## Codificando HTML en píxeles
+
+El proceso de codificación es sorprendentemente directo. No necesitas librerías externas ni formatos esotéricos. Basta con JavaScript estándar y un `<canvas>`:
+
+```javascript
+// Texto HTML que queremos esconder en el favicon
+const html = `<h1>Hola desde un favicon</h1>
+<p>Este texto estaba escondido en los píxeles del icono de la pestaña.</p>`;
+
+// Convertir a bytes UTF-8
+const encoder = new TextEncoder();
+const payload = encoder.encode(html);
+
+// Prependemos 4 bytes con la longitud del payload
+// Así sabemos dónde termina el contenido real
+const header = new Uint8Array(4);
+new DataView(header.buffer).setUint32(0, payload.length, false);
+
+// Concatenamos header + payload
+const data = new Uint8Array(header.length + payload.length);
+data.set(header);
+data.set(payload, header.length);
+
+// Calculamos cuántos píxeles necesitamos (3 bytes por píxel)
+const pixelCount = Math.ceil(data.length / 3);
+const side = Math.ceil(Math.sqrt(pixelCount));
+
+// Creamos un canvas y escribimos los bytes como colores
+const canvas = document.createElement("canvas");
+canvas.width = side;
+canvas.height = side;
+const ctx = canvas.getContext("2d");
+const imageData = ctx.createImageData(side, side);
+
+for (let i = 0; i < data.length; i++) {
+  imageData.data[i] = data[i];
+}
+
+ctx.putImageData(imageData, 0, 0);
+
+// Exportamos como PNG
+canvas.toBlob((blob) => {
+  const url = URL.createObjectURL(blob);
+  // Este blob es tu nuevo favicon
+  console.log("Favicon generado:", url);
+});
+```
+
+El resultado es una imagen que parece ruido visual. Un mosaico de colores sin sentido aparente. Pero dentro de ese ruido vive tu HTML.
+
+Los números de Wehrle son reveladores: su payload ocupaba 208 bytes. Con el header de 4 bytes, 212 bytes totales. A 3 bytes por píxel, necesitaba 71 píxeles. La imagen cuadrada más pequeña que los contiene es 9×9 (81 píxeles). Un 87% de ocupación. Una web completa en menos píxeles que un emoji.
+
+## Leyendo la web desde el favicon
+
+El otro lado de la moneda es la lectura. Aquí el navegador también tiene todo lo necesario:
+
+```javascript
+// Cargamos el favicon como imagen
+const img = new Image();
+img.crossOrigin = "anonymous";
+img.src = "/favicon.png";
+
+img.onload = () => {
+  // Lo dibujamos en un canvas para leer sus píxeles
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0);
+
+  // Extraemos los datos RGBA
+  const imageData = ctx.getImageData(0, 0, img.width, img.height);
+  const bytes = imageData.data;
+
+  // Los primeros 4 bytes contienen la longitud del payload
+  const header = new Uint8Array(bytes.buffer, 0, 4);
+  const payloadLength = new DataView(header.buffer).getUint32(0, false);
+
+  // Extraemos el payload
+  const payload = new Uint8Array(bytes.buffer, 4, payloadLength);
+
+  // Decodificamos de vuelta a texto
+  const decoder = new TextDecoder();
+  const html = decoder.decode(payload);
+
+  // Reemplazamos la página con el HTML reconstruido
+  document.open();
+  document.write(html);
+  document.close();
+};
+```
+
+El flujo es simétrico: `TextEncoder` → bytes → píxeles → PNG → píxeles → bytes → `TextDecoder`. Cada paso usa APIs que existen en cualquier navegador moderno desde hace años. No hay magia, solo creatividad aplicada a herramientas que ya teníamos delante.
+
+## La trampa: necesitas un bootstrap loader
+
+Aquí está el detalle importante que Wehrle señala: el favicon no contiene la web _entera_. Contiene el _contenido_ de la web. Sigues necesitando un cargador mínimo —el HTML que el servidor entrega inicialmente— que incluya el JavaScript para decodificar el favicon.
+
+Sin ese bootstrap loader, el favicon es solo un PNG con ruido de colores. El navegador no va a interpretarlo mágicamente como HTML. La página original de Wehrle incluye un botón "Render Website" que ejecuta el proceso de lectura y reemplaza la página con el contenido reconstruido.
+
+Es una limitación fundamental del enfoque, pero también es lo que lo hace interesante: no es un truco de formato de archivo, es un truco de _runtime_. El navegador se convierte en el intérprete de su propio icono.
+
+## ¿Esto sirve para algo?
+
+No. Y Wehrle lo admite sin rodeos. La capacidad es minúscula (239 bytes en 9×9, menos que un tuit). Necesitas JavaScript para leerlo. Hay docenas de formas mejores de distribuir un documento HTML pequeño.
+
+Pero la pregunta "¿sirve para algo?" es la pregunta equivocada. Esto no es un producto. Es una exploración de límites. Es el mismo impulso que llevó a alguien a [meter un intérprete de PostScript en un PDF](https://0xbytesized.github.io/blog/postscript-adobe-1991-navegador-emulacion/) o a [emular un Game Boy en código C ofuscado](https://0xbytesized.github.io/blog/ioccc-2025-c-ofuscado-gameboy-emulador/). No buscas utilidad. Buscas entender hasta dónde se puede estirar una tecnología antes de que se rompa.
+
+Wehrle menciona variantes que exploran el mismo espacio: usar chunks de metadatos PNG como `tEXt` o `zTXt`, aprovechar el formato ICO que permite múltiples resoluciones, o almacenar markup directamente en un favicon SVG. Cada una con sus propias restricciones y posibilidades.
+
+## Mi veredicto
+
+Este tipo de proyectos me parecen valiosos precisamente porque son inútiles. Suena contradictorio, pero lo explico.
+
+Cuando trabajas dentro de los límites normales de una tecnología, nunca aprendes dónde están realmente esos límites. Solo cuando alguien hace algo absurdo —como meter una web en un favicon— descubres que el canvas API puede leer los píxeles de la propia imagen de pestaña del navegador, que `TextEncoder` y `DataView` encajan como piezas de Lego para serializar cualquier cosa y que un PNG de 9×9 es un medio de almacenamiento viable si tu documento es lo bastante pequeño.
+
+Cada uno de estos descubrimientos es una herramienta que te llevas para proyectos _útiles_. El conocimiento de que `getImageData` funciona sobre imágenes cross-origin si el servidor lo permite. La soltura con `DataView` para empaquetar headers binarios. La comprensión íntima de cómo los bytes fluyen entre APIs del navegador.
+
+Wehrle no ha inventado nada nuevo. Ha combinado piezas que ya existían de una forma que nadie había probado. Y ha documentado el proceso con la humildad de quien sabe que ha hecho algo absurdo pero fascinante. Ese es exactamente el tipo de ingeniería que más me interesa.
+
+El código fuente está [en GitHub](https://github.com/timwehrle/favicon) y la demo live en [timwehrle.de/labs/favicon-site](https://www.timwehrle.de/labs/favicon-site/). Merece la pena abrir las DevTools y ver cómo un puñado de píxeles se convierten en HTML delante de tus ojos.
