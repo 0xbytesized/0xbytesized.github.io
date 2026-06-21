@@ -1,0 +1,218 @@
+---
+title: "epoll vs io_uring: la batalla del I/O asíncrono en Linux"
+date: "2026-06-21T10:00"
+tags: ["linux", "c", "io-uring", "epoll", "rendimiento"]
+excerpt: "Linux usó epoll para I/O asíncrono durante 17 años. io_uring cambió el juego en 2019 con un modelo de completación que reduce drásticamente las syscalls."
+---
+
+## El problema de fondo
+
+Si alguna vez has escrito un servidor en C sobre Linux, sabes que el cuello de botella no suele estar en tu lógica de negocio. Está en cómo el kernel y tu proceso se pasan datos de un lado a otro.
+
+Cada vez que llamas a `read()` o `write()`, el procesador hace una transición de modo usuario a modo kernel —un *context switch*— que cuesta ciclos de CPU. En un servidor con 10 conexiones no lo notas. Con 10.000 conexiones simultáneas, ese coste se multiplica y se come tu rendimiento.
+
+Linux lleva más de dos décadas ofreciendo mecanismos para amortiguar este problema. El más conocido es **epoll**, que llegó al kernel 2.5.44 en 2002. Pero en 2019 apareció **io_uring** y el panorama cambió por completo.
+
+El artículo de [sibexi.co](https://sibexi.co/posts/epoll-vs-io_uring/) que ha estado en portada de Hacker News esta semana lo explica con una claridad brutal y me ha parecido el tema perfecto para desgranar aquí.
+
+## epoll: el veterano fiable
+
+epoll funciona con un modelo de **disponibilidad** (*readiness*). Te dice cuándo un file descriptor está listo para leer o escribir, pero la operación de I/O la haces tú aparte.
+
+El flujo típico es:
+
+1. Creas una instancia de epoll con `epoll_create1()`
+2. Registras los file descriptors que te interesan con `epoll_ctl()`
+3. Llamas a `epoll_wait()` para bloquear hasta que algo esté listo
+4. Cuando `epoll_wait()` despierta, haces `read()` o `write()` sobre cada fd
+
+El problema está en el paso 4: cada `read()` o `write()` es una syscall adicional. Para un solo evento de I/O necesitas **dos syscalls**: `epoll_wait` + `read` (o `write`). Y cada una implica un context switch.
+
+Aquí tienes un servidor TCP mínimo con epoll que escribí para ilustrarlo:
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/epoll.h>
+#include <netinet/in.h>
+
+#define PORT    8080
+#define BACKLOG 128
+#define MAX_EV  64
+
+static void set_nonblocking(int fd) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+}
+
+int main(void) {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    set_nonblocking(listen_fd);
+
+    struct sockaddr_in addr = {
+        .sin_family      = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port        = htons(PORT),
+    };
+    bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));
+    listen(listen_fd, BACKLOG);
+
+    int epfd = epoll_create1(0);
+    struct epoll_event ev, events[MAX_EV];
+    ev.events = EPOLLIN;
+    ev.data.fd = listen_fd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
+
+    for (;;) {
+        int n = epoll_wait(epfd, events, MAX_EV, -1);
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].data.fd;
+            if (fd == listen_fd) {
+                int client = accept(listen_fd, NULL, NULL);
+                set_nonblocking(client);
+                ev.events = EPOLLIN;
+                ev.data.fd = client;
+                epoll_ctl(epfd, EPOLL_CTL_ADD, client, &ev);
+            } else {
+                char buf[4096];
+                ssize_t nread = read(fd, buf, sizeof(buf));
+                if (nread <= 0) {
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    close(fd);
+                } else {
+                    write(fd, buf, nread);  // echo
+                }
+            }
+        }
+    }
+}
+```
+
+Fíjate en el bucle interno: `epoll_wait` te dice que el fd está listo y luego llamas a `read` y `write` por separado. Cada una de esas llamadas cruza la frontera kernel/userspace. Para un servidor echo sencillo, cada petición gasta **tres syscalls**: `epoll_wait` (compartida entre eventos), `read` y `write`.
+
+## io_uring: el modelo de completación
+
+io_uring cambia la filosofía por completo. En lugar de decirte "este fd está listo, haz lo que quieras", te dice **"la operación que me pediste ya está hecha, aquí tienes el resultado"**.
+
+La magia está en dos buffers circulares compartidos entre kernel y userspace:
+
+- **Submission Queue (SQ):** tú metes aquí las operaciones que quieres que el kernel ejecute (reads, writes, accepts, etc.)
+- **Completion Queue (CQ):** el kernel mete aquí los resultados cuando termina
+
+Como ambos buffers viven en memoria compartida, no necesitas una syscall por operación. Haces una sola syscall —`io_uring_enter()`— para enviar un lote entero de operaciones y recoger otro lote entero de resultados.
+
+Aquí tienes el mismo servidor echo, pero con io_uring y liburing:
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <liburing.h>
+
+#define PORT      8080
+#define BACKLOG   128
+#define QDEPTH    256
+#define BUFSZ     4096
+
+static void set_nonblocking(int fd) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+}
+
+int main(void) {
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    set_nonblocking(listen_fd);
+
+    struct sockaddr_in addr = {
+        .sin_family      = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port        = htons(PORT),
+    };
+    bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));
+    listen(listen_fd, BACKLOG);
+
+    struct io_uring ring;
+    io_uring_queue_init(QDEPTH, &ring, 0);
+
+    // Primera SQE: aceptar conexión entrante
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_accept(sqe, listen_fd, NULL, NULL, 0);
+    io_uring_submit(&ring);
+
+    for (;;) {
+        struct io_uring_cqe *cqe;
+        io_uring_wait_cqe(&ring, &cqe);
+
+        int fd = cqe->res;  // resultado: fd del cliente o bytes leídos
+        if (fd >= 0 && cqe->user_data == 0) {
+            // Accept completado — encolar read + siguiente accept
+            set_nonblocking(fd);
+
+            sqe = io_uring_get_sqe(&ring);
+            io_uring_prep_accept(sqe, listen_fd, NULL, NULL, 0);
+            io_uring_sqe_set_data(sqe, (void *)0);
+
+            sqe = io_uring_get_sqe(&ring);
+            char *buf = malloc(BUFSZ);
+            io_uring_prep_read(sqe, fd, buf, BUFSZ, 0);
+            io_uring_sqe_set_data(sqe, (void *)(intptr_t)fd);
+
+            io_uring_submit(&ring);
+        } else if (fd > 0 && cqe->user_data != 0) {
+            // Read completado — encolar write (echo)
+            int client = (int)(intptr_t)cqe->user_data;
+            sqe = io_uring_get_sqe(&ring);
+            io_uring_prep_write(sqe, client, NULL, fd, 0);
+            io_uring_sqe_set_data(sqe, (void *)(intptr_t)client);
+            io_uring_submit(&ring);
+        }
+
+        io_uring_cqe_seen(&ring, cqe);
+    }
+}
+```
+
+La diferencia arquitectónica es enorme. En lugar de un bucle `epoll_wait` + `read` + `write`, tienes un bucle que consume completaciones y encadena nuevas operaciones. El kernel hace el trabajo pesado; tú solo reaccionas a resultados.
+
+## La comparación real
+
+Aquí va un resumen de las diferencias clave:
+
+| Característica | epoll | io_uring |
+|---|---|---|
+| Modelo | Disponibilidad (*readiness*) | Completación (*completion*) |
+| Syscalls por I/O | 2+ (`epoll_wait` + `read`/`write`) | 1 por lote entero |
+| Memoria compartida | No | Sí (SQ + CQ ring buffers) |
+| Zero-copy | No nativo | Sí (`IORING_OP_SEND_ZC` en kernel 6.0+) |
+| Kernel thread polling | No | Sí (`IORING_SETUP_SQPOLL`) |
+| Año de llegada | 2002 (kernel 2.5.44) | 2019 (kernel 5.1) |
+
+El ahorro de syscalls es el factor decisivo. Con epoll, 10.000 conexiones generan al menos 20.000 syscalls por ciclo. Con io_uring, puedes procesar esas mismas 10.000 conexiones con una sola llamada a `io_uring_enter()`.
+
+Y si activas `IORING_SETUP_SQPOLL`, el kernel mantiene un hilo dedicado que sondea la cola de submission por ti. En régimen estacionario, tu proceso de usuario puede operar con **cero syscalls** —solo leyendo y escribiendo en los ring buffers compartidos. La contrapartida es que ese hilo del kernel consume CPU incluso cuando no hay trabajo, aunque tiene un timeout de inactividad (`sq_thread_idle`) tras el cual se duerme.
+
+## Lo que no te cuentan
+
+io_uring no es magia. Tiene aristas que conviene conocer:
+
+**Manejo de errores asíncrono.** En epoll, si `read()` falla, recibes -1 inmediatamente y miras `errno`. En io_uring, el error llega dentro del `cqe->res` cuando la operación se completa. No hay un `errno` global que consultar; tienes que interpretar el código de retorno en cada completación. Esto obliga a estructurar tu código de forma distinta.
+
+**Curva de aprendizaje.** La API de liburing es más compleja que epoll. Tienes que gestionar SQEs manualmente, asegurarte de que no se agota la cola (`io_uring_get_sqe()` puede devolver NULL) y llevar el control de qué operación corresponde a qué conexión mediante `user_data`.
+
+**Compatibilidad.** io_uring requiere kernel 5.1 o superior (abril de 2019). Si despliegas en sistemas con kernels antiguos —piensa en contenedores sobre hosts con kernel 4.x— no puedes usarlo. epoll funciona en prácticamente cualquier Linux.
+
+## Mi veredicto
+
+Si estás montando un proyecto nuevo sobre Linux moderno, **io_uring es la opción correcta**. La diferencia de rendimiento es lo bastante grande como para justificar la migración y liburing ha madurado mucho desde 2019.
+
+Dicho esto, epoll no va a desaparecer. Hay millones de servidores en producción que lo usan, funciona bien y el ecosistema está lleno de bibliotecas y frameworks construidos sobre él (nginx, haproxy, libuv, por nombrar tres). No vas a reescribir nginx en io_uring un fin de semana.
+
+Lo que sí creo es que veremos una transición gradual en los próximos años. Los nuevos proyectos de infraestructura —servidores proxy, bases de datos, message brokers— van a adoptar io_uring desde el día uno. Los proyectos existentes irán migrando sus capas de I/O cuando el coste de la migración se justifique frente al ahorro en CPU.
+
+Y para los que programamos en C sobre Linux, aprender io_uring ya no es opcional. Es lo que viene.
