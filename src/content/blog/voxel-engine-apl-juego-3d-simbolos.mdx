@@ -1,0 +1,100 @@
+---
+title: "Motor voxel 3D en APL: los símbolos renderizan mundos"
+date: "2026-06-21T22:00"
+tags: ["apl", "voxel", "graphics", "lenguajes", "gamedev"]
+excerpt: "Un desarrollador construye un motor voxel completo en APL y demuestra que la notación array puede ser sorprendentemente natural para gráficos 3D."
+---
+
+Hace unos días me topé en Hacker News con un proyecto que me dejó mirando la pantalla unos segundos: un motor de juego voxel 3D escrito enteramente en APL. Sí, APL. Ese lenguaje de los años 60 con más símbolos que letras, famoso por permitirte escribir un algoritmo completo en una sola línea ilegible. El autor, [namgyaaal](https://github.com/namgyaaal/avoxelgame), lo describe como "una apuesta conmigo mismo sobre si la notación APL facilitaría hacer un juego voxel".
+
+El resultado es un motor funcional con generación de terreno, ray casting, detección de colisiones, sistema de chunks, guardado de partidas y renderizado por GPU vía SDL3. Todo en APL. Y funciona.
+
+## ¿Por qué APL para un motor de juego?
+
+APL (A Programming Language) fue diseñado por Ken Iverson en los 60 como una notación para describir algoritmos. Su superpoder es tratar arrays enteros como unidades atómicas: donde en C escribes un bucle `for` para sumar dos vectores, en APL escribes `A + B` y ya está.
+
+Para un motor voxel esto tiene sentido. Un mundo de cubos es, conceptualmente, un array 4D: tres dimensiones espaciales más los datos de cada bloque. APL come arrays para desayunar.
+
+El autor usa Dyalog APL 20.0, una de las implementaciones modernas del lenguaje, y SDL3 como capa de gráficos. El código fuente está organizado en namespaces APL: `world`, `player`, `state`, `menu_state`, cada uno en su archivo `.apln`.
+
+## Cómo se ve el código
+
+Si nunca has visto APL, prepárate. No se parece a nada que hayas usado. Aquí tienes un ejemplo real de cómo el motor define las caras de un cubo:
+
+```apl
+faces ← [
+0 1 0 ⋄ 0 1 1 ⋄ 0 0 1 ⋄ 0 0 0 ⍝ Left
+1 1 1 ⋄ 1 1 0 ⋄ 1 0 0 ⋄ 1 0 1 ⍝ Right
+1 0 0 ⋄ 0 0 0 ⋄ 0 0 1 ⋄ 1 0 1 ⍝ Bottom
+0 1 0 ⋄ 1 1 0 ⋄ 1 1 1 ⋄ 0 1 1 ⍝ Top
+1 1 0 ⋄ 0 1 0 ⋄ 0 0 0 ⋄ 1 0 0 ⍝ Back
+0 1 1 ⋄ 1 1 1 ⋄ 1 0 1 ⋄ 0 0 1 ⍝ Front
+]
+```
+
+Cada línea define los 4 vértices de una cara del cubo. El `⋄` es el separador de sentencias. El `⍝` es el comentario. Hasta aquí, raro pero legible.
+
+Lo interesante viene cuando generas TODOS los vértices de TODOS los bloques del chunk de una sola vez:
+
+```apl
+⍝ l es el tamaño del chunk: 16×128×16
+⍝ Genera todas las posiciones de bloque y añade las caras
+vertices←,[⍳2]faces+⍤1⍤2 1⊢⍉l⊤⍳×/l
+```
+
+Esta línea hace lo siguiente: genera todas las coordenadas posibles dentro del chunk (`⍳×/l`), las codifica en 3D (`l⊤`), transpone y luego suma las caras del cubo a cada posición usando el operador rank (`⍤`). El resultado es un array con todos los vértices de todas las caras de todos los bloques. En C necesitarías tres bucles anidados y bastante aritmética de punteros. Aquí es una línea.
+
+## Ray casting al estilo APL
+
+El corazón de cualquier motor voxel es el ray casting: lanzar un rayo desde la cámara y determinar qué bloque golpea. El autor implementa el algoritmo de Amanatides y Woo ("A Fast Voxel Traversal Algorithm") como una función recursiva:
+
+```apl
+ Ray_hit←{
+     ⍝ ⍺ ←→ posición
+     ⍝ ⍵ ←→ velocidad (vector del rayo)
+     ⎕IO←0 ⋄ eps←0.0001 ⋄ p←⍺ ⋄ s←×v←{(⌊0.5+⊢)⍵}@{eps>|⍵-(⌊0.5+⊢)⍵}¨⊢⍵
+     rp←⌊(eps×v)+p
+     (∧/1>|v):⊂rp
+     m←0⍴⍨,⍨≢v ⋄ (0 0⍉m)←{s×0=⍵}⍛+s×1||(0<s)-p
+     t←÷⍤(v∘⌹)¨∨/⍤(0∘≠)¨⍛/↓m
+     dv←v×⌊/t
+     (⊂rp),(p+dv)∇(v-dv)
+ }
+```
+
+La función es recursiva: en cada paso calcula qué cara del voxel actual atraviesa el rayo, avanza hasta esa cara y se llama a sí misma desde la nueva posición con el vector restante. La notación `⍺` y `⍵` son los argumentos izquierdo y derecho. El `∇` es la llamada recursiva a sí misma.
+
+Lo que me parece brillante es cómo el código APL expresa el algoritmo: las proyecciones de vectores, los productos matriciales y las selecciones condicionales se escriben como transformaciones de arrays, no como bucles. El algoritmo es el mismo que en C++, pero la expresión es radicalmente distinta.
+
+## La máquina de estados: un patrón que merece atención
+
+El game loop usa un patrón de máquina de estados que el autor tomó prestado de [APL Asteroids de Aaron Hsu](https://github.com/Co-dfns/APL-Asteroids). En lugar de un bucle `while` con un `switch`, usa etiquetas y saltos calculados:
+
+```apl
+     ∆_WORLD_EVENT_:→⎕LC+##.world_state.Input _Exhaust_with core
+     ∆_WORLD_EVENT_TICK:→∆_WORLD_EVENT_
+     ∆_WORLD_EVENT_QUIT:→∆_WORLD_QUIT
+     ∆_WORLD_EVENT_NEXT:→∆_WORLD_
+
+     ∆_WORLD_:→⎕LC+##.world_state.Loop core
+     ∆_WORLD_TICK:→∆_WORLD_EVENT_
+     ∆_WORLD_QUIT:##.world_state.Release core ⋄ →0
+```
+
+`⎕LC` es el contador de línea actual. La función `_Exhaust_with` devuelve un código (TICK, QUIT, NEXT) y el salto `→⎕LC+ código` redirige la ejecución a la etiqueta correspondiente. Es un `computed goto` elegante que evita el anidamiento de condicionales.
+
+El patrón separa cada estado en dos fases: evento (input polling) y loop (update + render). La fase de eventos se "agota" antes de pasar al renderizado, lo que evita perder inputs entre frames.
+
+## Mi opinión
+
+Este proyecto me parece valioso no porque vayas a escribir tu próximo juego en APL, sino porque demuestra algo que llevamos décadas olvidando: **el lenguaje de programación condiciona cómo piensas el problema**.
+
+Cuando trabajas en C++, piensas en bucles, punteros y memoria. Cuando trabajas en APL, piensas en transformaciones de arrays completos. El mismo algoritmo de ray casting se expresa de formas radicalmente distintas, y cada expresión revela aspectos diferentes del problema.
+
+El autor admite que el proyecto es "altamente experimental y buggy". Hay memory leaks, los shaders dan problemas en Windows, y no puedes jugar varias partidas en la misma sesión sin un syserror 999. Pero eso es lo de menos. La pregunta interesante no es "¿es APL mejor que C++ para juegos?" sino "¿qué aprendemos sobre los motores gráficos cuando los expresamos en un paradigma completamente distinto?".
+
+Hay una cita de Alan Perlis que me viene a la cabeza: "Un lenguaje que no afecta a tu forma de pensar sobre la programación no merece ser aprendido". APL definitivamente aprueba ese test.
+
+Si quieres probarlo, el repo está en [github.com/namgyaaal/avoxelgame](https://github.com/namgyaaal/avoxelgame). Necesitarás Dyalog APL 20.0, SDL3 y una GPU con Vulkan, DirectX12 o Metal. El README tiene instrucciones para macOS, Linux y Windows.
+
+Y si te pica la curiosidad por APL, [TryAPL](https://tryapl.org/) te deja jugar con el lenguaje desde el navegador. Te aviso: los primeros 20 minutos son de pura confusión. Luego algo hace clic.
