@@ -43,11 +43,12 @@ Veamos algunos patrones que con workers son un proyecto y con esto son un párra
 ```js
 const items = loadItems();           // 100k objetos
 const results = new Array(items.length);
-const next = { i: 0 };
+const nextBuf = new SharedArrayBuffer(4);
+const next = new Int32Array(nextBuf);
 
 const workers = Array.from({ length: 8 }, () => new Thread(() => {
   for (;;) {
-    const i = Atomics.add(next, "i", 1);
+    const i = Atomics.add(next, 0, 1);
     if (i >= items.length) return;
     results[i] = transform(items[i]);
   }
@@ -58,25 +59,6 @@ workers.forEach(t => t.join());
 ```
 
 Once líneas. Los workers leen y escriben directamente sobre los arrays originales. No hay que trocear la entrada en mensajes por worker, no hay que reensamblar N arrays de resultados en uno, no hay ping-pong de transferibles. La versión con workers de esto es un proyecto de ingeniería.
-
-### Una caché compartida que de verdad es compartida
-
-```js
-const cache = new Map();
-const lock = new Lock();
-
-function memoized(key) {
-  let hit;
-  lock.hold(() => { hit = cache.get(key); });
-  if (hit) return hit;
-
-  const value = compute(key);
-  lock.hold(() => { cache.set(key, value); });
-  return value;
-}
-```
-
-Llama a `memoized` desde cualquier hilo. Un `Map`, un fallo de caché por clave, para siempre. Con workers tus opciones son: N workers con N cachés privadas recalculando el trabajo de los demás, un worker "servidor de caché" al que hablas por `postMessage`, o implementar tu propia tabla hash con asignador de memoria sobre un `SharedArrayBuffer`.
 
 ### Cancelación cooperativa con una variable
 
