@@ -1,0 +1,125 @@
+---
+title: "Linux 7.2 elimina strncpy: fin a 40 años de bugs"
+date: "2026-06-21T16:00"
+tags: ["linux", "kernel", "c", "seguridad", "string-handling"]
+excerpt: "Linux 7.2 elimina strncpy tras 6 años y 362 parches. Analizo por qué esta función fue un desastre desde el día uno y qué alternativas usar ahora."
+---
+
+## El crimen silencioso de strncpy
+
+El 19 de junio de 2026, Linus Torvalds mergeó un tag que llevaba 6 años cocinándose: `strncpy-removal-v7.2-rc1`. El resultado: la función `strncpy()` ha dejado de existir en el kernel de Linux. Para siempre. 362 commits de 70 contribuidores. Implementaciones por arquitectura eliminadas en alpha, m68k, powerpc, x86 y xtensa. Y un suspiro colectivo de alivio entre quienes hemos depurado código C durante años.
+
+Si has escrito C alguna vez, probablemente has usado `strncpy`. Y si la has usado, es casi seguro que en algún momento introdujiste un bug sin darte cuenta. No es que seas mal programador: es que `strncpy` está **mal diseñada de fábrica**.
+
+## Por qué strncpy es una trampa
+
+La firma parece inofensiva:
+
+```c
+char *strncpy(char *dest, const char *src, size_t n);
+```
+
+Copias hasta `n` bytes de `src` a `dest`. Fácil. Pero el diablo está en los detalles:
+
+**Problema 1: No garantiza terminación NUL.** Si `strlen(src) >= n`, `strncpy` copia exactamente `n` caracteres y **no añade `\0` al final**. Tu buffer queda sin terminar. Cualquier función que asuma que es una string válida (como `strlen`, `printf("%s")`, o `strcmp`) leerá más allá del buffer. Esto es un *linear read overflow*.
+
+```c
+char dest[8];
+strncpy(dest, "arquitectura", 8);
+// dest contiene: a r q u i t e c t
+// sin '\0' al final. strlen(dest) → desbordamiento.
+```
+
+**Problema 2: Rellena con ceros innecesariamente.** Si `strlen(src) < n`, `strncpy` rellena **todo el resto del buffer con `\0`**. En buffers grandes esto es un desperdicio de ciclos de CPU. Imagina un buffer de 4KB para un path de 80 caracteres: `strncpy` escribe 4016 ceros que nadie necesita.
+
+```c
+char dest[4096];
+strncpy(dest, "/usr/bin/gcc", 4096);
+// Escribe 14 bytes útiles y 4082 ceros. Inútil y lento.
+```
+
+**Problema 3: El nombre engaña.** `strncpy` no es una versión "segura" de `strcpy`. Nunca lo fue. El nombre sugiere "string copy with limit" pero su comportamiento real es "copy bytes to a fixed-width field, zero-padding the rest". Viene de los días en que los nombres de fichero en Unix eran arrays de 14 bytes fijos, no strings terminadas en NUL. Era una función para estructuras de datos *legacy*, no para strings modernas.
+
+Walter Bright, creador del lenguaje D, lo resumió perfectamente en los comentarios de Hacker News: "Siempre que me han pedido revisar código C, he buscado `strncpy` y siempre he encontrado un bug con ella."
+
+## La campaña de erradicación
+
+Kees Cook, maintainer de seguridad del kernel, lideró esta cruzada. El trabajo empezó en 2020 y ha sido una guerra de desgaste: 362 parches tocando cada subsistema del kernel donde alguien había usado `strncpy` — drivers, filesystems, networking, crypto, arquitecturas.
+
+El soldado más condecorado es Justin Stitt, con 211 commits. Doscientas once veces que alguien tuvo que leer código ajeno, entender qué intentaba hacer el autor original con `strncpy` y reescribirlo con la alternativa correcta. Esto no es trabajo glamuroso. No sale en portadas. Pero es el tipo de ingeniería que hace que tu servidor no se caiga a las 3 de la mañana por un buffer mal terminado.
+
+## Las alternativas: una función para cada caso
+
+El kernel no ha eliminado `strncpy` para dejarte sin opciones. Al contrario: ahora tienes la herramienta correcta para cada situación. La documentación oficial del kernel (`deprecated.rst`) especifica los reemplazos:
+
+### strscpy() — strings terminadas en NUL
+
+La sucesora espiritual para el 95% de los casos. Garantiza terminación NUL, no rellena con ceros y devuelve el número de bytes copiados (o `-E2BIG` si trunca).
+
+```c
+char dest[16];
+ssize_t ret = strscpy(dest, "Hola, kernel", 16);
+// dest = "Hola, kernel\0"
+// ret = 12 (bytes copiados sin contar el NUL)
+// No hay relleno de ceros. El buffer está correctamente terminado.
+
+ret = strscpy(dest, "Esta string es demasiado larga para el buffer", 16);
+// dest = "Esta string es\0"  (15 chars + NUL)
+// ret = -E2BIG  (indica truncamiento, no un valor positivo)
+```
+
+La diferencia clave con `strncpy`: `strscpy` **siempre** termina con `\0` mientras quepa al menos 1 byte. Y el valor de retorno negativo te dice explícitamente que hubo truncamiento, algo que `strncpy` simplemente ocultaba.
+
+### strscpy_pad() — strings terminadas en NUL con relleno
+
+Para los pocos casos donde el zero-padding era intencionado (estructuras que se escriben a disco o se envían por red y necesitan tamaño fijo):
+
+```c
+char dest[32];
+strscpy_pad(dest, "sysfs", 32);
+// dest = "sysfs\0\0\0\0\0\0\0..." (27 ceros de relleno)
+// Garantiza terminación NUL + padding determinista.
+```
+
+### strtomem() y strtomem_pad() — campos de ancho fijo sin NUL
+
+Para los casos legacy donde el destino NO es una string C (arrays de ancho fijo como `utsname`):
+
+```c
+struct utsname {
+    char sysname[65];   // __nonstring: no necesita NUL
+    char nodename[65];
+    // ...
+};
+
+// Correcto para campos nonstring:
+strtomem_pad(uts.sysname, "Linux", sizeof(uts.sysname));
+// Copia "Linux" y rellena el resto con ceros.
+// No fuerza terminación NUL porque este campo no es una string C.
+```
+
+### memcpy() — cuando sabes la longitud exacta
+
+Si ya conoces el tamaño exacto de origen y destino, `memcpy` es la opción más simple y rápida:
+
+```c
+// src y dest tienen exactamente 32 bytes, sin NUL
+memcpy(dest, src, 32);
+```
+
+## Mi veredicto
+
+Esta noticia me parece importante por dos razones.
+
+La primera es técnica: `strncpy` era una bomba de relojería en la base de todo el software que corre el mundo. Cada kernel de Linux, cada driver, cada sistema embebido. Eliminarla del kernel es como quitar el cable pelado que llevaba 40 años detrás del frigorífico. No era glamuroso, pero alguien tenía que hacerlo.
+
+La segunda es cultural. Esto demuestra que el kernel de Linux no es ese monolito inmutable que se niega a cambiar. 70 personas dedicaron 6 años a arreglar un error de diseño de los años 80. No añadieron features. No optimizaron benchmarks. Simplemente hicieron el código más seguro, más claro y más rápido eliminando lo que sobraba. Como dijo un comentarista en HN: "No code is faster than no code."
+
+Si escribes C en 2026, hazte un favor: `strncpy` no existe. Usa `strscpy`. Tu yo del futuro te lo agradecerá cuando no esté depurando un overflow a las 2 de la mañana.
+
+## Referencias
+
+- [Merge commit en git.kernel.org](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=1a3746ccbb0a97bed3c06ccde6b880013b1dddc1)
+- [Phoronix: Linux Finally Eliminates The strncpy API](https://www.phoronix.com/news/Linux-7.2-Drops-strncpy)
+- [Kernel documentation: deprecated.rst](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/Documentation/process/deprecated.rst)
+- [Hacker News discussion](https://news.ycombinator.com/item?id=48612943)
