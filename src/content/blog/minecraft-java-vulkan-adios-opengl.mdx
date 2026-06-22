@@ -1,0 +1,140 @@
+---
+title: "Minecraft Java adopta Vulkan: adiós OpenGL"
+date: "2026-06-22T04:15"
+tags: ["vulkan", "opengl", "minecraft", "graficos", "rendering"]
+excerpt: "Minecraft Java Edition 26.2 introduce soporte experimental para Vulkan 1.2. El juego más vendido de la historia dice adiós a OpenGL. Te cuento por qué."
+---
+
+El 16 de junio de 2026, Mojang lanzó Minecraft Java Edition 26.2 con una línea en el changelog que hizo que medio Hacker News se girara: "Added experimental support for rendering the game through Vulkan".
+
+No es un cambio cosmético. Es el principio del fin de OpenGL en Minecraft Java Edition y el arranque de una migración que llevará el motor gráfico del juego más vendido de la historia a una API moderna. Vamos a desgranar qué implica esto, por qué es importante y qué significa para los jugadores y desarrolladores.
+
+## El contexto: OpenGL lleva años pidiendo la jubilación
+
+Minecraft Java Edition siempre ha usado OpenGL para renderizar. Concretamente, OpenGL 3.2 con algunas extensiones. Esto tiene sentido histórico: cuando Notch escribió el juego en 2009, OpenGL era la opción multiplataforma natural para Java (a través de LWJGL).
+
+Pero OpenGL tiene problemas estructurales que se han vuelto imposibles de ignorar:
+
+- **Modelo de estado global.** Todo en OpenGL es estado mutable compartido. Llamas a `glBindTexture()` y afecta a todo el pipeline. Esto hace que el driver tenga que adivinar tus intenciones constantemente.
+- **Validación en tiempo de dibujo.** El driver valida el estado en cada `glDraw*()`, lo que añade overhead incluso cuando todo es correcto.
+- **Sin control sobre la memoria de GPU.** OpenGL gestiona la memoria de vídeo como una caja negra. No sabes cuándo se asigna, cuándo se libera, ni cuánta queda.
+- **Hilos: uno y gracias.** OpenGL está diseñado para un solo hilo. En 2026, con CPUs de 16+ núcleos, esto es un desperdicio.
+
+Mojang lo sabe. En marzo de 2026 anunciaron su iniciativa "Vibrant Visuals" para Java Edition y dejaron claro que Vulkan era el camino.
+
+## ¿Qué trae exactamente la 26.2?
+
+La versión 26.2 introduce Vulkan como backend **experimental**. Esto es lo que incluye:
+
+- Una nueva opción "Graphics API" en Video Settings con tres valores: **Default**, **Prefer Vulkan (Experimental)** y **Prefer OpenGL**.
+- Por ahora, "Default" equivale a OpenGL. Vulkan hay que activarlo manualmente.
+- En macOS, usa **MoltenVK**, que traduce llamadas Vulkan a Metal.
+- Requiere **Vulkan 1.2** con soporte para *dynamic rendering* y *push descriptors*.
+- Bajo Vulkan, el juego prefiere la GPU dedicada sobre la integrada (algo que OpenGL no hacía).
+- Si Vulkan crashea al arrancar, el juego vuelve automáticamente a OpenGL.
+
+Es un despliegue conservador y tiene sentido. Migrar un motor gráfico de OpenGL a Vulkan no es cambiar cuatro banderas. Es reescribir cómo el juego habla con la GPU.
+
+## OpenGL vs Vulkan: no es una actualización, es otro paradigma
+
+Para entender la magnitud del cambio, comparemos cómo se dibuja un triángulo en cada API.
+
+### OpenGL: implícito y con estado global
+
+```c
+// OpenGL: todo es estado global implícito
+GLuint vao, vbo;
+glGenVertexArrays(1, &vao);
+glGenBuffers(1, &vbo);
+
+glBindVertexArray(vao);
+glBindBuffer(GL_ARRAY_BUFFER, vbo);
+glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, 0);
+glEnableVertexAttribArray(0);
+
+// El shader también es estado global
+glUseProgram(shader_program);
+
+// Dibujar: el driver valida todo el estado aquí
+glDrawArrays(GL_TRIANGLES, 0, 3);
+```
+
+Cada llamada modifica un estado global. El driver no sabe qué vas a hacer hasta que llamas a `glDrawArrays` y en ese momento valida todo el estado acumulado. Si algo falla, te enteras ahí.
+
+### Vulkan: explícito y prevalidado
+
+```c
+// Vulkan: todo se declara por adelantado
+// 1. Creas la pipeline de una vez (shaders, rasterizador, blending...)
+VkGraphicsPipelineCreateInfo pipelineInfo = {
+    .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+    .stageCount = 2,
+    .pStages = shaderStages,
+    .pVertexInputState = &vertexInputInfo,
+    .pInputAssemblyState = &inputAssembly,
+    .pRasterizationState = &rasterizer,
+    .pMultisampleState = &multisampling,
+    .pColorBlendState = &colorBlending,
+    .layout = pipelineLayout,
+    .renderPass = renderPass,
+};
+
+vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &pipeline);
+
+// 2. El render pass y los framebuffers se configuran explícitamente
+// 3. Los command buffers se graban una vez y se reutilizan
+VkCommandBufferBeginInfo beginInfo = {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
+};
+
+vkBeginCommandBuffer(commandBuffer, &beginInfo);
+vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+vkCmdEndRenderPass(commandBuffer);
+vkEndCommandBuffer(commandBuffer);
+
+// 4. El envío a la GPU es explícito
+vkQueueSubmit(graphicsQueue, 1, &submitInfo, fence);
+```
+
+La diferencia es abismal. Vulkan te obliga a especificar todo por adelantado: la pipeline, los recursos, las dependencias. El driver valida en el momento de crear la pipeline, no en cada draw call. Esto elimina el overhead de validación por frame.
+
+## Lo que esto significa para Minecraft
+
+Minecraft es un caso particularmente interesante para Vulkan por varias razones:
+
+### 1. Miles de draw calls por chunk
+
+Cada chunk de Minecraft (16×16×384 bloques) puede generar cientos de caras visibles. Con OpenGL, cada una es una draw call con su validación correspondiente. Con Vulkan, puedes agrupar geometría en un solo command buffer pre-grabado y enviarlo sin revalidar.
+
+### 2. Gestión de memoria predecible
+
+Minecraft carga y descarga chunks constantemente según te mueves. Con OpenGL, cada carga de chunk implica asignaciones de buffers y texturas que el driver gestiona de forma opaca. Con Vulkan, Mojang puede implementar su propio asignador de memoria GPU, reutilizando bloques y evitando fragmentación.
+
+### 3. Renderizado multihilo real
+
+Vulkan permite grabar command buffers desde múltiples hilos. Imagina un hilo por chunk generando su geometría y preparando sus comandos de dibujo en paralelo. Con OpenGL esto es imposible sin malabares.
+
+### 4. MoltenVK en macOS
+
+Apple deprecó OpenGL en 2018 y solo soporta Metal. Minecraft en Mac llevaba años funcionando sobre una capa de compatibilidad OpenGL→Metal mantenida por el sistema, con rendimiento mediocre. MoltenVK (Vulkan→Metal) es un proyecto maduro mantenido por Khronos y Valve que ofrece mucho mejor rendimiento.
+
+## Mi opinión
+
+Llevo años esperando este movimiento. Minecraft es el juego perfecto para demostrar las ventajas de Vulkan: no es un AAA con gráficos fotorrealistas, es un juego donde la CPU sufre generando geometría procedural constante. El overhead de validación de OpenGL se come ciclos que podrían usarse en generar chunks más rápido.
+
+Dicho esto, hay que ser realistas. Esto es experimental. La versión 26.2 es un primer paso y el camino hasta que Vulkan sea el backend por defecto va a ser largo. Migrar un motor gráfico de 15 años no se hace en un sprint.
+
+Lo que más me ilusiona es lo que viene después. Una vez que el motor esté en Vulkan, se abren posibilidades que con OpenGL eran inviables: ray tracing para iluminación global, compute shaders para simulación de fluidos, mesh shaders para geometría procedural más eficiente... El futuro visual de Minecraft acaba de dar un giro de 180 grados.
+
+Si tienes Minecraft Java Edition, puedes probarlo ya: ve a Video Settings → Graphics API → Prefer Vulkan (Experimental). No esperes milagros todavía, pero sí un vistazo al futuro del juego.
+
+## Referencias
+
+- [Minecraft Java Edition 26.2 changelog](https://www.minecraft.net/en-us/article/minecraft-java-edition-26-2)
+- [Another step towards Vibrant Visuals for Java Edition](https://www.minecraft.net/en-us/article/another-step-towards-vibrant-visuals-for-java-edition)
+- [Hacker News discussion](https://news.ycombinator.com/item?id=48567028)
