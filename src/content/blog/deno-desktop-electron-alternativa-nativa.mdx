@@ -1,0 +1,135 @@
+---
+title: "Deno Desktop: la alternativa a Electron que no usa IPC"
+date: "2026-06-22T10:00"
+tags: ["deno", "electron", "tauri", "typescript", "desktop"]
+excerpt: "Deno 2.9 trae consigo deno desktop, una forma de convertir cualquier proyecto TypeScript en una app de escritorio nativa. Sin IPC, con bindings en el mismo proceso y tres backends a elegir."
+---
+
+Hace unos días, el equipo de Deno publicó la documentación de **deno desktop**, una funcionalidad que llegará en Deno 2.9 y que permite convertir cualquier proyecto Deno —desde un simple `Deno.serve()` hasta una app Next.js completa— en una aplicación de escritorio autocontenida. El binario resultante empaqueta tu código, el runtime de Deno y un motor de renderizado web en un solo ejecutable por plataforma.
+
+La noticia saltó a Hacker News con 385 puntos y 162 comentarios y no es para menos: Deno está entrando directamente al territorio que Electron y Tauri llevan años ocupando, pero con decisiones de arquitectura que cambian las reglas del juego.
+
+## El problema que Deno Desktop resuelve
+
+Electron domina el escritorio con tecnología web desde 2013. Slack, VS Code, Discord, Figma —todas son apps Electron. Pero el modelo tiene costes conocidos: binarios enormes (Chromium entero por cada app), comunicación por IPC entre el proceso principal y el renderer y una curva de configuración que puede ser frustrante.
+
+Tauri mejoró el tamaño al usar el webview del sistema operativo y escribir el backend en Rust, pero introduce su propio coste: tienes que saber Rust (o depender de alguien que lo sepa), la comunicación sigue siendo IPC y pierdes acceso al ecosistema npm/Node directamente.
+
+Deno Desktop aborda estos tres problemas de golpe:
+
+1. **Binarios pequeños por defecto** usando el webview nativo del SO, con opción de empaquetar Chromium (CEF) solo si necesitas renderizado idéntico entre plataformas.
+2. **Bindings en el mismo proceso**, sin round-trip de IPC.
+3. **Ecosistema npm completo** gracias a la capa de compatibilidad Node de Deno.
+
+## Tres backends, tres filosofías
+
+Deno Desktop ofrece tres backends de renderizado. La elección define el tamaño del binario, la consistencia visual y las capacidades disponibles:
+
+| Backend | Motor | Tamaño | Consistencia |
+|---------|-------|--------|--------------|
+| **WebView** (por defecto) | WKWebView / WebView2 / WebKitGTK | ~5-10 MB | Varía por SO |
+| **CEF** | Chromium Embedded Framework | ~150 MB | Idéntica en los 3 SO |
+| **Raw** | Sin UI | Mínimo | N/A (headless) |
+
+El backend **WebView** usa el motor nativo de cada sistema: WKWebView en macOS, WebView2 en Windows y WebKitGTK en Linux. El binario pesa poco —tu código más un shim— pero algunas features web pueden comportarse distinto según la versión del SO.
+
+El backend **CEF** empaqueta el Chromium Embedded Framework, el mismo motor que usa Chrome, Electron y Slack. Pesa unos 150 MB extra, pero garantiza que tu app se vea exactamente igual en macOS, Windows y Linux. También es el único backend que soporta los DevTools unificados de Deno.
+
+El backend **Raw** es para apps sin interfaz gráfica —servicios, daemons, workers— que necesitan empaquetarse como ejecutable de escritorio pero no muestran ventanas.
+
+## La killer feature: bindings sin IPC
+
+Esta es la decisión técnica que más me interesa. En Electron, la comunicación entre el proceso principal (Node) y el renderer (Chromium) pasa por `ipcMain`/`ipcRenderer`, que serializa los datos y los manda a través de sockets. Cada llamada implica un round-trip entre procesos.
+
+En Deno Desktop, el runtime de Deno y el backend de renderizado viven como hilos o procesos dentro del mismo espacio de direcciones (en CEF) o como grupo de procesos coordinado (en WebView). Las llamadas van por canales *in-process*, despachadas desde el run loop del backend. No hay round-trip.
+
+En la práctica, se ve así:
+
+```typescript
+// Lado Deno — expones funciones al webview
+const win = new Deno.BrowserWindow();
+
+win.bind("leerConfig", async () => {
+  const texto = await Deno.readTextFile("config.json");
+  return JSON.parse(texto);
+});
+
+win.bind("guardarConfig", async (config) => {
+  await Deno.writeTextFile(
+    "config.json",
+    JSON.stringify(config, null, 2)
+  );
+});
+```
+
+```typescript
+// Lado webview — llamas a las funciones expuestas
+const config = await bindings.leerConfig();
+config.tema = "oscuro";
+await bindings.guardarConfig(config);
+```
+
+Los argumentos y valores de retorno se codifican al cruzar la frontera Deno-webview, pero no hay round-trip entre procesos. Esto es más rápido y más simple que el modelo IPC de Electron o el `invoke` de Tauri.
+
+## Detección automática de frameworks
+
+Otra decisión interesante: Deno Desktop detecta automáticamente el framework que estás usando. Apuntas `deno desktop` a un proyecto Next.js, Astro, Fresh, Remix, Nuxt, SvelteKit, SolidStart, TanStack Start o Vite SSR y simplemente funciona:
+
+```bash
+# Modo producción: sirve el build de producción
+deno desktop
+
+# Modo desarrollo: HMR activo, recarga en caliente
+deno desktop --hmr
+```
+
+No necesitas cambiar nada en tu código. El servidor de producción se usa en modo release y el dev server con hot reload bajo `--hmr`. Esto baja la barrera de entrada a cero para proyectos web existentes.
+
+## Configuración desde deno.json
+
+Toda la configuración vive en el bloque `desktop` de `deno.json`. Un ejemplo mínimo:
+
+```json
+{
+  "name": "mi-app",
+  "version": "1.0.0",
+  "desktop": {
+    "app": {
+      "name": "Mi App",
+      "identifier": "com.ejemplo.miapp"
+    },
+    "backend": "webview",
+    "release": {
+      "baseUrl": "https://miapp.com/updates"
+    }
+  }
+}
+```
+
+Desde aquí controlas el nombre de la app, el identificador de bundle, los iconos, el backend, la identidad de code signing para macOS y la URL base para auto-updates.
+
+## Auto-update con bsdiff
+
+Deno Desktop incluye un sistema de actualización automática basado en parches binarios diferenciales (bsdiff). Publicas un manifiesto `latest.json` y los parches; el runtime sondea, aplica el parche y hace rollback automático si el lanzamiento falla. Esto es algo que Electron no ofrece out-of-the-box y que en Tauri requiere configuración manual.
+
+## Permisos compilados en el binario
+
+El sistema de permisos de Deno —una de sus mayores fortalezas de seguridad— se integra directamente: los permisos que concedes en tiempo de compilación quedan grabados en el binario. No hay prompts en runtime. Si tu app necesita leer archivos, el permiso `--allow-read` se hornea en el ejecutable y punto. Esto es más seguro y más predecible que el modelo de Electron, donde el proceso principal tiene acceso total al sistema.
+
+## Cross-compilación desde una sola máquina
+
+Compilas para macOS, Windows y Linux desde la misma máquina. Los backends se descargan según necesidad, no se compilan localmente. Esto elimina una de las partes más dolorosas del desarrollo de escritorio multiplataforma.
+
+## Mi veredicto
+
+Deno Desktop me parece el movimiento más inteligente del equipo de Deno desde `deno compile`. Están atacando un mercado maduro (apps de escritorio con tecnología web) con una propuesta que no es "otro Electron más ligero", sino una re-arquitectura real del modelo de comunicación.
+
+Los bindings in-process son la decisión correcta. El IPC de Electron fue una solución pragmática en 2013, cuando Chromium y Node vivían en procesos separados por diseño de seguridad. Pero en 2026, con motores como CEF que permiten integración en el mismo espacio de direcciones, mantener el IPC por inercia es absurdo. Deno lo elimina y punto.
+
+La detección automática de frameworks también es un acierto. No intentan crear "el framework de Deno para desktop" —simplemente hacen que tu framework actual funcione. Es pragmatismo bien entendido.
+
+Dicho esto, hay que ser justos con Tauri. Tauri sigue teniendo ventajas reales: su backend en Rust te da acceso a un ecosistema nativo que Deno no puede igualar con FFI y su modelo de seguridad basado en CSP + isolation pattern es más granular que los permisos baked-in de Deno. Si necesitas Rust en tu stack, Tauri sigue siendo la opción correcta.
+
+Para el resto de casos —y sospecho que son la mayoría— Deno Desktop baja la barrera de entrada a niveles que ni Electron ni Tauri han conseguido. Un solo comando, TypeScript real (no strip-types como Node), sin IPC, con auto-update incluido. Así debería haber sido siempre.
+
+Eso sí, está en canary. No lo uses en producción todavía. Pero pinta muy bien.
