@@ -1,0 +1,142 @@
+---
+title: "El bug de Codex que te fríe el SSD: 640 TB de logs al año"
+date: "2026-06-22T16:00"
+tags: ["openai", "codex", "sqlite", "ssd", "debugging"]
+excerpt: "Un bug en OpenAI Codex escribe ~640 TB/año en logs SQLite con nivel TRACE. Así puedes detectarlo, mitigarlo y evitar que tu SSD muera antes de tiempo."
+---
+
+El 14 de junio de 2026, un usuario de GitHub llamado vantareed abrió una issue en el repo de OpenAI Codex con un título que parece sacado de una pesadilla de infraestructura: el agente de código de OpenAI estaba escribiendo aproximadamente **640 terabytes al año** en logs locales de SQLite. En su SSD de 1 TB, tras solo 21 días de uptime, el disco había registrado 37 TB de escrituras.
+
+No es un cálculo exagerado. Los números están respaldados con datos forenses de la propia base de datos SQLite que Codex mantiene en `~/.codex/logs_2.sqlite`. Vamos a desgranar qué está pasando, cómo saber si te afecta y qué puedes hacer mientras OpenAI no publica el fix.
+
+## El problema: TRACE global por defecto
+
+Codex usa SQLite como almacén local de logs de feedback. La idea es razonable: tener un registro de lo que hace el agente para depuración y telemetría. El problema es **cómo** está configurado el nivel de log.
+
+El sink de SQLite se inicializa con nivel `TRACE` global. En la práctica esto significa que **cada evento interno** —websockets, streaming SSE, transporte de red, eventos del core— se serializa y se escribe a disco. Constantemente. Sin límite.
+
+Los datos del issue son demoledores. Sobre una muestra de 681.774 filas retenidas (1.035 MiB de contenido), la distribución por nivel es:
+
+| Nivel   | MiB estimados | Porcentaje |
+|---------|---------------|------------|
+| TRACE   | 732.5         | 70.7%      |
+| INFO    | 266.5         | 25.7%      |
+| DEBUG   | 30.6          | 3.0%       |
+| WARN    | 5.9           | 0.6%       |
+
+El 70.7% son eventos TRACE. Si a eso le sumas las filas de `codex_otel.log_only` y `codex_otel.trace_safe` (que son básicamente duplicados de telemetría en nivel INFO), tienes el **96% del volumen** que sobra por completo.
+
+Los principales emisores de ruido:
+
+- `codex_api::endpoint::responses_websocket` (TRACE): 527.4 MiB
+- `codex_otel.log_only` (INFO): 141.2 MiB
+- `codex_otel.trace_safe` (INFO): 121.2 MiB
+- `log` (TRACE): 97.4 MiB
+- `codex_client::transport` (TRACE): 60.1 MiB
+
+Traducido: Codex está volcando a disco cada payload de websocket, cada evento de streaming SSE y cada latido de telemetría. Todo el rato.
+
+## Cómo saber si tu máquina está afectada
+
+Lo primero es comprobar cuánto han crecido los archivos de log:
+
+```bash
+# Tamaño de los archivos de log de Codex
+du -sh ~/.codex/logs_2.sqlite* 2>/dev/null
+
+# Si quieres ver el total de escrituras en tu SSD (Linux)
+# Busca el dispositivo de tu $HOME primero con df -h ~
+# Luego comprueba los sectores escritos:
+sudo smartctl -A /dev/nvme0n1 | grep -i "data_units_written"
+```
+
+En macOS puedes usar `smartctl` igual (instálalo con `brew install smartmontools`) o mirar directamente el tamaño de los archivos WAL, que suelen ser el termómetro más inmediato:
+
+```bash
+# El WAL (Write-Ahead Log) es el que más crece en escrituras continuas
+ls -lh ~/.codex/logs_2.sqlite-wal
+```
+
+Si el WAL pesa cientos de MB o varios GB, estás dentro del grupo de afectados. En una máquina sana, ese archivo no debería superar unas decenas de MB.
+
+## Mitigación mientras llega el fix oficial
+
+La comunidad ya ha propuesto parches. El usuario 1996fanrui publicó una rama con un cambio mínimo: reemplazar el nivel TRACE global por un filtro sensato. La propuesta es:
+
+```text
+warn,codex_api=info,codex_app_server=info,codex_core=info,codex_mcp=info,codex_state=info,codex_tui=info
+```
+
+Esto reduce el volumen retenido en aproximadamente un 96% sin desactivar los logs de feedback. Pero mientras OpenAI no mergea el PR, hay dos scripts de mitigación que puedes usar hoy.
+
+El primero, publicado por ZenulAbidin en el hilo, recorta el WAL sin matar procesos de Codex:
+
+```bash
+#!/usr/bin/env bash
+# trim-codex-wal.sh — Recorta el WAL de Codex de forma segura
+set -u
+
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+DB="$CODEX_DIR/logs_2.sqlite"
+WAL="$CODEX_DIR/logs_2.sqlite-wal"
+SHM="$CODEX_DIR/logs_2.sqlite-shm"
+
+human() {
+  numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "$1 bytes"
+}
+
+before=$(stat -c '%s' "$WAL" 2>/dev/null || echo 0)
+echo "WAL antes: $(human "$before")"
+
+# Forzar checkpoint y truncar WAL
+sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);"
+
+after=$(stat -c '%s' "$WAL" 2>/dev/null || echo 0)
+echo "WAL después: $(human "$after")"
+echo "Liberado: $(human $((before - after)))"
+```
+
+El segundo enfoque es más drástico pero efectivo si no tienes Codex corriendo: simplemente haz un `VACUUM` sobre la base de datos para reclamar espacio de páginas libres:
+
+```bash
+#!/usr/bin/env bash
+# compact-codex-db.sh — Compacta la BD de logs de Codex
+set -u
+
+DB="$HOME/.codex/logs_2.sqlite"
+
+if [ ! -f "$DB" ]; then
+  echo "No se encuentra $DB"
+  exit 1
+fi
+
+before=$(stat -c '%s' "$DB" 2>/dev/null || echo 0)
+echo "Tamaño antes: $(numfmt --to=iec --suffix=B "$before")"
+
+sqlite3 "$DB" "PRAGMA incremental_vacuum;"
+
+after=$(stat -c '%s' "$DB" 2>/dev/null || echo 0)
+echo "Tamaño después: $(numfmt --to=iec --suffix=B "$after")"
+```
+
+Ojo: el `VACUUM` requiere espacio libre en disco equivalente al tamaño de la BD, así que si ya estás justo de espacio, mejor usa solo el script de checkpoint.
+
+## El riesgo real: no es solo espacio en disco
+
+ZenulAbidin señaló algo importante en el hilo: esto no va solo de quedarte sin espacio. Codex en modo `/goal` —cuando le pides un objetivo y él ejecuta autónomamente— **borra archivos y carpetas** para liberar espacio si detecta que el disco está lleno. Si los logs de Codex son los que han llenado el disco, Codex puede acabar borrando tus cosas para hacer sitio a sus propios logs. El perro que se muerde la cola.
+
+Además, en sistemas Linux, un disco lleno puede provocar fallos de login en el siguiente arranque si servicios esenciales no pueden escribir. No es una molestia menor: es un riesgo de pérdida de datos real.
+
+## Mi veredicto
+
+Esto es un error de libro. Adjuntar un sink de logs persistente con nivel TRACE global es lo primero que cualquier desarrollador con experiencia en observabilidad te dice que no hagas. TRACE existe para depuración puntual, no para volcado continuo a disco.
+
+Lo que más me chirría no es el bug en sí —todos los proyectos tienen bugs— sino la respuesta. La issue lleva abierta desde el 14 de junio. Hay **tres ramas públicas** con el fix (dos de ellas listas para PR), el cambio son literalmente cuatro líneas, y a día de hoy no se ha mergeado nada. Mientras tanto, miles de desarrolladores están friendo sus SSDs sin saberlo.
+
+El fix es trivial: cambiar `Level::TRACE` por un filtro con niveles WARN por defecto e INFO para los crates principales. No rompe nada, no desactiva funcionalidad, no requiere migración de datos. Es un cambio de configuración que cualquier junior podría hacer en cinco minutos.
+
+Si usas Codex, revisa ya tus logs. Y si trabajas en OpenAI leyendo esto: mergead el maldito PR.
+
+---
+
+**Fuente**: [Issue #28224 en openai/codex](https://github.com/openai/codex/issues/28224) — "Codex SQLite feedback logs can write ~640 TB/year and rapidly consume SSD endurance"
