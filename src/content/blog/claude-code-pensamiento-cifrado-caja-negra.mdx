@@ -1,0 +1,117 @@
+---
+title: "Claude Code oculta su razonamiento: lo que ves no es real"
+date: "2026-06-22T22:25"
+tags: ["claude-code", "anthropic", "ia", "transparencia", "agentes"]
+excerpt: "Los bloques de 'extended thinking' en Claude Code no son el razonamiento real del modelo, sino un resumen. El original está cifrado y Anthropic tiene la llave."
+---
+
+El fin de semana pasado Patrick McCanna, un desarrollador que usa Claude Code a diario, hizo algo que muchos hemos pensado hacer pero pocos hacemos: fue a mirar los logs de sesión que Claude Code guarda en disco. Quería ver el razonamiento real del modelo durante una sesión de trabajo. Lo que encontró no era texto, sino una firma cifrada de 600 caracteres.
+
+Y entonces leyó la documentación.
+
+## Lo que dicen los logs (y lo que no)
+
+Claude Code guarda cada sesión en disco. Entre los datos que persiste hay "bloques de pensamiento" (*thinking blocks*), que en teoría contienen el razonamiento interno del modelo mientras trabaja. Cuando pulsas `Ctrl+O` en Claude Code, ves ese razonamiento desplegarse en pantalla. Parece que estás viendo los engranajes internos del modelo.
+
+Pero no es así.
+
+Lo que muestran esos bloques no es el razonamiento original. Es un **resumen** generado *a posteriori*. El pensamiento real está cifrado dentro de una firma criptográfica y Anthropic tiene la llave. Tu máquina nunca recibe el texto original.
+
+La documentación de la API de Anthropic lo dice, aunque con un lenguaje que requiere café y atención:
+
+> *"Extended thinking returns a summary of Claude's full thinking process."*
+
+No es el proceso de pensamiento completo. Es un resumen del proceso de pensamiento completo.
+
+## Cómo funciona técnicamente
+
+Cuando habilitas *extended thinking* en la API de Claude, la respuesta incluye bloques de contenido con este formato:
+
+```json
+{
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "Let me analyze this step by step...",
+      "signature": "WaUjzkypQ2mUEVM36O2TxuC06KN8xyfbJwyem2dw3URve/op91X..."
+    }
+  ]
+}
+```
+
+El campo `thinking` contiene el resumen. El campo `signature` es un blob cifrado que contiene el razonamiento real. Sin la clave de Anthropic, ese blob es opaco. No puedes verificarlo, no puedes auditarlo, no puedes inspeccionarlo.
+
+La firma sirve para que Anthropic pueda **verificar** que el resumen se corresponde con el pensamiento original, pero tú no puedes hacer esa verificación. Es como si te dieran un cheque con la firma del banco pero no te dejaran mirar el saldo de la cuenta.
+
+## Por qué esto importa
+
+Imagina este escenario: tu agente de Claude Code toma una decisión catastrófica en producción. Borra una base de datos, expone una clave API, hace un `rm -rf /` en el servidor equivocado. Vas a los logs a investigar qué ha pasado. Quieres entender **por qué** el modelo tomó esa decisión.
+
+Los logs te muestran un resumen del razonamiento. Pero ese resumen fue generado después de que el modelo ya hubiera actuado. Es una racionalización *post-hoc*, no la cadena de pensamiento que realmente guió la acción.
+
+Es la diferencia entre leer las notas que un piloto tomó durante un vuelo y leer el informe que escribió después del aterrizaje. Las notas capturan dudas, correcciones de rumbo, momentos de incertidumbre. El informe lo pule todo.
+
+## No es solo Anthropic
+
+Esto no es exclusivo de Anthropic. OpenAI hace lo mismo con sus modelos. Google también. La razón oficial es doble:
+
+1. **Proteger la propiedad intelectual**: el razonamiento en bruto es valiosísimo para entrenar modelos competidores mediante destilación.
+2. **Prevenir usos maliciosos**: un razonamiento visible podría revelar cómo manipular al modelo o exponer sesgos explotables.
+
+La razón no oficial, que flota en los comentarios de Hacker News, es más cínica: las empresas de IA han descubierto que la cadena de pensamiento es su foso competitivo (*moat*). Si publicaran el razonamiento real, cualquiera podría destilar un modelo competitivo en semanas.
+
+## El problema de la auditabilidad
+
+Si usas Claude Code en un entorno empresarial, esto tiene implicaciones serias. Muchas empresas están adoptando agentes de IA para tareas cada vez más críticas. Cuando algo sale mal, necesitas una pista de auditoría.
+
+Con el sistema actual:
+
+- No puedes demostrar **por qué** el agente tomó una decisión
+- No puedes verificar que el resumen coincide con el razonamiento real
+- No puedes detectar si el modelo fue víctima de un *prompt injection* que alteró su razonamiento
+- No puedes cumplir con requisitos de *compliance* que exijan trazabilidad completa
+
+Anthropic ofrece acceso al razonamiento completo solo mediante acuerdos enterprise. Es decir, tienes que pagar (y probablemente firmar NDAs) para ver lo que tu propio agente está pensando.
+
+## ¿Qué puedes hacer mientras tanto?
+
+Si necesitas trazabilidad hoy, hay enfoques pragmáticos:
+
+### 1. Registrar entradas y salidas
+
+No puedes ver el razonamiento interno, pero sí puedes registrar todo lo que entra y sale del modelo:
+
+```bash
+# Captura la salida completa de una sesión de Claude Code
+# Claude Code permite redirigir su salida estándar a un archivo
+claude 2>&1 | tee session-$(date +%s).log
+```
+
+Esto te da un registro de prompts, respuestas y tool calls. No es el razonamiento, pero es mejor que nada.
+
+### 2. Pedir al modelo que externalice su razonamiento
+
+Puedes instruir al modelo para que escriba su razonamiento en un archivo antes de actuar:
+
+```
+Antes de ejecutar cualquier comando, escribe tu razonamiento completo
+en /tmp/audit-log.md. Incluye por qué eliges esta acción sobre las alternativas.
+```
+
+No es infalible (el modelo podría racionalizar *post-hoc* igual que el resumen), pero añade una capa de trazabilidad.
+
+### 3. Usar modelos open-source para tareas críticas
+
+Modelos como DeepSeek o Qwen, cuando se ejecutan localmente, te dan acceso completo a los tokens de razonamiento. No hay cifrado, no hay resúmenes, no hay llaves que no tengas. El coste es que necesitas hardware para ejecutarlos y la calidad puede ser inferior.
+
+## Mi opinión
+
+Entiendo por qué Anthropic cifra el razonamiento. La destilación es una amenaza real para su negocio. Pero la forma en que lo comunican me parece deliberadamente opaca.
+
+El texto "extended thinking returns a summary of Claude's full thinking process" está enterrado en la documentación de la API, no en la interfaz de Claude Code. La mayoría de desarrolladores que usan `Ctrl+O` para ver el pensamiento del modelo no tienen ni idea de que están viendo un resumen, no el original.
+
+Creo que esto es un problema de expectativas, no de tecnología. Si Anthropic dijera claramente en la UI "esto es un resumen del razonamiento, no el razonamiento original", la conversación sería distinta. Pero al llamarlo "extended thinking" y mostrarlo como si fuera el pensamiento en bruto, crean una expectativa de transparencia que luego no cumplen.
+
+Para mí, la lección es clara: no trates a los agentes de IA como si fueran auditables. No lo son. Si necesitas una pista de auditoría real para decisiones críticas, o ejecutas modelos open-source localmente, o diseñas tu sistema para no depender de la trazabilidad del razonamiento interno.
+
+El pensamiento de tu agente no es tuyo. Es de Anthropic. Y ellos tienen la llave.
