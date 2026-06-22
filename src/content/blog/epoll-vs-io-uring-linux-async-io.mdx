@@ -121,6 +121,11 @@ Aquí tienes el mismo servidor echo, pero con io_uring y liburing:
 #define QDEPTH    256
 #define BUFSZ     4096
 
+struct conn {
+    int fd;
+    char buf[BUFSZ];
+};
+
 static void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
 }
@@ -149,28 +154,37 @@ int main(void) {
         struct io_uring_cqe *cqe;
         io_uring_wait_cqe(&ring, &cqe);
 
-        int fd = cqe->res;  // resultado: fd del cliente o bytes leídos
-        if (fd >= 0 && cqe->user_data == 0) {
+        int res = cqe->res;
+        if (res >= 0 && cqe->user_data == 0) {
             // Accept completado — encolar read + siguiente accept
-            set_nonblocking(fd);
+            int client_fd = res;
+            set_nonblocking(client_fd);
 
             sqe = io_uring_get_sqe(&ring);
             io_uring_prep_accept(sqe, listen_fd, NULL, NULL, 0);
             io_uring_sqe_set_data(sqe, (void *)0);
 
+            struct conn *c = malloc(sizeof(*c));
+            c->fd = client_fd;
             sqe = io_uring_get_sqe(&ring);
-            char *buf = malloc(BUFSZ);
-            io_uring_prep_read(sqe, fd, buf, BUFSZ, 0);
-            io_uring_sqe_set_data(sqe, (void *)(intptr_t)fd);
+            io_uring_prep_read(sqe, client_fd, c->buf, BUFSZ, 0);
+            io_uring_sqe_set_data(sqe, c);
 
             io_uring_submit(&ring);
-        } else if (fd > 0 && cqe->user_data != 0) {
+        } else if (res > 0 && cqe->user_data != 0) {
             // Read completado — encolar write (echo)
-            int client = (int)(intptr_t)cqe->user_data;
+            struct conn *c = (struct conn *)cqe->user_data;
             sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_write(sqe, client, NULL, fd, 0);
-            io_uring_sqe_set_data(sqe, (void *)(intptr_t)client);
+            io_uring_prep_write(sqe, c->fd, c->buf, res, 0);
+            io_uring_sqe_set_data(sqe, c);
             io_uring_submit(&ring);
+        } else {
+            // Error o cierre — liberar conexión
+            if (cqe->user_data != 0) {
+                struct conn *c = (struct conn *)cqe->user_data;
+                close(c->fd);
+                free(c);
+            }
         }
 
         io_uring_cqe_seen(&ring, cqe);
